@@ -545,6 +545,36 @@ impl State<'_> {
     }
 }
 
+/// What one entry off the conversation's path spent, as its own `tokens`: an assistant's
+/// answer, and in pi also a tool's result and pi's own summaries and `usage` entries. Each
+/// is named by its entry's id, as on the path, so a response said twice counts once.
+pub fn spent(reading: &Reading, record: &Value) -> Option<Event> {
+    let id = text(record, "id")?;
+    let at = text(record, "timestamp").and_then(millis).unwrap_or(0);
+    let pi = reading.harness == Harness::Pi;
+    match text(record, "type")? {
+        "message" => {
+            let message = record.get("message")?;
+            let usage = message.get("usage")?;
+            match text(message, "role")? {
+                "assistant" => Some(tokens(at, id, message, usage)),
+                "toolResult" if pi => {
+                    let at = message
+                        .get("timestamp")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(at);
+                    Some(tokens(at, id, message, usage))
+                }
+                _ => None,
+            }
+        }
+        "compaction" | "branch_summary" | "usage" if pi => {
+            Some(tokens(at, id, record, record.get("usage")?))
+        }
+        _ => None,
+    }
+}
+
 /// One response's `usage`: `input` counts what the model read, the cache's reads and
 /// writes included; `cacheWrite1h` is part of `cacheWrite`, and `totalTokens` the sum.
 fn tokens(at: u64, response: &str, message: &Value, usage: &Value) -> Event {
