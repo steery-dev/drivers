@@ -13,18 +13,19 @@
 //! omp only as one of its own catalog's entries.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Act, Ended, Feed, Held, HeldBy, Launch, Look, Model, Models, ReadAs, Reader, ReaderPlan,
-    ReaderTools, Start, Stdin, Stream, Terminal, TerminalCommand, TurnLine, TurnRead, TurnState,
+    Act, Ended, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Model, Models, ReadAs,
+    Reader, ReaderFile, ReaderPlan, ReaderTools, Sample, Sampled, Start, Stdin, Stream, Terminal,
+    TerminalCommand, TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
-use crate::transcripts;
+use crate::transcripts::{self, Store};
 
 /// How long `omp models` has to answer `models`: omp took over 20 s on a Mac that had
 /// just started and was swapping.
@@ -33,18 +34,43 @@ const LISTED_WITHIN: Duration = Duration::from_secs(25);
 const A_TURN_WAITS: Duration = Duration::from_secs(8);
 /// How long a list answers a `start` without asking omp again.
 const KEPT: Duration = Duration::from_secs(600);
+/// The file a reader is asked through, in its private folder.
+const ASKED: &str = "asked.txt";
 
 /// `held`: omp keeps no registry of its own, so the runtime looks for an omp process
-/// holding the transcript open, and asks the plugin door.
-pub fn held(root: &Path, held: Held) -> Result<HeldBy, Error> {
-    let transcript =
-        transcripts::find(root, &held.external_id).ok_or_else(|| missing(&held.external_id))?;
-    Ok(HeldBy::Look {
+/// holding the transcript open or naming it, and asks the plugin door. Every omp process
+/// holds its conversation's transcript open, so none holds one without.
+pub fn held(store: &Store, held: Held) -> HeldBy {
+    HeldBy::Look(Looked {
         look: Look {
-            transcript,
-            executables: vec!["omp".into()],
+            transcripts: store.transcripts(&held.external_id),
+            strays: false,
         },
     })
+}
+
+/// `idle`: omp writes nothing that says a conversation is running but its plugin door, and
+/// the runtime reads the door itself. Without one, a conversation omp has on disk is idle
+/// exactly where no process holds it.
+pub fn idle(store: &Store, held: Held) -> Sampled {
+    let observed_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|now| u64::try_from(now.as_millis()).ok())
+        .unwrap_or_default();
+    Sampled {
+        sample: (!store.transcripts(&held.external_id).is_empty()).then_some(Sample {
+            state: Execution::Finished,
+            observed_at,
+            started_at: None,
+            ended_at: None,
+            model: None,
+            thinking: None,
+            error: None,
+            vacant: true,
+            if_unheld: true,
+        }),
+    }
 }
 
 /// omp's catalog as `omp models --json` lists it, and when it was listed last.
@@ -54,20 +80,25 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// `models`: every model omp has a sign-in for, as it lists them. omp that will not
-    /// list is no list, and says why on standard error.
-    pub async fn list(&self) -> Models {
-        let models = match self.ask(LISTED_WITHIN).await {
-            Ok(models) => models,
-            Err(why) => {
-                eprintln!("omp models: {why}");
-                Vec::new()
-            }
-        };
-        Models {
+    /// `models`: every model omp has a sign-in for, as it lists them, the default its
+    /// `config.yml` names first, and the files whose change changes the list. A list omp
+    /// will not give is refused with why.
+    pub async fn list(&self, home: &Path, root: &Path) -> Result<Models, Error> {
+        let mut models = self
+            .ask(LISTED_WITHIN)
+            .await
+            .map_err(|why| Error::refused(refusal::REFUSED, why))?;
+        if let Some(default) = default_model(root, &models)
+            && let Some(at) = models.iter().position(|offer| offer.model == default)
+        {
+            let offer = models.remove(at);
+            models.insert(0, offer);
+        }
+        Ok(Models {
             models,
             unlisted: None,
-        }
+            watch: watched(home, root),
+        })
     }
 
     /// Whether omp runs `model` as itself: one of its catalog's entries, which its
@@ -111,8 +142,9 @@ impl Catalog {
     }
 }
 
-/// `{"models": [{provider, id, selector, name, thinking}]}`: each by its selector,
-/// `provider/id`, which is what `--model` takes exactly.
+/// `{"models": [{provider, id, selector, name, thinking, cost}]}`: each by its selector,
+/// `provider/id`, which is what `--model` takes exactly, at `cost.input` dollars per
+/// million input tokens where omp prices it.
 fn offers(listed: &Value) -> Result<Vec<Model>, String> {
     let rows = listed
         .get("models")
@@ -143,6 +175,10 @@ fn offers(listed: &Value) -> Result<Vec<Model>, String> {
                     .collect::<Result<Vec<_>, _>>()?,
                 _ => return Err("omp model has invalid thinking levels".to_owned()),
             };
+            let cost = row
+                .pointer("/cost/input")
+                .and_then(Value::as_f64)
+                .filter(|cost| cost.is_finite() && *cost >= 0.0);
             Ok(Model {
                 provider: row
                     .get("provider")
@@ -151,20 +187,78 @@ fn offers(listed: &Value) -> Result<Vec<Model>, String> {
                 model: selector.to_owned(),
                 label: label.map(str::to_owned),
                 thinking,
+                cost,
             })
         })
         .collect()
 }
 
-/// `start`: the launch plan of an omp turn. The words go on standard input.
-pub async fn start(root: &Path, catalog: &Catalog, start: Start) -> Result<Launch, Error> {
+/// The model omp runs when told none: `modelRoles.default` in its `config.yml`, a
+/// selector with its thinking level after a `:`, where that names one it lists.
+fn default_model(root: &Path, models: &[Model]) -> Option<String> {
+    let text = ["config.yml", "config.yaml"]
+        .iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())?;
+    let mut roles = false;
+    let named = text.lines().find_map(|line| {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            return None;
+        }
+        if !line.starts_with([' ', '\t']) {
+            roles = line.trim_end() == "modelRoles:";
+            return None;
+        }
+        roles
+            .then(|| line.trim_start().strip_prefix("default:"))
+            .flatten()
+            .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
+    })?;
+    let listed = |selector: &str| models.iter().any(|offer| offer.model == selector);
+    if listed(&named) {
+        return Some(named);
+    }
+    let (selector, _level) = named.rsplit_once(':')?;
+    listed(selector).then(|| selector.to_owned())
+}
+
+/// The files whose change changes what omp lists: its configuration and model files, and
+/// the `.env` files it takes provider keys from, in its agent folder, its config folder
+/// and home. Its stored sign-ins live in `agent.db`, which every conversation writes.
+fn watched(home: &Path, root: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = [
+        "config.yml",
+        "config.yaml",
+        "models.yml",
+        "models.yaml",
+        "models.json",
+        ".env",
+    ]
+    .iter()
+    .map(|name| root.join(name))
+    .collect();
+    if let Ok(base) = crate::base(home) {
+        files.push(base.join(".env"));
+    }
+    files.push(home.join(".env"));
+    files
+}
+
+/// `start`: the launch plan of an omp turn. The words go on standard input; omp makes no
+/// worktree of its own.
+pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Launch, Error> {
+    if start.worktree {
+        return Err(Error::refused(
+            refusal::SELECTION_UNSUPPORTED,
+            "omp makes no worktree of its own",
+        ));
+    }
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "omp is not on PATH here"))?;
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned()];
     argv.extend(["-p", "--mode", "json"].map(String::from));
     match (start.act, start.external_id.as_deref()) {
         (Act::Continue, Some(id)) => {
-            let file = transcripts::find(root, id).ok_or_else(|| missing(id))?;
+            let file = store.find(id)?;
             if let Some(cwd) = transcripts::head(&file).cwd
                 && !cwd.is_dir()
             {
@@ -179,7 +273,7 @@ pub async fn start(root: &Path, catalog: &Catalog, start: Start) -> Result<Launc
             argv.extend(["--resume".into(), id.into()]);
         }
         (Act::Fork, Some(id)) => {
-            transcripts::find(root, id).ok_or_else(|| missing(id))?;
+            store.find(id)?;
             argv.extend(["--fork".into(), id.into()]);
         }
         (Act::Continue | Act::Fork, None) => {
@@ -216,6 +310,7 @@ pub async fn start(root: &Path, catalog: &Catalog, start: Start) -> Result<Launc
         env: BTreeMap::new(),
         cwd: start.cwd,
         stdin: Stdin::Words,
+        inbox: false,
     })
 }
 
@@ -335,8 +430,8 @@ fn after_end(line: &Value) -> bool {
 }
 
 /// `agent_end`: the run ran to its end when the model's last word stopped of its own
-/// accord, failed when it stopped on an `error`, with omp's `errorMessage`, and did
-/// neither on an `aborted` request. A run that goes on is no end: one retried
+/// accord, failed when it stopped on an `error`, with omp's `errorMessage`, and was
+/// interrupted on an `aborted` request. A run that goes on is no end: one retried
 /// (`willRetry`), and one omp continues itself (`isTerminal: false`) unless it yielded
 /// while work it started runs on, where print mode exits.
 fn end(line: &Value) -> Option<Ended> {
@@ -368,7 +463,10 @@ fn end(line: &Value) -> Option<Ended> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         }),
-        Some("aborted") => None,
+        Some("aborted") => Some(Ended {
+            state: TurnState::Interrupted,
+            error: None,
+        }),
         _ => Some(Ended {
             state: TurnState::Finished,
             error: None,
@@ -409,70 +507,68 @@ fn refused_by(said: &str) -> Option<&'static str> {
     }
 }
 
-/// `reader`: omp as a one-shot reader, everything closed that a flag closes. Its MCP
-/// servers arrive through discovery and no switch turns that off. `--no-extensions` keeps
-/// out what an extension brings, Steery's plugin among them. The input is a file in the
-/// reader's folder, named to omp as `@path`; the answer is the whole output.
+/// `reader`: omp as a one-shot reader, everything closed that a flag closes, on the model
+/// it is given, else on omp's own default. Its MCP servers arrive through discovery and no
+/// switch turns that off. `--no-extensions` keeps out what an extension brings, Steery's
+/// plugin among them. A reader with no tools runs in a private folder and is asked through
+/// a file there, named to omp as `@path`; one that reads runs in the place it looks at,
+/// which it must leave as it found it, and is asked on its command line. The answer is
+/// the whole output.
 pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "omp is not on PATH here"))?;
-    let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned(), "--print".into()];
-    match reader.tools {
-        // Asked for no model, omp runs on none a reader can count on.
-        ReaderTools::None => {
-            let model = reader.model.ok_or_else(|| {
-                Error::refused(
-                    refusal::MODEL_MISSING,
-                    "an omp reader runs on the model it is given",
-                )
-            })?;
-            argv.extend(["--model".into(), model]);
-            argv.extend(["--system-prompt".into(), reader.system]);
-            argv.extend(
-                [
-                    "--no-tools",
-                    "--no-lsp",
-                    "--no-pty",
-                    "--no-extensions",
-                    "--no-skills",
-                    "--no-rules",
-                    "--no-session",
-                    "--no-title",
-                    "--thinking",
-                    "off",
-                ]
-                .map(String::from),
-            );
-        }
-        // omp's reading tools are `read`, `grep` and `glob`.
-        ReaderTools::Read => {
-            if let Some(model) = reader.model {
-                argv.extend(["--model".into(), model]);
-            }
-            argv.extend(["--system-prompt".into(), reader.system]);
-            argv.extend(
-                [
-                    "--tools=read,grep,glob",
-                    "--no-lsp",
-                    "--no-pty",
-                    "--no-extensions",
-                    "--no-skills",
-                    "--no-rules",
-                    "--no-session",
-                    "--no-title",
-                ]
-                .map(String::from),
-            );
-        }
+    if !reader.cwd.is_absolute() {
+        return Err(Error::invalid("the reader's folder is no absolute path"));
     }
+    let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned(), "--print".into()];
+    if let Some(model) = reader.model {
+        argv.extend(["--model".into(), model]);
+    }
+    if let Some(system) = reader.system {
+        argv.extend(["--system-prompt".into(), system]);
+    }
+    let tools = match reader.tools {
+        ReaderTools::None => "--no-tools",
+        // omp's reading tools are `read`, `grep` and `glob`.
+        ReaderTools::Read => "--tools=read,grep,glob",
+    };
+    argv.extend(
+        [
+            tools,
+            "--no-lsp",
+            "--no-pty",
+            "--no-extensions",
+            "--no-skills",
+            "--no-rules",
+            "--no-session",
+            "--no-title",
+        ]
+        .map(String::from),
+    );
+    let files = match reader.tools {
+        ReaderTools::None => {
+            let asked = reader.cwd.join(ASKED);
+            let asked = asked
+                .to_str()
+                .ok_or_else(|| Error::invalid("the reader's folder is not UTF-8"))?;
+            argv.extend(["--thinking", "off", "--"].map(String::from));
+            argv.push(format!("@{asked}"));
+            vec![ReaderFile {
+                path: PathBuf::from(ASKED),
+                content: reader.asked,
+            }]
+        }
+        ReaderTools::Read => {
+            argv.extend(["--".into(), reader.asked]);
+            Vec::new()
+        }
+    };
     Ok(ReaderPlan {
-        launch: Launch {
-            argv,
-            env: BTreeMap::new(),
-            cwd: reader.cwd,
-            stdin: Stdin::None,
-        },
-        feed: Feed::File,
+        argv,
+        env: BTreeMap::new(),
+        cwd: reader.cwd,
+        stdin: Stdin::None,
+        files,
         read: ReadAs::Whole,
     })
 }
@@ -480,11 +576,15 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
 /// `terminal`: `cd '<cwd>' && omp --resume=<id>`, with `PI_CODING_AGENT_DIR='<root>'`
 /// before omp where the conversation is filed under another agent folder than omp's
 /// default.
-pub fn terminal(home: &Path, root: &Path, terminal: Terminal) -> Result<TerminalCommand, Error> {
+pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<TerminalCommand, Error> {
     let id = &terminal.external_id;
-    if !plain_id(id) || transcripts::find(root, id).is_none() {
-        return Err(missing(id));
+    if !plain_id(id) {
+        return Err(Error::refused(
+            refusal::NOT_FOUND,
+            format!("omp has no conversation {id} here"),
+        ));
     }
+    store.find(id)?;
     if !terminal.cwd.is_absolute() {
         return Err(Error::invalid("the folder is no absolute path"));
     }
@@ -493,6 +593,7 @@ pub fn terminal(home: &Path, root: &Path, terminal: Terminal) -> Result<Terminal
         .to_str()
         .ok_or_else(|| Error::invalid("the folder is not UTF-8"))?;
     let mut command = format!("cd {} && ", quoted(cwd));
+    let root = store.root();
     if root != crate::default_root(home) {
         let root = root
             .to_str()
@@ -500,7 +601,16 @@ pub fn terminal(home: &Path, root: &Path, terminal: Terminal) -> Result<Terminal
         command.push_str(&format!("PI_CODING_AGENT_DIR={} ", quoted(root)));
     }
     command.push_str(&format!("omp --resume={id}"));
-    Ok(TerminalCommand { command })
+    // A second omp on one conversation appends to its transcript beside the first.
+    let line = matches!(terminal.holder, Some(Holder::Person { .. })).then(|| {
+        "omp has it open already; this opens a second omp writing to the same conversation."
+            .to_owned()
+    });
+    Ok(TerminalCommand {
+        command,
+        app: None,
+        line,
+    })
 }
 
 /// One literal POSIX shell word.
@@ -516,11 +626,4 @@ fn plain_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-}
-
-fn missing(id: &str) -> Error {
-    Error::refused(
-        refusal::NOT_FOUND,
-        format!("omp has no conversation {id} here"),
-    )
 }

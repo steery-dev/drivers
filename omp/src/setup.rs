@@ -1,15 +1,16 @@
 //! `setup/plan`: what sets omp up for Steery. Four things, each an entry the runtime
 //! writes and records: Steery's MCP server in omp's `mcp.json`; Steery's skill; Steery's
 //! plugin, which is a loader in omp's `extensions` folder and the copy of Steery's
-//! extension it runs, kept in the runtime's config folder and named there.
+//! extension it runs, kept in the runtime's config folder and named there. omp runs no
+//! hook commands: the plugin says its moments over the door.
 
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use steery_sdk::wire::harness::{Entry, Format, Found, Planned, Setup};
-use steery_sdk::{Error, refusal};
+use steery_sdk::Error;
+use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
 /// Steery's extension, as Steery writes it into omp: the module that dials the runtime's
 /// door and says what the conversation is doing. What is this machine's sits in
@@ -25,12 +26,24 @@ const FORM_JS: &str = include_str!("../plugin/form.js");
 /// How long `omp --version` has to answer before nothing about the build is claimed.
 const PROBE: Duration = Duration::from_secs(5);
 
-pub async fn plan(config: &Path, setup: Setup) -> Result<Planned, Error> {
-    let root = crate::root(&setup.home).map_err(|why| Error::refused(refusal::REFUSED, why))?;
+/// The plan for this machine. Whether the release found is one Steery speaks to is the
+/// runtime's to say, from `initialize`'s minimum.
+pub async fn plan(home: &Path, config: &Path, setup: Setup) -> Result<Planned, Error> {
+    let root = match crate::root(home) {
+        Ok(root) => root,
+        Err(why) => {
+            return Ok(Planned {
+                found: None,
+                refused: Some(why),
+                entries: Vec::new(),
+                notes: Vec::new(),
+            });
+        }
+    };
     let Some(binary) = crate::binary() else {
         return Ok(Planned {
             found: None,
-            outdated: None,
+            refused: None,
             entries: Vec::new(),
             notes: vec![
                 "Not installed here: no executable found, and a configuration directory is not \
@@ -39,24 +52,11 @@ pub async fn plan(config: &Path, setup: Setup) -> Result<Planned, Error> {
             ],
         });
     };
-    let answered = version(&binary).await;
-    let release = answered.as_deref().and_then(release_within);
+    let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
-    if answered.is_none() {
-        notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
+    if release.is_none() {
+        notes.push("`--version` named no release, so nothing about this build is claimed.".into());
     }
-    let minimum = release_within(crate::MINIMUM).expect("the minimum is a release");
-    // A release older than Steery needs is not set up, and says how to update.
-    let outdated = release.filter(|running| *running < minimum).map(|running| {
-        format!(
-            "omp {}.{}.{} is older than Steery needs ({}): run `{}`, then `steery setup`.",
-            running.0,
-            running.1,
-            running.2,
-            crate::MINIMUM,
-            crate::UPDATE
-        )
-    });
     let found = Found {
         binary,
         release: release
@@ -64,15 +64,6 @@ pub async fn plan(config: &Path, setup: Setup) -> Result<Planned, Error> {
             .unwrap_or_default(),
         root: root.clone(),
     };
-    if let Some(why) = &outdated {
-        notes.push(why.clone());
-        return Ok(Planned {
-            found: Some(found),
-            outdated,
-            entries: Vec::new(),
-            notes,
-        });
-    }
     let named = config.join("extension").join("omp");
     let extension = extension(&setup)?;
     let digest = Sha256::digest(extension.as_bytes());
@@ -82,41 +73,48 @@ pub async fn plan(config: &Path, setup: Setup) -> Result<Planned, Error> {
         .join(format!("omp-{}.ts", &digest[..16]));
     let entries = vec![
         // omp documents `timeout: 0` as turning its client's MCP timeout off, which a call
-        // that waits for a person needs.
+        // that waits for a person needs; a process-wide `OMP_MCP_TIMEOUT_MS` still takes
+        // precedence, and Steery sets that for nobody. omp has no way to hide a tool from
+        // its model, so the card's own tools stay listed.
         Entry {
             path: root.join("mcp.json"),
             format: Format::Json,
             at: Some("/mcpServers/steery".into()),
             value: json!({ "type": "http", "url": setup.mcp_url, "timeout": 0 }),
+            carries: vec![Part::Mcp],
         },
         Entry {
             path: root.join("skills/steery/SKILL.md"),
             format: Format::Text,
             at: None,
             value: json!(setup.skill),
+            carries: vec![Part::Skill],
         },
         Entry {
             path: root.join("extensions/steery.ts"),
             format: Format::Text,
             at: None,
             value: json!(LOADER.replace("__STEERY_CURRENT__", literal(&named)?)),
+            carries: vec![Part::Plugin],
         },
         Entry {
             path: named.clone(),
             format: Format::Text,
             at: None,
             value: json!(format!("{}\n", literal(&copy)?)),
+            carries: vec![Part::Plugin],
         },
         Entry {
             path: copy,
             format: Format::Text,
             at: None,
             value: json!(extension),
+            carries: vec![Part::Plugin],
         },
     ];
     Ok(Planned {
         found: Some(found),
-        outdated: None,
+        refused: None,
         entries,
         notes,
     })
