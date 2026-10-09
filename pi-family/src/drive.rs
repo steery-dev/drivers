@@ -409,7 +409,11 @@ fn pi_refused(said: &str) -> Option<&'static str> {
 /// and its MCP and code-mode extensions turned off by a settings file in the private
 /// folder; other extensions stay, since a provider may come from one.
 pub fn reader(harness: Harness, reader: Reader) -> Result<ReaderPlan, Error> {
-    let binary = harness.need_binary()?;
+    planned(harness, &harness.need_binary()?, reader)
+}
+
+/// [`reader`]'s plan for the harness at `binary`.
+fn planned(harness: Harness, binary: &Path, reader: Reader) -> Result<ReaderPlan, Error> {
     if !reader.cwd.is_absolute() {
         return Err(Error::invalid("the reader's folder is no absolute path"));
     }
@@ -553,6 +557,80 @@ fn plain_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn asked(tools: ReaderTools) -> Reader {
+        Reader {
+            system: Some("you read".into()),
+            model: Some("a/model".into()),
+            tools,
+            cwd: PathBuf::from("/tmp/steery-read"),
+            asked: "what is here?".into(),
+        }
+    }
+
+    /// A reader with no tools is started with its tools, its session and every discovery a
+    /// flag closes turned off, on the model it is given, asked through a file in its own
+    /// folder; pi's folder settings turn its MCP off.
+    #[test]
+    fn pi_and_omp_are_started_with_their_tools_and_discovery_off() {
+        for harness in [Harness::Pi, Harness::Omp] {
+            let plan = planned(harness, Path::new("/bin/h"), asked(ReaderTools::None)).unwrap();
+            let argv = &plan.argv;
+            for expected in ["--print", "--no-tools", "--no-session", "--system-prompt"] {
+                assert!(
+                    argv.iter().any(|arg| arg == expected),
+                    "{harness:?}: {expected}"
+                );
+            }
+            let model = argv.iter().position(|arg| arg == "--model").unwrap();
+            assert_eq!(argv[model + 1], "a/model");
+            assert_eq!(argv.last().unwrap(), "@/tmp/steery-read/asked.txt");
+            assert_eq!(plan.files[0].path, PathBuf::from(ASKED));
+            assert_eq!(plan.files[0].content, "what is here?");
+            assert_eq!((plan.stdin, plan.read), (Stdin::None, ReadAs::Whole));
+        }
+        let pi = planned(Harness::Pi, Path::new("/bin/pi"), asked(ReaderTools::None)).unwrap();
+        assert!(
+            pi.files
+                .iter()
+                .any(|file| file.path == Path::new(".pi/settings.json")
+                    && file.content.contains("-builtin:mcp"))
+        );
+    }
+
+    /// A reader that looks at a place reads it and leaves it as it found it: no file is
+    /// written there, no conversation is kept, nothing that writes or skips a check is
+    /// passed, and the question comes last, after `--`.
+    #[test]
+    fn a_look_only_reads_and_leaves_no_conversation() {
+        for harness in [Harness::Pi, Harness::Omp] {
+            let plan = planned(harness, Path::new("/bin/h"), asked(ReaderTools::Read)).unwrap();
+            assert!(plan.files.is_empty(), "{harness:?}");
+            assert!(
+                plan.argv.iter().any(|arg| arg == "--no-session"),
+                "{harness:?}"
+            );
+            assert_eq!(plan.argv[plan.argv.len() - 2..], ["--", "what is here?"]);
+            for forbidden in ["--no-tools", "--auto-approve", "--yolo", "--approve"] {
+                assert!(
+                    !plan.argv.iter().any(|arg| arg == forbidden),
+                    "{harness:?}: {forbidden}"
+                );
+            }
+        }
+        assert!(
+            planned(
+                Harness::Omp,
+                Path::new("/bin/omp"),
+                Reader {
+                    cwd: PathBuf::from("relative"),
+                    ..asked(ReaderTools::Read)
+                }
+            )
+            .is_err(),
+            "a folder that is no absolute path"
+        );
+    }
 
     #[test]
     fn a_delivery_is_taken_only_whole() {
