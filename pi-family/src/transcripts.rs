@@ -10,9 +10,10 @@
 //! lead's folder, `<conversation>/<job>.jsonl`, and one a sub-agent started inside that
 //! one's: those are the conversation's sub-agents, never conversations of their own.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read as _, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -36,17 +37,23 @@ const BATCH: u64 = 4 << 20;
 const HEAD: usize = 4;
 /// The longest head record read.
 const HEAD_RECORD: usize = 64 << 10;
+/// The longest line of a sub-agent's task said.
+const TASK: usize = 100;
 
-/// The harness's conversations here: its agent folder, and the folders outside it its
-/// moments named, remembered for as long as this driver runs; and the trees of the
-/// transcripts read.
+/// The harness's conversations here: its agent folder, the folder its environment told it
+/// to keep them in, and the folders outside it its moments named, remembered for as long
+/// as this driver runs; and the trees, titles and sub-agents' starts of the transcripts
+/// read.
 pub struct Store {
     harness: Harness,
     home: PathBuf,
     root: PathBuf,
+    /// `PI_CODING_AGENT_SESSION_DIR`, where this driver was started with it.
+    chosen: Option<PathBuf>,
     named: Mutex<BTreeSet<PathBuf>>,
     trees: Trees,
     titles: Titles,
+    starts: Starts,
 }
 
 /// Every transcript filed as a conversation, by the id it is filed under.
@@ -57,14 +64,16 @@ struct Filed {
 }
 
 impl Store {
-    pub fn new(harness: Harness, home: &Path, root: PathBuf) -> Self {
+    pub fn new(harness: Harness, home: &Path, root: PathBuf, chosen: Option<PathBuf>) -> Self {
         Self {
             harness,
             home: home.to_owned(),
             root,
+            chosen,
             named: Mutex::new(BTreeSet::new()),
             trees: Trees::default(),
             titles: Titles::default(),
+            starts: Starts::default(),
         }
     }
 
@@ -128,7 +137,8 @@ impl Store {
                 (file, fork)
             }
             Some(agent) => {
-                let found = sub_agents(&file)
+                let found = self
+                    .sub_agents(&file)
                     .into_iter()
                     .find(|found| {
                         found.external_id == *agent || found.name.as_deref() == Some(agent)
@@ -224,9 +234,9 @@ impl Store {
             .iter()
             .filter_map(|folder| folder.canonicalize().ok())
             .collect();
-        let chosen = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
-            .filter(|dir| !dir.is_empty())
-            .map(PathBuf::from)
+        let chosen = self
+            .chosen
+            .clone()
             .into_iter()
             .chain(self.setting())
             .filter(|dir| dir.is_absolute())
@@ -304,7 +314,7 @@ impl Store {
             updated_at,
             transcripts: vec![file.to_owned()],
             app: false,
-            sub_agents: sub_agents(file),
+            sub_agents: self.sub_agents(file),
         })
     }
 }
@@ -396,7 +406,13 @@ fn asked_for(content: Option<&Value>) -> Option<String> {
         }
         None => &whole,
     };
-    let first = asked
+    first_line(asked, MOST)
+}
+
+/// The first line of `said` that is no markup, as at most `most` characters of whole
+/// words.
+fn first_line(said: &str, most: usize) -> Option<String> {
+    let first = said
         .lines()
         .map(str::trim)
         .find(|line| {
@@ -409,7 +425,7 @@ fn asked_for(content: Option<&Value>) -> Option<String> {
         .trim();
     let mut line = String::new();
     for word in first.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > MOST {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > most {
             line.push('…');
             break;
         }
@@ -448,51 +464,238 @@ fn parent(id: &str, head: &Head) -> Option<String> {
     (!parent.is_empty() && parent != id).then(|| parent.to_owned())
 }
 
-/// The sub-agents filed in a conversation's folder, and in theirs: each a transcript
-/// whose header names who started it (`parentSession`), named for its job.
-fn sub_agents(file: &Path) -> Vec<SubAgent> {
-    fn visit(folder: &Path, lead: Option<&str>, depth: usize, out: &mut Vec<SubAgent>) {
-        let Ok(entries) = std::fs::read_dir(folder) else {
+impl Store {
+    /// The sub-agents filed in a conversation's folder, and in theirs: each a transcript
+    /// whose header names who started it (`parentSession`), named for its job, with the
+    /// `task` call that started it and what that call asked of it.
+    fn sub_agents(&self, file: &Path) -> Vec<SubAgent> {
+        let mut found = Vec::new();
+        self.visit(file, None, 1, &mut found);
+        found.sort_by(|a, b| {
+            a.started_at
+                .cmp(&b.started_at)
+                .then_with(|| a.external_id.cmp(&b.external_id))
+        });
+        found
+    }
+
+    /// The sub-agents `starter` started, filed in the folder named for its transcript, and
+    /// those they started in turn, `lead` being the sub-agent `starter` is.
+    fn visit(&self, starter: &Path, lead: Option<&str>, depth: usize, out: &mut Vec<SubAgent>) {
+        let Ok(entries) = std::fs::read_dir(starter.with_extension("")) else {
             return;
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !entry.file_type().is_ok_and(|kind| kind.is_file())
-                || path.extension().is_none_or(|ext| ext != "jsonl")
-            {
-                continue;
-            }
-            let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
-                continue;
-            };
-            let head = head(&path);
-            if head.parent.is_none() {
-                continue;
-            }
-            let name = name.to_owned();
-            let started = path.with_extension("");
+        let filed: Vec<(PathBuf, String, Head)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                if !entry.file_type().is_ok_and(|kind| kind.is_file())
+                    || path.extension().is_none_or(|ext| ext != "jsonl")
+                {
+                    return None;
+                }
+                let job = path.file_stem()?.to_str()?.to_owned();
+                let head = head(&path);
+                head.parent.is_some().then_some((path, job, head))
+            })
+            .collect();
+        if filed.is_empty() {
+            return;
+        }
+        let jobs = self
+            .starts
+            .jobs(starter, filed.iter().map(|(_, job, _)| job.as_str()));
+        for ((path, job, head), started) in filed.into_iter().zip(jobs) {
+            let external_id = head.id.unwrap_or_else(|| job.clone());
+            let (started_by, task) =
+                started.map_or((None, None), |started| (Some(started.call), started.task));
             out.push(SubAgent {
-                external_id: head.id.clone().unwrap_or_else(|| name.clone()),
+                external_id: external_id.clone(),
                 lead: lead.map(str::to_owned),
-                name: Some(name),
-                task: None,
+                name: Some(job),
+                task,
                 started_at: head.created_at,
-                started_by: None,
-                transcripts: vec![path],
+                started_by,
+                transcripts: vec![path.clone()],
             });
             if depth < SUB_AGENT_DEPTH {
-                visit(&started, head.id.as_deref(), depth + 1, out);
+                self.visit(&path, Some(&external_id), depth + 1, out);
             }
         }
     }
-    let mut found = Vec::new();
-    visit(&file.with_extension(""), None, 1, &mut found);
-    found.sort_by(|a, b| {
-        a.started_at
-            .cmp(&b.started_at)
-            .then_with(|| a.external_id.cmp(&b.external_id))
-    });
-    found
+}
+
+/// What the `task` calls of each transcript started, read on from where the last read left
+/// the file, which omp only appends to.
+#[derive(Default)]
+struct Starts {
+    kept: Mutex<HashMap<PathBuf, Started>>,
+}
+
+/// The call that started a sub-agent, and the first line of what it asked of it.
+#[derive(Clone)]
+struct Start {
+    call: String,
+    task: Option<String>,
+}
+
+/// What one transcript's `task` calls started, as far as it has been read.
+#[derive(Default)]
+struct Started {
+    /// Its device and inode, how far it was read, and the last bytes read: bytes there
+    /// that changed are a file written whole again, read again from its start.
+    file: (u64, u64),
+    through: u64,
+    seal: Vec<u8>,
+    /// By job, as omp's result names each sub-agent it filed (`details.progress[].id`).
+    jobs: BTreeMap<String, Start>,
+    /// The tasks of a call whose result is not written yet, by the call: each task's name,
+    /// which its job is, or ends with after a `.`.
+    asked: BTreeMap<String, Vec<(String, Start)>>,
+}
+
+impl Starts {
+    /// What started each of `jobs`, filed for `starter`.
+    fn jobs<'a>(&self, starter: &Path, jobs: impl Iterator<Item = &'a str>) -> Vec<Option<Start>> {
+        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        let started = kept.entry(starter.to_owned()).or_default();
+        if started.read_on(starter).is_err() {
+            *started = Started::default();
+        }
+        jobs.map(|job| started.job(job).cloned()).collect()
+    }
+}
+
+impl Started {
+    fn job(&self, job: &str) -> Option<&Start> {
+        self.jobs.get(job).or_else(|| {
+            self.asked
+                .values()
+                .flatten()
+                .find(|(name, _)| {
+                    job.strip_suffix(name.as_str())
+                        .is_some_and(|before| before.is_empty() || before.ends_with('.'))
+                })
+                .map(|(_, start)| start)
+        })
+    }
+
+    fn read_on(&mut self, file: &Path) -> io::Result<()> {
+        const SEAL: u64 = 64;
+        let mut open = File::open(file)?;
+        let meta = open.metadata()?;
+        let (identity, len) = ((meta.dev(), meta.ino()), meta.len());
+        if self.file != identity
+            || len < self.through
+            || tree::bytes(
+                &mut open,
+                self.through - self.seal.len() as u64,
+                self.through,
+            )? != self.seal
+        {
+            *self = Self {
+                file: identity,
+                ..Self::default()
+            };
+        }
+        if len == self.through {
+            return Ok(());
+        }
+        open.seek(SeekFrom::Start(self.through))?;
+        let mut lines = BufReader::new((&open).take(len - self.through));
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if lines.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
+                break;
+            }
+            self.through += line.len() as u64;
+            if line.len() as u64 <= RECORD
+                && line.windows(6).any(|bytes| bytes == b"\"task\"")
+                && let Ok(record) = serde_json::from_slice::<Value>(&line)
+                && text(&record, "type") == Some("message")
+                && let Some(message) = record.get("message")
+            {
+                self.record(message);
+            }
+        }
+        self.seal = tree::bytes(&mut open, self.through.saturating_sub(SEAL), self.through)?;
+        Ok(())
+    }
+
+    /// A `task` call, each of its tasks named; and its result, naming the job each task
+    /// was filed as, by the task's place in the call.
+    fn record(&mut self, message: &Value) {
+        let task = |said: Option<&str>| said.and_then(|said| first_line(said, TASK));
+        match text(message, "role") {
+            Some("assistant") => {
+                let calls = message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|block| {
+                        text(block, "type") == Some("toolCall")
+                            && text(block, "name") == Some("task")
+                    });
+                for block in calls {
+                    let Some(call) = text(block, "id") else {
+                        continue;
+                    };
+                    let tasks = block
+                        .pointer("/arguments/tasks")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|asked| {
+                            let name = text(asked, "name").filter(|name| !name.is_empty())?;
+                            Some((
+                                name.to_owned(),
+                                Start {
+                                    call: call.to_owned(),
+                                    task: task(text(asked, "task")),
+                                },
+                            ))
+                        })
+                        .collect();
+                    self.asked.insert(call.to_owned(), tasks);
+                }
+            }
+            Some("toolResult") if text(message, "toolName") == Some("task") => {
+                let Some(call) = text(message, "toolCallId") else {
+                    return;
+                };
+                let filed: Vec<&Value> = message
+                    .pointer("/details/progress")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                if filed.is_empty() {
+                    return;
+                }
+                let asked = self.asked.remove(call).unwrap_or_default();
+                for job in filed {
+                    let Some(id) = text(job, "id").filter(|id| !id.is_empty()) else {
+                        continue;
+                    };
+                    let said = job
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .and_then(|at| asked.get(usize::try_from(at).ok()?))
+                        .and_then(|(_, start)| start.task.clone());
+                    self.jobs.insert(
+                        id.to_owned(),
+                        Start {
+                            call: call.to_owned(),
+                            task: task(text(job, "assignment")).or(said),
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// What the head of a transcript records about its conversation.
@@ -798,10 +1001,94 @@ fn capped<R: BufRead>(reader: &mut R, line: &mut Vec<u8>, most: usize) -> std::i
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use steery_sdk::wire::harness::{Event, Voice};
 
+    /// A home of one test's own, gone once the test ends.
+    pub(crate) struct Home(pub PathBuf);
+
+    impl Home {
+        pub(crate) fn new(name: &str) -> Self {
+            static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let home = std::env::temp_dir().join(format!(
+                "steery-pi-family-{name}-{}-{made}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&home).unwrap();
+            Self(home)
+        }
+
+        /// A transcript at `path` under the home, one record a line.
+        pub(crate) fn write<S: AsRef<str>>(&self, path: &str, records: &[S]) -> PathBuf {
+            let file = self.0.join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            let lines: String = records
+                .iter()
+                .map(|record| format!("{}\n", record.as_ref()))
+                .collect();
+            std::fs::write(&file, lines).unwrap();
+            file
+        }
+
+        /// More records at the end of a transcript.
+        pub(crate) fn append<S: AsRef<str>>(&self, file: &Path, records: &[S]) {
+            let mut open = std::fs::OpenOptions::new().append(true).open(file).unwrap();
+            for record in records {
+                std::io::Write::write_all(&mut open, format!("{}\n", record.as_ref()).as_bytes())
+                    .unwrap();
+            }
+        }
+
+        /// The harness's conversations under this home, its own agent folder's.
+        pub(crate) fn store(&self, harness: Harness, chosen: Option<PathBuf>) -> Store {
+            let root = self.0.join(match harness {
+                Harness::Omp => ".omp/agent",
+                Harness::Pi => ".pi/agent",
+            });
+            Store::new(harness, &self.0, root, chosen)
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `sessions/read` of a conversation, or of one of its sub-agents, on from `cursor`.
+    pub(crate) fn read(
+        store: &Store,
+        id: &str,
+        sub_agent: Option<&str>,
+        cursor: Option<&str>,
+    ) -> Events {
+        store
+            .read(Read {
+                external_id: id.into(),
+                sub_agent: sub_agent.map(str::to_owned),
+                cursor: cursor.map(str::to_owned),
+                tail: None,
+            })
+            .unwrap()
+    }
+
+    fn listed(store: &Store, transcripts: &[PathBuf]) -> Listed {
+        store.list(List {
+            seen_since: None,
+            transcripts: transcripts.to_vec(),
+        })
+    }
+
+    fn ids(listed: &Listed) -> Vec<&str> {
+        listed
+            .sessions
+            .iter()
+            .map(|session| session.external_id.as_str())
+            .collect()
+    }
     fn entry(id: &str, parent: Option<&str>, role: &str, said: &str) -> String {
         format!(
             "{}\n",
@@ -846,7 +1133,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = Store::new(Harness::Pi, &home, home.join(".pi/agent"));
+        let store = Store::new(Harness::Pi, &home, home.join(".pi/agent"), None);
         let read = |cursor: Option<String>| {
             store
                 .read(Read {
@@ -916,7 +1203,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let store = Store::new(Harness::Pi, &home, home.join(".pi/agent"));
+        let store = Store::new(Harness::Pi, &home, home.join(".pi/agent"), None);
         let read = |cursor: Option<String>| {
             store
                 .read(Read {
@@ -965,5 +1252,251 @@ mod tests {
             "each response, said again, still once each"
         );
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// omp files a sub-agent inside its lead's folder, `<lead>/<job>.jsonl`, and one a
+    /// sub-agent started inside that one's: each is the conversation's sub-agent, named
+    /// for its job, with the `task` call that started it and the first line of what that
+    /// call asked of it — by the job its result names, or while no result is written yet,
+    /// by the task's name. None is a conversation, even where a moment names its file.
+    #[test]
+    fn sub_agents_are_their_conversations_and_never_conversations_of_their_own() {
+        let home = Home::new("sub-agents");
+        let lead = "01a10000-0000-7000-8000-000000000001";
+        let scout = "01a10000-0000-7000-8000-000000000002";
+        let probe = "01a10000-0000-7000-8000-000000000003";
+        let filed = format!(".omp/agent/sessions/--tmp--/2026-10-09T10-00-00-000Z_{lead}");
+        let lead_file = home.write(
+            &format!("{filed}.jsonl"),
+            &[
+                r#"{"type":"title","v":1,"title":""}"#.to_owned(),
+                format!(
+                    r#"{{"type":"session","version":3,"id":"{lead}","timestamp":"2026-10-09T10:00:00Z","cwd":"/tmp"}}"#
+                ),
+                r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-09T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"map it"}]}}"#.to_owned(),
+                r##"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-09T10:00:05Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"toolu_1","name":"task","arguments":{"agent":"task","tasks":[{"name":"Scout","task":"# Target\nMap the dashboard\nwith pointers"}]}}]}}"##.to_owned(),
+                r##"{"type":"message","id":"c","parentId":"b","timestamp":"2026-10-09T10:00:06Z","message":{"role":"toolResult","toolCallId":"toolu_1","toolName":"task","content":[{"type":"text","text":"started"}],"details":{"async":true,"progress":[{"index":0,"id":"Scout","status":"pending","assignment":"# Target\nMap the dashboard\nwith pointers"}]}}}"##.to_owned(),
+            ],
+        );
+        let scout_file = home.write(
+            &format!("{filed}/Scout.jsonl"),
+            &[
+                r#"{"type":"title","v":1,"title":""}"#.to_owned(),
+                format!(
+                    r#"{{"type":"session","version":3,"id":"{scout}","parentSession":"{}","timestamp":"2026-10-09T10:01:00Z","cwd":"/tmp"}}"#,
+                    lead_file.display()
+                ),
+                r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-09T10:01:00Z","message":{"role":"user","attribution":"agent","content":[{"type":"text","text":"Complete assignment thoroughly:\n\n# Target\nMap the dashboard"}]}}"#.to_owned(),
+                r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-09T10:01:05Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"toolu_2","name":"task","arguments":{"agent":"explore","tasks":[{"name":"Probe","task":"Find the two readers"}]}}]}}"#.to_owned(),
+            ],
+        );
+        home.write(
+            &format!("{filed}/Scout/Scout.Probe.jsonl"),
+            &[
+                format!(
+                    r#"{{"type":"session","version":3,"id":"{probe}","parentSession":"{}","timestamp":"2026-10-09T10:02:00Z","cwd":"/tmp"}}"#,
+                    scout_file.display()
+                ),
+                r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-09T10:02:00Z","message":{"role":"user","attribution":"agent","content":[{"type":"text","text":"Find the two readers"}]}}"#.to_owned(),
+                r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-09T10:02:09Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"found two"}]}}"#.to_owned(),
+            ],
+        );
+        let store = home.store(Harness::Omp, None);
+        let sub_agent = |external_id: &str,
+                         lead: Option<&str>,
+                         name: &str,
+                         task: &str,
+                         started_at: &str,
+                         started_by: &str,
+                         file: PathBuf| SubAgent {
+            external_id: external_id.to_owned(),
+            lead: lead.map(str::to_owned),
+            name: Some(name.to_owned()),
+            task: Some(task.to_owned()),
+            started_at: millis(started_at),
+            started_by: Some(started_by.to_owned()),
+            transcripts: vec![file],
+        };
+        let mut expected = vec![
+            sub_agent(
+                scout,
+                None,
+                "Scout",
+                "Map the dashboard",
+                "2026-10-09T10:01:00Z",
+                "toolu_1",
+                scout_file.clone(),
+            ),
+            sub_agent(
+                probe,
+                Some(scout),
+                "Scout.Probe",
+                "Find the two readers",
+                "2026-10-09T10:02:00Z",
+                "toolu_2",
+                home.0.join(format!("{filed}/Scout/Scout.Probe.jsonl")),
+            ),
+        ];
+
+        // A moment named the sub-agent's file: still no conversation of its own.
+        let first = listed(&store, std::slice::from_ref(&scout_file));
+        assert_eq!(ids(&first), [lead]);
+        assert!(first.complete && first.excluded.is_empty());
+        assert_eq!(first.sessions[0].sub_agents, expected);
+
+        let probed = read(&store, lead, Some(probe), None);
+        assert!(probed.events.iter().any(|event| matches!(
+            event,
+            Event::Words { voice: Voice::Agent, text, .. } if text == "found two"
+        )));
+
+        // The lead starts another: read on from where its transcript was read.
+        home.append(
+            &lead_file,
+            &[r#"{"type":"message","id":"d","parentId":"c","timestamp":"2026-10-09T10:03:00Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"toolu_3","name":"task","arguments":{"agent":"task","tasks":[{"name":"Second","task":"Check the other one"}]}}]}}"#],
+        );
+        let second = home.write(
+            &format!("{filed}/Second.jsonl"),
+            &[format!(
+                r#"{{"type":"session","version":3,"id":"second","parentSession":"{}","timestamp":"2026-10-09T10:03:01Z"}}"#,
+                lead_file.display()
+            )],
+        );
+        expected.push(sub_agent(
+            "second",
+            None,
+            "Second",
+            "Check the other one",
+            "2026-10-09T10:03:01Z",
+            "toolu_3",
+            second,
+        ));
+        assert_eq!(listed(&store, &[]).sessions[0].sub_agents, expected);
+    }
+
+    /// omp's title is the one it keeps current at the head of its file, else the one the
+    /// conversation started with; pi's is its newest `session_info` name, else what its
+    /// person asked for first. Each reads the same file its own way.
+    #[test]
+    fn each_harness_titles_its_conversations_its_own_way() {
+        let home = Home::new("titles");
+        let both = [
+            r#"{"type":"title","v":1,"title":"What omp calls it","source":"auto"}"#,
+            r#"{"type":"session","version":3,"id":"t1","title":"What it was called first","cwd":"/tmp","timestamp":"2026-10-09T10:00:00Z"}"#,
+            r#"{"type":"session_info","id":"b","parentId":null,"name":"What pi calls it"}"#,
+            r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-10-09T10:00:01Z","message":{"role":"user","content":[{"type":"text","text":"fix the build"}]}}"#,
+        ];
+        home.write(
+            ".omp/agent/sessions/--tmp--/2026-10-09T10-00-00-000Z_t1.jsonl",
+            &both,
+        );
+        home.write(
+            ".pi/agent/sessions/--tmp--/2026-10-09T10-00-00-000Z_t1.jsonl",
+            &both,
+        );
+        home.write(
+            ".omp/agent/sessions/--tmp--/2026-10-09T10-00-00-000Z_t2.jsonl",
+            &[
+                r#"{"type":"title","v":1,"title":""}"#,
+                r#"{"type":"session","version":3,"id":"t2","title":"What it was called first","timestamp":"2026-10-09T10:00:00Z"}"#,
+            ],
+        );
+        home.write(
+            ".pi/agent/sessions/--tmp--/2026-10-09T10-00-00-000Z_t2.jsonl",
+            &[
+                r#"{"type":"session","version":3,"id":"t2","timestamp":"2026-10-09T10:00:00Z"}"#,
+                r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-09T10:00:01Z","message":{"role":"toolResult","toolCallId":"k1","content":[{"type":"text","text":"total 320"}]}}"#,
+                r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-09T10:00:02Z","message":{"role":"user","content":[{"type":"text","text":"why pi never got the steery skill"}]}}"#,
+                r#"{"type":"session_info","id":"c","parentId":"b","name":"For a while"}"#,
+                r#"{"type":"session_info","id":"d","parentId":"c"}"#,
+            ],
+        );
+        let titles = |harness| {
+            let mut titles: Vec<(String, Option<String>)> = listed(&home.store(harness, None), &[])
+                .sessions
+                .into_iter()
+                .map(|session| (session.external_id, session.title))
+                .collect();
+            titles.sort();
+            titles
+        };
+        let title = |id: &str, title: &str| (id.to_owned(), Some(title.to_owned()));
+        assert_eq!(
+            titles(Harness::Omp),
+            [
+                title("t1", "What omp calls it"),
+                title("t2", "What it was called first")
+            ]
+        );
+        assert_eq!(
+            titles(Harness::Pi),
+            [
+                title("t1", "What pi calls it"),
+                title("t2", "why pi never got the steery skill")
+            ]
+        );
+    }
+
+    /// A conversation is found wherever the harness was told to keep it, straight in that
+    /// folder: pi's `sessionDir` (`~` its person's home), `PI_CODING_AGENT_SESSION_DIR`, and
+    /// the folder of a transcript a moment named, remembered from then on. A chosen folder
+    /// that is one of the agent folder's own is walked once; two transcripts for one id
+    /// are neither read, and the listing says it is not complete.
+    #[test]
+    fn conversations_are_found_wherever_the_harness_was_told_to_keep_them() {
+        let home = Home::new("chosen");
+        let transcript = |folder: &str, id: &str| {
+            home.write(
+                &format!("{folder}/2026-10-09T10-00-00-000Z_{id}.jsonl"),
+                &[
+                    format!(
+                        r#"{{"type":"session","version":3,"id":"{id}","cwd":"/tmp/pi","timestamp":"2026-10-09T10:00:00Z"}}"#
+                    ),
+                    r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-09T10:00:01Z","message":{"role":"user","content":[{"type":"text","text":"where pi keeps it"}]}}"#.to_owned(),
+                ],
+            )
+        };
+        let settings = |dir: &str| {
+            std::fs::create_dir_all(home.0.join(".pi/agent")).unwrap();
+            std::fs::write(
+                home.0.join(".pi/agent/settings.json"),
+                serde_json::json!({ "sessionDir": dir }).to_string(),
+            )
+            .unwrap();
+        };
+        let pi = home.store(Harness::Pi, None);
+
+        settings("~/elsewhere");
+        let file = transcript("elsewhere", "p1");
+        let found = listed(&pi, &[]);
+        assert_eq!(ids(&found), ["p1"]);
+        assert_eq!(found.sessions[0].cwd.as_deref(), Some(Path::new("/tmp/pi")));
+        assert_eq!(
+            found.sessions[0].title.as_deref(),
+            Some("where pi keeps it")
+        );
+        assert_eq!(pi.find("p1").unwrap(), file);
+
+        std::fs::remove_file(&file).unwrap();
+        let own = transcript(".pi/agent/sessions/--tmp-pi--", "p1");
+        settings(own.parent().unwrap().to_str().unwrap());
+        let once = listed(&pi, &[]);
+        assert_eq!(ids(&once), ["p1"]);
+        assert!(once.complete);
+
+        transcript(".pi/agent/sessions/--tmp-pi-again--", "p1");
+        let twice = listed(&pi, &[]);
+        assert!(ids(&twice).is_empty() && !twice.complete);
+        assert!(pi.find("p1").is_err());
+
+        let omp = home.store(Harness::Omp, Some(home.0.join("by-environment")));
+        transcript("by-environment", "o1");
+        let outside = transcript("outside", "o2");
+        assert_eq!(ids(&listed(&omp, &[])), ["o1"]);
+        let named = listed(&omp, std::slice::from_ref(&outside));
+        let mut found = ids(&named);
+        found.sort_unstable();
+        assert_eq!(found, ["o1", "o2"]);
+        assert_eq!(ids(&listed(&omp, &[])).len(), 2, "remembered");
     }
 }

@@ -745,3 +745,238 @@ pub fn blobs(file: &Path, root: &Path) -> PathBuf {
         .unwrap_or(root)
         .join("blobs")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcripts::tests::{Home, read};
+    use serde_json::json;
+
+    const FILED: &str = ".omp/agent/sessions/--tmp--/2026-10-01T13-00-00-000Z_f1.jsonl";
+    const SESSION: &str = r#"{"type":"session","version":3,"id":"f1","cwd":"/tmp","timestamp":"2026-10-01T13:00:00Z"}"#;
+    const ASKED: &str = r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-01T13:19:00Z","message":{"role":"user","content":[{"type":"text","text":"go on"}]}}"#;
+
+    /// The process leaving, after the entry `parent`.
+    fn exit(parent: &str) -> String {
+        json!({"type": "custom", "customType": "session_exit", "id": "z", "parentId": parent,
+            "timestamp": "2026-10-01T13:20:00Z"})
+        .to_string()
+    }
+
+    /// A model call that failed, with the fields given, as the entry `id` under `parent`.
+    fn failed(id: &str, parent: &str, fields: Value) -> String {
+        let mut message = json!({"role": "assistant", "stopReason": "error", "content": [],
+            "provider": "anthropic", "model": "claude-opus-5"});
+        message
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        json!({"type": "message", "id": id, "parentId": parent,
+            "timestamp": "2026-10-01T13:19:26.216Z", "message": message})
+        .to_string()
+    }
+
+    fn failures(events: &[Event]) -> Vec<(u64, &Failure)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::TurnEnded {
+                    at,
+                    state: TurnState::Failed,
+                    failure: Some(failure),
+                    ..
+                } => Some((*at, failure)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one failure a transcript says that ends on a failed call `y`, then `after` (one
+    /// entry `x` at most), then the process leaving.
+    fn failure(harness: Harness, fields: Value, after: Option<&str>) -> Failure {
+        let home = Home::new("failure");
+        let filed = match harness {
+            Harness::Omp => FILED.to_owned(),
+            Harness::Pi => FILED.replace(".omp", ".pi"),
+        };
+        let mut records = vec![
+            SESSION.to_owned(),
+            ASKED.to_owned(),
+            failed("y", "a", fields),
+        ];
+        records.extend(after.map(str::to_owned));
+        records.push(exit(if after.is_some() { "x" } else { "y" }));
+        home.write(&filed, &records);
+        let got = read(&home.store(harness, None), "f1", None, None);
+        let [(_, failure)] = failures(&got.events)[..] else {
+            panic!("one failed turn: {:#?}", got.events);
+        };
+        failure.clone()
+    }
+
+    /// A failed turn says why by the harness's own classification, never its wording: the
+    /// HTTP status it kept and its `errorId`; with the provider and the model as the
+    /// harness selects it, and when the provider takes requests again where it said.
+    #[test]
+    fn a_failed_turn_says_why_by_the_harness_own_classification() {
+        assert_eq!(
+            failure(
+                Harness::Omp,
+                json!({"errorStatus": 429, "errorMessage": "Too many requests"}),
+                None
+            ),
+            Failure {
+                kind: FailureKind::RateLimit,
+                line: "Too many requests".into(),
+                service: true,
+                http_status: Some(429),
+                code: None,
+                retry_at: None,
+                provider: Some("anthropic".into()),
+                model: Some("anthropic/claude-opus-5".into()),
+                thinking: None,
+            }
+        );
+        let kind = |fields: Value| {
+            let failure = failure(Harness::Omp, fields, None);
+            (failure.kind, failure.http_status, failure.code)
+        };
+        assert_eq!(
+            kind(json!({"errorId": 0x0100_1000, "errorMessage": "No API key for provider"})),
+            (FailureKind::SignIn, None, Some("auth-failed".to_owned())),
+            "a provider omp holds no key for"
+        );
+        assert_eq!(
+            kind(json!({"errorStatus": 403, "errorId": 17_321_984})),
+            (FailureKind::RateLimit, Some(403), None),
+            "a spent quota carries the sign-in flag beside a usage limit"
+        );
+        assert_eq!(
+            kind(json!({"errorId": 401})),
+            (FailureKind::Other, None, None),
+            "a bare number is no classification"
+        );
+        assert_eq!(
+            kind(json!({"errorId": 0x80_1000})).0,
+            FailureKind::ContextFull
+        );
+        let limited = failure(
+            Harness::Omp,
+            json!({"errorStatus": 429, "errorId": 135_168, "completedAt": 1_790_860_766_214_u64,
+                "errorMessage": "429 Rate limit reached retry-after-ms=90000\nRate limit reached"}),
+            None,
+        );
+        assert_eq!(limited.retry_at, Some(1_790_860_766_214 + 90_000));
+        // pi classifies no error: Steery's plugin says once pi gave up compacting.
+        let full = r#"{"type":"custom","customType":"steery-context-full","id":"x","parentId":"y","timestamp":"2026-10-01T13:19:30Z"}"#;
+        assert_eq!(
+            failure(
+                Harness::Pi,
+                json!({"errorMessage": "prompt is too long"}),
+                Some(full)
+            )
+            .kind,
+            FailureKind::ContextFull
+        );
+    }
+
+    /// A turn is failed only by its final outcome. A failed call the harness retried past
+    /// is no event, and while the transcript may still go on, the failure is left for the
+    /// next read; retries given up, or the person's next words, end the turn as failed,
+    /// when the call failed.
+    #[test]
+    fn a_failure_the_harness_got_past_is_no_event() {
+        let home = Home::new("got-past");
+        let failure = failed("y", "a", json!({"errorMessage": "stream error: timed out"}));
+        let file = home.write(FILED, &[SESSION, ASKED, failure.as_str()]);
+        let store = home.store(Harness::Omp, None);
+        let first = read(&store, "f1", None, None);
+        assert!(failures(&first.events).is_empty(), "it may still go on");
+        home.append(
+            &file,
+            &[
+                r#"{"type":"message","id":"b","parentId":"y","timestamp":"2026-10-01T13:19:36Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"k1","name":"write","arguments":{}}]}}"#.to_owned(),
+                r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-10-01T13:19:37Z","message":{"role":"toolResult","toolCallId":"k1","content":[{"type":"text","text":"429 credit limit exceeded"}]}}"#.to_owned(),
+                exit("c"),
+            ],
+        );
+        let on = read(&store, "f1", None, Some(&first.cursor));
+        assert!(failures(&on.events).is_empty(), "{:#?}", on.events);
+        assert!(
+            on.events
+                .iter()
+                .any(|event| matches!(event, Event::CallEnded { id, .. } if id == "k1")),
+            "what came after the failure is read once it was decided"
+        );
+
+        let failed_at = millis("2026-10-01T13:19:26.216Z").unwrap();
+        let given_up = r#"{"type":"message","id":"b","parentId":"y","timestamp":"2026-10-01T13:19:50Z","message":{"role":"assistant","stopReason":"aborted","content":[],"errorMessage":"Aborted after 3 retry attempts"}}"#;
+        home.write(FILED, &[SESSION, ASKED, failure.as_str(), given_up]);
+        let ended = read(&store, "f1", None, None);
+        assert_eq!(
+            failures(&ended.events)
+                .iter()
+                .map(|(at, _)| *at)
+                .collect::<Vec<_>>(),
+            [failed_at]
+        );
+
+        let typed = r#"{"type":"message","id":"b","parentId":"y","timestamp":"2026-10-01T13:20:00Z","message":{"role":"user","content":[{"type":"text","text":"try again"}]}}"#;
+        home.write(FILED, &[SESSION, ASKED, failure.as_str(), typed]);
+        let carried = read(&store, "f1", None, None).events;
+        let at = carried
+            .iter()
+            .position(|event| matches!(event, Event::TurnEnded { .. }))
+            .expect("the failed turn ended");
+        assert_eq!(failures(&carried[at..=at]).len(), 1);
+        assert!(matches!(carried[at + 1], Event::TurnBegan { .. }));
+    }
+
+    /// A person's words with no answer yet are a turn begun and not ended. Calls made side
+    /// by side each begin and end by their own id, each when its own result says it came
+    /// back, though omp writes the batch's results together once the last returned.
+    #[test]
+    fn calls_side_by_side_end_each_when_it_came_back() {
+        let home = Home::new("side-by-side");
+        let file = home.write(FILED, &[SESSION, ASKED]);
+        let store = home.store(Harness::Omp, None);
+        let asked = read(&store, "f1", None, None);
+        assert!(matches!(asked.events[0], Event::TurnBegan { .. }));
+        assert!(
+            !asked
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::TurnEnded { .. }))
+        );
+
+        home.append(
+            &file,
+            &[
+                r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-04T19:05:56.294Z","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":"k1","name":"bash","arguments":{"command":"sleep 20"}},{"type":"toolCall","id":"k2","name":"bash","arguments":{"command":"sleep 6"}},{"type":"toolCall","id":"k3","name":"read","arguments":{"path":"runtime.sh"}}]}}"#,
+                r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-10-04T19:06:16.652Z","message":{"role":"toolResult","toolCallId":"k1","toolName":"bash","timestamp":1791140776586,"content":[]}}"#,
+                r#"{"type":"message","id":"d","parentId":"c","timestamp":"2026-10-04T19:06:16.701Z","message":{"role":"toolResult","toolCallId":"k2","toolName":"bash","timestamp":1791140762311,"content":[]}}"#,
+                r#"{"type":"message","id":"e","parentId":"d","timestamp":"2026-10-04T19:06:16.789Z","message":{"role":"toolResult","toolCallId":"k3","toolName":"read","timestamp":1791140756309,"content":[]}}"#,
+            ],
+        );
+        let calls = read(&store, "f1", None, Some(&asked.cursor));
+        let mut began = Vec::new();
+        let mut ended = Vec::new();
+        for event in &calls.events {
+            match event {
+                Event::CallBegan { call, .. } => began.push(call.id.as_str()),
+                Event::CallEnded { at, id, .. } => ended.push((id.as_str(), *at)),
+                Event::TurnEnded { .. } => panic!("the turn goes on: {event:?}"),
+                _ => {}
+            }
+        }
+        assert_eq!(began, ["k1", "k2", "k3"]);
+        assert_eq!(
+            ended,
+            [
+                ("k1", 1_791_140_776_586),
+                ("k2", 1_791_140_762_311),
+                ("k3", 1_791_140_756_309)
+            ]
+        );
+    }
+}
