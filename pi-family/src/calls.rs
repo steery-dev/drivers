@@ -1,10 +1,11 @@
 //! What an omp tool call is: its tool as Steery spells it, its group, Steery's own tool
 //! where it is one, and the questions an `ask` puts to the person.
 //!
-//! The groups are Steery's (`steery-types` `calls::tool_group`), read off a tool's name
+//! The groups are Steery's (`steery-types` `calls::TOOL_GROUPS`), read off a tool's name
 //! alone, never its arguments: omp's own tools by name, a per-conversation rename
-//! `<word>_<tool>` as the tool it renames, an MCP tool by its server, and a `write` to an
-//! `xd://` device as the device's tool, which is how omp mounts its MCP tools as files.
+//! `<word>_<tool>` as the tool it renames, and an MCP tool by its server. A `write` to an
+//! `xd://` device, which is how omp mounts its MCP tools as files, is the call it makes
+//! (PROTOCOL.md §4.1): the device's tool, with the arguments the device reads.
 
 use std::path::Path;
 
@@ -32,7 +33,9 @@ pub fn servers(root: &Path) -> Vec<String> {
 }
 
 /// One call as the harness wrote it: `toolCall {id, name, arguments}` in the assistant
-/// message `response`, or as a moment names it, which says no response.
+/// message `response`, or as a moment names it, which says no response. A `write` to
+/// `xd://<tool>` is that tool's call, with `content` as its arguments: JSON as the device
+/// parses it, else the text whole.
 pub fn call(
     id: &str,
     name: &str,
@@ -40,20 +43,24 @@ pub fn call(
     response: Option<&str>,
     servers: &[String],
 ) -> Call {
-    let tool = spelled(name, servers);
-    // omp's `write` to `xd://<tool>` invokes that tool: the call is the device's.
-    let device = renames(&name.to_lowercase(), "write")
-        .then(|| input.get("path").and_then(Value::as_str))
-        .flatten()
-        .and_then(|path| path.strip_prefix("xd://"))
-        .map(|device| spelled(device, servers));
-    let invoked = device.as_deref().unwrap_or(&tool);
-    let (group, server) = group(invoked);
-    let steery = invoked
+    let (tool, input) = match device(name, &input) {
+        Some(device) => {
+            let arguments = match input.get("content") {
+                Some(Value::String(content)) => serde_json::from_str::<Value>(content)
+                    .unwrap_or_else(|_| Value::String(content.clone())),
+                Some(other) => other.clone(),
+                None => Value::Object(Default::default()),
+            };
+            (spelled(device, servers), arguments)
+        }
+        None => (spelled(name, servers), input),
+    };
+    let (group, server) = group(&tool);
+    let steery = tool
         .strip_prefix("mcp__steery__")
         .filter(|tool| !tool.is_empty() && !tool.starts_with('_'))
         .map(str::to_owned);
-    let asks = (group == Group::Ask && base(&invoked.to_lowercase()) == "ask")
+    let asks = (group == Group::Ask && base(&tool.to_lowercase()) == "ask")
         .then(|| asks(&input))
         .flatten();
     Call {
@@ -67,6 +74,15 @@ pub fn call(
         parent: None,
         response: response.map(str::to_owned),
     }
+}
+
+/// The device a `write` (or a per-conversation rename of it) to `xd://<tool>` invokes.
+fn device<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
+    renames(&name.to_lowercase(), "write")
+        .then(|| input.get("path").and_then(Value::as_str))
+        .flatten()
+        .and_then(|path| path.strip_prefix("xd://"))
+        .filter(|device| !device.is_empty())
 }
 
 /// A tool as Steery spells it: omp's `mcp__<server>_<tool>` as `mcp__<server>__<tool>`
@@ -348,3 +364,49 @@ const KINDS: &[(Group, &[&str])] = &[
 
 /// The first words that say a tool no MCP server offers drives a browser.
 const BROWSER_WORDS: &[&str] = &["browser", "chrome", "playwright", "puppeteer"];
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    /// A `write` to a device is the call it makes, so whoever reads it reads the command it
+    /// runs: `bash` with its own arguments, a shell call.
+    #[test]
+    fn a_device_write_reads_as_the_call_it_makes() {
+        let servers = vec![STEERY.to_owned()];
+        let made = call(
+            "c1",
+            "write",
+            json!({"path": "xd://bash", "content": "{\"command\":\"rm -rf x\"}"}),
+            None,
+            &servers,
+        );
+        assert_eq!(made.tool, "bash");
+        assert_eq!(made.input, json!({"command": "rm -rf x"}));
+        assert_eq!(made.group, Group::Shell);
+
+        let steery = call(
+            "c2",
+            "write",
+            json!({"path": "xd://mcp__steery_sessions_describe", "content": "{\"text\":\"t\"}"}),
+            None,
+            &servers,
+        );
+        assert_eq!(steery.tool, "mcp__steery__sessions_describe");
+        assert_eq!(steery.steery.as_deref(), Some("sessions_describe"));
+        assert_eq!(steery.group, Group::Steery);
+
+        let file = call(
+            "c3",
+            "write",
+            json!({"path": "/tmp/a.rs", "content": "fn main() {}"}),
+            None,
+            &servers,
+        );
+        assert_eq!(file.tool, "write");
+        assert_eq!(file.input["path"], "/tmp/a.rs");
+        assert_eq!(file.group, Group::FilesEdit);
+    }
+}
