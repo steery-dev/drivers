@@ -13,8 +13,36 @@ the program protocol (`specs/PROTOCOL.md` in Steery's repository).
 |---|---|---|---|
 | `omp` | omp | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
+| `grok-bot` | Grok Bot | [`grok-bot`](grok-bot/) | observe, drive, live (native gateway) |
 
 `codex` and `claude-code` follow.
+
+Grok Bot uses `grokbot-gateway.mjs` beside its binary, or the `cli` setting.
+The wrapper reads the signed-in macOS app account through Keychain. Unlock Keychain
+before a driver call. Other platforms require `CURSOR_ACCESS_TOKEN` and
+`SAND_CLIENT_VERSION`. Credentials stay in process memory.
+
+The driver reads gateway conversations, continues or creates bots, and proves accepted
+input from its nonce. It does not select models, fork history, steer a running turn,
+or expose native permission hooks. `held` reports `nobody` when both gateway running
+flags are false, otherwise a holder whose stop is `beyond`. Stop remote turns in Grok Bot.
+
+Gateway records are not host files: `transcripts` is empty and `harness.transcript`
+is absent. `sessions/read` still reads gateway records. Carry is unavailable.
+
+Connect Steery once in your own Grok Bot account. `setup/plan` observes `getMcpState`,
+accepts a connected personal connector with the requested URL, and otherwise refuses
+with that step in `notes`. It never changes account configuration. No local setup
+entries apply because this harness does not read local skills or configuration.
+
+No per-bot URL or header substitution was found in the installed app's connector
+schema and resolver. Supply your own bot ID as `session.external_id` with
+`session.harness=grok-bot`. If the bot cannot see its own ID, it must not describe
+a session or guess from the roster. Added-driver runtime routing awaits W4.
+
+Build the Grok Bot crate with its SDK checkout beside this repository as
+`steery-grokbot`, then run `cargo build --manifest-path grok-bot/Cargo.toml`.
+
 
 ## Building
 
