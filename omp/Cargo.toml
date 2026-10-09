@@ -1,0 +1,16 @@
+[package]
+name = "steery-driver-omp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Steery's official driver for omp: it reads omp's conversations, plans its setup, and says how to start, read and resume an omp turn."
+
+[dependencies]
+steery-sdk = { path = "/root/wt/steery-sdk-20261009/crates/steery-sdk" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros", "process", "time"] }
+
+# Its own workspace, so it builds alone.
+[workspace]
