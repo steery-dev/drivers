@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Act, Door, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked, Model,
-    Models, ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample,
-    Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, Unlisted,
+    Act, Beyond, Door, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked,
+    Model, Models, ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark,
+    Sample, Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, Unlisted,
 };
 use steery_sdk::{Error, refusal};
 use tokio::sync::Mutex;
@@ -26,6 +26,10 @@ use crate::turn::{self, EFFORT, Turn};
 /// How a Claude Code session in a terminal holds its conversation, as the line that asks
 /// its person to let it be stopped says it.
 const IN_A_TERMINAL: &str = "in a terminal";
+
+/// What a person reads of a process holding a conversation that Claude Code's registry
+/// does not name: Steery cannot speak to it or stop it.
+const UNREACHED: &str = "Claude Code open where Steery can't reach: quit it";
 
 /// What a terminal into a Claude Code background session says: the session holds the
 /// conversation, and attaching to it starts nothing beside it.
@@ -63,8 +67,9 @@ fn now() -> u64 {
 /// keeps the conversation and asks nobody (its owner token); a terminal by the runtime's
 /// stop ladder, once its person confirmed that very process. Claude Code opens its
 /// transcript only to append to it, so the kernel says nothing between writes, and the
-/// registry is what holds it. A session with messaging off registers nothing: the runtime
-/// looks for a process holding or naming the transcripts.
+/// registry is what holds it. A process the registry does not name — a session with
+/// messaging off, an app with it loaded — that holds or names the transcripts is
+/// somewhere this driver cannot speak to or stop, and is never signalled.
 pub fn held(root: &Path, store: &Store, held: Held) -> HeldBy {
     let dir = registry::dir(root);
     match registry::live(&dir, &held.external_id) {
@@ -76,7 +81,10 @@ pub fn held(root: &Path, store: &Store, held: Held) -> HeldBy {
                     .map(|session| session.transcripts)
                     .unwrap_or_default(),
                 strays: false,
-                beyond: Vec::new(),
+                beyond: vec![Beyond {
+                    arg: None,
+                    line: UNREACHED.into(),
+                }],
             },
         }),
     }

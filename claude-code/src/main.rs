@@ -178,7 +178,13 @@ impl Program for ClaudeCode {
 fn info() -> wire::HarnessInfo {
     wire::HarnessInfo {
         levels: wire::Level::ALL.to_vec(),
-        minimum: None,
+        // The first release whose `claude agents --json --all` lists a background session
+        // that has ended (2.1.168's `agents` has no `--all`), which is how a turn is seen
+        // to end.
+        minimum: Some(wire::Minimum {
+            release: "2.1.169".into(),
+            update: Some("claude update".into()),
+        }),
         sign_in: Some("run /login".into()),
         knowing: KNOWING.into(),
         transcript: Some(TRANSCRIPT.into()),
