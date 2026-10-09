@@ -1172,6 +1172,26 @@ mod tests {
             line(Stream::Stdout, done, None).ended.map(|e| e.state),
             Some(TurnState::Finished)
         );
+        let status = |status: &str| {
+            let completed = json!({"method": "turn/completed", "params": {"threadId": "01a1", "turn": {"id": "u", "status": status}}});
+            line(Stream::Stdout, &completed.to_string(), None)
+                .ended
+                .map(|e| e.state)
+        };
+        assert_eq!(status("interrupted"), Some(TurnState::Interrupted));
+        assert_eq!(status("inProgress"), None);
+        let started = line(
+            Stream::Stdout,
+            r#"{"id":4,"result":{"turn":{"id":"u"}}}"#,
+            None,
+        );
+        assert_eq!(started.named, None, "a turn's response names no thread");
+        let retrying = line(
+            Stream::Stdout,
+            r#"{"method":"error","params":{"willRetry":false}}"#,
+            None,
+        );
+        assert_eq!(retrying.ended, None, "only turn/completed ends a turn");
         assert_eq!(
             line(
                 Stream::Stderr,

@@ -287,6 +287,13 @@ pub async fn owns(router: &Path, thread: &str) -> bool {
     .is_some()
 }
 
+/// Whether a broadcast is the window that owns the thread speaking of this machine's
+/// thread: anything another client says of it is no state of the owner's.
+fn of_owner(frame: &Value, owner: &str) -> bool {
+    frame.get("sourceClientId").and_then(Value::as_str) == Some(owner)
+        && frame.pointer("/params/hostId").and_then(Value::as_str) == Some("local")
+}
+
 /// How long a thread nobody asked about is still followed.
 const FOLLOWER_IDLE: Duration = Duration::from_secs(60);
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
@@ -656,12 +663,7 @@ impl Followers {
                 let mut threads = self.threads();
                 match threads.get_mut(thread) {
                     Some(follow) => match follow.owner.clone() {
-                        Some(owner)
-                            if frame.get("sourceClientId").and_then(Value::as_str)
-                                == Some(&owner)
-                                && frame.pointer("/params/hostId").and_then(Value::as_str)
-                                    == Some("local") =>
-                        {
+                        Some(owner) if of_owner(frame, &owner) => {
                             if frame.get("version").and_then(Value::as_u64) != Some(11) {
                                 follow.projection = Projection::default();
                                 None
@@ -934,5 +936,246 @@ mod tests {
             refusal("\"thread-not-loaded\""),
             Some(steery_sdk::refusal::REFUSED)
         );
+    }
+
+    #[test]
+    fn owner_projection_requires_ordered_patches_and_explicit_idle() {
+        let mut state = Projection::default();
+        assert!(state.change(&snapshot("active", "inProgress")));
+        assert_eq!(state.execution(), Some(Execution::Running));
+        assert_eq!(state.latest.as_deref(), Some("turn:newest"));
+        assert!(state.change(&json!({"type":"patches","baseRevision":7,"revision":8,"patches":[
+            {"op":"replace","path":["turnHistory","history","entitiesByKey","turn:newest","status"],"value":"completed"},
+            {"op":"replace","path":["threadRuntimeStatus","type"],"value":"idle"}
+        ]})));
+        assert_eq!(state.execution(), Some(Execution::Finished));
+        assert!(
+            !state.change(&json!({"type":"patches","baseRevision":7,"revision":9,"patches":[]}))
+        );
+        assert_eq!(state.execution(), None);
+    }
+
+    #[test]
+    fn new_turn_and_unsupported_history_patch_revoke_idle() {
+        let mut state = Projection::default();
+        assert!(state.change(&snapshot("idle", "completed")));
+        assert_eq!(state.execution(), Some(Execution::Finished));
+        assert!(state.change(
+            &json!({"type":"patches","baseRevision":7,"revision":8,"patches":[
+                {"op":"add","path":["turnHistory","history","islands",0,"entries","-"],
+                 "value":{"key":"turn:next","value":"turn:next"}}
+            ]})
+        ));
+        assert_eq!(state.execution(), None);
+        assert!(!state.change(
+            &json!({"type":"patches","baseRevision":8,"revision":9,"patches":[
+                {"op":"replace","path":["turnHistory","history","islands",0,"entries"],
+                 "value":[{"key":"turn:newest"}]}
+            ]})
+        ));
+        assert_eq!(state.execution(), None);
+        assert!(state.change(&snapshot("idle", "completed")));
+        assert!(!state.change(
+            &json!({"type":"patches","baseRevision":7,"revision":8,"patches":[
+                {"op":"move","path":["threadRuntimeStatus"],"value":{"type":"active"}}
+            ]})
+        ));
+        assert_eq!(state.execution(), None);
+    }
+
+    #[test]
+    fn idle_requires_complete_history_and_known_latest_status() {
+        let mut state = Projection::default();
+        let idle = |revision: u64, history: Option<Value>| {
+            let mut change = json!({"type":"snapshot","revision":revision,"conversationState":{
+                "threadRuntimeStatus":{"type":"idle"}
+            }});
+            if let Some(history) = history {
+                change["conversationState"]["turnHistory"] =
+                    json!({"kind":"canonical","history":history});
+            }
+            change
+        };
+        assert!(state.change(&idle(1, None)));
+        assert_eq!(state.execution(), None);
+        assert!(state.change(&idle(
+            2,
+            Some(
+                json!({"islands":[{"entries":[{"key":"turn:new","value":"turn:new"}],"newerBoundary":{"status":"exhausted"}}],"entitiesByKey":{}})
+            )
+        )));
+        assert_eq!(state.execution(), None);
+        assert!(state.change(&idle(3, Some(json!({"islands":[],"entitiesByKey":{}})))));
+        assert_eq!(state.execution(), None);
+        assert!(state.change(&idle(
+            4,
+            Some(
+                json!({"islands":[{"entries":[],"newerBoundary":{"status":"exhausted"}}],"entitiesByKey":{}})
+            )
+        )));
+        assert_eq!(state.execution(), Some(Execution::Finished));
+    }
+
+    #[test]
+    fn partial_newest_boundary_and_local_entry_never_borrow_older_idle() {
+        let mut state = Projection::default();
+        let mut partial = snapshot("idle", "completed");
+        partial["conversationState"]["turnHistory"]["history"]["islands"][0]["newerBoundary"] =
+            json!({"status":"available","boundaryId":"tail:0:newer","handle":"next"});
+        assert!(state.change(&partial));
+        assert_eq!(state.execution(), None);
+
+        let mut missing = snapshot("idle", "completed");
+        missing["conversationState"]["turnHistory"]["history"]["islands"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("newerBoundary");
+        assert!(state.change(&missing));
+        assert_eq!(state.execution(), None);
+
+        let mut legacy = snapshot("idle", "completed");
+        legacy["conversationState"]["turnHistory"]["kind"] = json!("legacy");
+        assert!(state.change(&legacy));
+        assert_eq!(state.execution(), None);
+
+        let mut malformed = snapshot("idle", "completed");
+        malformed["conversationState"]["turnHistory"]["history"]["islands"][0]["entries"] =
+            json!([{"key":"turn:newest"}]);
+        assert!(state.change(&malformed));
+        assert_eq!(state.execution(), None);
+
+        let mut local = snapshot("idle", "completed");
+        local["conversationState"]["turnHistory"]["history"]["islands"][0]["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"key":"tail:0:local:1","value":"tail:0:local:1"}));
+        local["conversationState"]["turnHistory"]["history"]["entitiesByKey"]["tail:0:local:1"] =
+            json!({"status":"inProgress"});
+        assert!(state.change(&local));
+        assert_eq!(state.latest.as_deref(), Some("tail:0:local:1"));
+        assert_eq!(state.execution(), Some(Execution::Running));
+    }
+
+    #[test]
+    fn only_the_exact_owner_of_this_machine_s_thread_says_its_state() {
+        let frame = |owner: &str, host: &str| {
+            json!({"type":"broadcast","sourceClientId":owner,"version":11,
+                "method":"thread-stream-state-changed",
+                "params":{"conversationId":"thread","hostId":host,"change":snapshot("active","inProgress")}})
+        };
+        assert!(of_owner(&frame("owner", "local"), "owner"));
+        assert!(!of_owner(&frame("wrong", "local"), "owner"));
+        assert!(!of_owner(&frame("owner", "remote"), "owner"));
+    }
+
+    /// A router that introduces its client, names `owner-1` as every thread's owner, and
+    /// answers each follower request with the next of `replies`; the frames it was sent.
+    async fn router(replies: Vec<Value>) -> (PathBuf, tokio::task::JoinHandle<Vec<Value>>) {
+        let dir = std::env::temp_dir().join(format!(
+            "sr{}",
+            &uuid::Uuid::now_v7().simple().to_string()[24..]
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("ipc.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let served = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut replies = replies.into_iter();
+            let mut frames = Vec::new();
+            loop {
+                let mut length = [0u8; 4];
+                if stream.read_exact(&mut length).await.is_err() {
+                    break;
+                }
+                let mut body = vec![0u8; u32::from_le_bytes(length) as usize];
+                stream.read_exact(&mut body).await.unwrap();
+                let frame: Value = serde_json::from_slice(&body).unwrap();
+                let id = frame["requestId"].clone();
+                let mut answer = match frame["method"].as_str() {
+                    Some("initialize") => {
+                        json!({"resultType":"success","result":{"clientId":"steery-1"}})
+                    }
+                    Some("thread-owner-discovery") => {
+                        json!({"resultType":"success","handledByClientId":"owner-1"})
+                    }
+                    _ => replies.next().expect("a reply for every request"),
+                };
+                answer["type"] = json!("response");
+                answer["requestId"] = id;
+                frames.push(frame);
+                let body = serde_json::to_vec(&answer).unwrap();
+                stream
+                    .write_all(&(body.len() as u32).to_le_bytes())
+                    .await
+                    .unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+            std::fs::remove_dir_all(dir).ok();
+            frames
+        });
+        (socket, served)
+    }
+
+    /// An interrupt goes to the window that owns the thread, in the version the app
+    /// speaks, and stands only where the app says it interrupted exactly that turn.
+    #[tokio::test]
+    async fn an_interrupt_stands_only_for_the_turn_it_named() {
+        let ok = |result: Value| json!({"resultType":"success","result":result});
+        let (socket, served) = router(vec![
+            ok(json!({"interruptedTurnId":"t1","ok":true})),
+            ok(json!({"interruptedTurnId":null,"ok":true})),
+            ok(json!({"interruptedTurnId":"t2","ok":true})),
+            ok(json!({"interruptedTurnId":"t1","ok":true,"goalPauseError":"failed"})),
+            json!({"resultType":"error","error":"not-owner"}),
+        ])
+        .await;
+        let mut app = App::open(&socket).await.unwrap();
+        assert_eq!(app.interrupt("thread-1", "t1").await, Ok(()));
+        for _ in 0..4 {
+            assert!(app.interrupt("thread-1", "t1").await.is_err());
+        }
+        drop(app);
+        let frames = served.await.unwrap();
+        let interrupt = frames
+            .iter()
+            .find(|frame| frame["method"] == "thread-follower-interrupt-turn")
+            .unwrap();
+        assert_eq!(interrupt["version"], 4);
+        assert_eq!(interrupt["sourceClientId"], "steery-1");
+        assert_eq!(interrupt["targetClientId"], "owner-1");
+        assert_eq!(interrupt["params"]["conversationId"], "thread-1");
+        assert_eq!(interrupt["params"]["expectedTurnId"], "t1");
+    }
+
+    /// Words go to the owning window as its composer's next turn, on what its person
+    /// picked, and nothing of a pick where none was.
+    #[tokio::test]
+    async fn words_start_the_window_s_turn_on_what_its_person_picked() {
+        let ok = json!({"resultType":"success","result":{}});
+        let (socket, served) = router(vec![ok.clone(), ok]).await;
+        let mut app = App::open(&socket).await.unwrap();
+        assert!(matches!(
+            app.say("thread-1", "go", Some("gpt-6-sol"), Some("xhigh"))
+                .await,
+            Took::Yes
+        ));
+        assert!(matches!(
+            app.say("thread-1", "go", None, None).await,
+            Took::Yes
+        ));
+        drop(app);
+        let frames = served.await.unwrap();
+        let started: Vec<&Value> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "thread-follower-start-turn")
+            .map(|frame| &frame["params"]["turnStart"]["request"])
+            .collect();
+        assert_eq!(started.len(), 2);
+        assert_eq!(
+            (&started[0]["model"], &started[0]["effort"]),
+            (&json!("gpt-6-sol"), &json!("xhigh"))
+        );
+        assert!(started[1].get("model").is_none() && started[1].get("effort").is_none());
+        assert_eq!(started[0]["threadId"], "thread-1");
     }
 }

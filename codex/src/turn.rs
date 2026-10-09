@@ -159,6 +159,19 @@ async fn start(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<String, appserver::Failed> {
+    let started = server
+        .call("turn/start", turn_start(thread, words, model, effort))
+        .await?;
+    started
+        .pointer("/turn/id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or(appserver::Failed::Ended)
+}
+
+/// `turn/start` of the words in the thread, on the `model` and `effort` picked, and
+/// nothing of either where nothing was.
+fn turn_start(thread: &str, words: &str, model: Option<&str>, effort: Option<&str>) -> Value {
     let mut request = json!({"threadId": thread, "input": appserver::said(words)});
     if let Some(model) = model {
         request["model"] = json!(model);
@@ -166,12 +179,7 @@ async fn start(
     if let Some(effort) = effort {
         request["effort"] = json!(effort);
     }
-    let started = server.call("turn/start", request).await?;
-    started
-        .pointer("/turn/id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or(appserver::Failed::Ended)
+    request
 }
 
 async fn accept(
@@ -326,5 +334,16 @@ mod tests {
         let done = json!({"method": "turn/completed", "params": {"threadId": "t", "turn": {"id": "u", "status": "completed"}}});
         assert!(ends(&done, "t", "u"));
         assert!(!ends(&done, "t", "v"));
+    }
+
+    #[test]
+    fn a_turn_starts_on_what_its_person_picked() {
+        let asked = turn_start("th", "go", None, None);
+        assert!(asked.get("model").is_none() && asked.get("effort").is_none());
+        let started = turn_start("th", "go", Some("gpt-6-sol"), Some("xhigh"));
+        assert_eq!(
+            (&started["threadId"], &started["model"], &started["effort"]),
+            (&json!("th"), &json!("gpt-6-sol"), &json!("xhigh"))
+        );
     }
 }

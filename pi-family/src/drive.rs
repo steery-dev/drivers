@@ -85,8 +85,6 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
         ));
     }
     let binary = harness.need_binary()?;
-    let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned()];
-    argv.extend(["-p", "--mode", "json"].map(String::from));
     // omp names a conversation by its id, pi by its transcript.
     let named = |id: &str, file: PathBuf| match harness {
         Harness::Omp => Ok(id.to_owned()),
@@ -95,7 +93,7 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
             .into_string()
             .map_err(|_| Error::invalid("the transcript's path is not UTF-8")),
     };
-    match (start.act, start.external_id.as_deref()) {
+    let opened = match (start.act, start.external_id.as_deref()) {
         (Act::Continue, Some(id)) => {
             let file = store.find(id)?;
             if let Some(cwd) = transcripts::head(&file).cwd
@@ -114,25 +112,25 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
                 Harness::Omp => "--resume",
                 Harness::Pi => "--session",
             };
-            argv.extend([flag.into(), named(id, file)?]);
+            Some([flag.into(), named(id, file)?])
         }
         (Act::Fork, Some(id)) => {
             let file = store.find(id)?;
-            argv.extend(["--fork".into(), named(id, file)?]);
+            Some(["--fork".into(), named(id, file)?])
         }
         (Act::Continue | Act::Fork, None) => {
             return Err(Error::invalid(
                 "a continue or a fork names its conversation",
             ));
         }
-        (Act::New, _) => {}
+        (Act::New, _) => None,
         (Act::Hand, _) => {
             return Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
                 format!("{} takes no handed-over conversation", harness.id()),
             ));
         }
-    }
+    };
     if harness == Harness::Omp
         && let Some(model) = &start.model
     {
@@ -147,20 +145,13 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
             Err(why) => return Err(Error::refused(refusal::START_FAILED, why)),
         }
     }
-    if let Some(model) = &start.model {
-        argv.extend(["--model".into(), model.clone()]);
-    }
-    if let Some(thinking) = &start.thinking {
-        argv.extend(["--thinking".into(), thinking.clone()]);
-    }
-    if harness == Harness::Pi {
-        if let Some(model) = &start.model {
-            argv.push(format!("--{STEERY_MODEL}={model}"));
-        }
-        if let Some(thinking) = &start.thinking {
-            argv.push(format!("--{STEERY_THINKING}={thinking}"));
-        }
-    }
+    let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned()];
+    argv.extend(args(
+        harness,
+        opened,
+        start.model.as_deref(),
+        start.thinking.as_deref(),
+    ));
     Ok(Launch {
         argv,
         env: BTreeMap::new(),
@@ -168,6 +159,33 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
         stdin: Stdin::Words,
         inbox: false,
     })
+}
+
+/// A turn's arguments after the binary: one run in JSON lines, the conversation it opens
+/// as the harness names it, and the pick — to pi also as Steery's plugin's own flags.
+fn args(
+    harness: Harness,
+    opened: Option<[String; 2]>,
+    model: Option<&str>,
+    thinking: Option<&str>,
+) -> Vec<String> {
+    let mut args: Vec<String> = ["-p", "--mode", "json"].map(String::from).into();
+    args.extend(opened.into_iter().flatten());
+    if let Some(model) = model {
+        args.extend(["--model".into(), model.to_owned()]);
+    }
+    if let Some(thinking) = thinking {
+        args.extend(["--thinking".into(), thinking.to_owned()]);
+    }
+    if harness == Harness::Pi {
+        if let Some(model) = model {
+            args.push(format!("--{STEERY_MODEL}={model}"));
+        }
+        if let Some(thinking) = thinking {
+            args.push(format!("--{STEERY_THINKING}={thinking}"));
+        }
+    }
+    args
 }
 
 /// What each turn's lines said so far, by the turn they belong to: a turn is held from
@@ -557,6 +575,7 @@ fn plain_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steery_sdk::wire::harness::HolderStop;
 
     fn asked(tools: ReaderTools) -> Reader {
         Reader {
@@ -667,5 +686,266 @@ mod tests {
             refused_by(Harness::Omp, "Cannot fork: source session"),
             None
         );
+        // As omp 18.4.4 says a conversation whose folder is gone.
+        assert_eq!(
+            refused_by(
+                Harness::Omp,
+                r#"Error: Session "01a0f1ae-71a7-758d-8931-92ecb219b85d" belongs to a directory that no longer exists (/tmp/cwdgone-a); run interactively to move it into the current project."#
+            ),
+            Some(refusal::NO_PLACE)
+        );
+    }
+
+    /// A pick goes to the harness as it spells it, the provider in the model's name kept;
+    /// pi's also goes to Steery's plugin, which picks exactly or refuses.
+    #[test]
+    fn a_pick_keeps_its_provider_and_model() {
+        let resume = || Some(["--resume".to_owned(), "source".to_owned()]);
+        assert_eq!(
+            args(Harness::Omp, resume(), Some("provider/model"), Some("high")),
+            [
+                "-p",
+                "--mode",
+                "json",
+                "--resume",
+                "source",
+                "--model",
+                "provider/model",
+                "--thinking",
+                "high"
+            ]
+        );
+        assert_eq!(
+            args(Harness::Pi, None, Some("provider/model"), Some("high")),
+            [
+                "-p",
+                "--mode",
+                "json",
+                "--model",
+                "provider/model",
+                "--thinking",
+                "high",
+                "--steery-model=provider/model",
+                "--steery-thinking=high"
+            ]
+        );
+        assert_eq!(
+            args(
+                Harness::Omp,
+                Some(["--fork".to_owned(), "01a0cd6f".to_owned()]),
+                None,
+                None
+            ),
+            ["-p", "--mode", "json", "--fork", "01a0cd6f"]
+        );
+    }
+
+    /// A run's first line names its conversation; it ends on a terminal `agent_end`, as the
+    /// model's last stop says, an error with the harness's own words; nothing else ends it,
+    /// and the lines it writes as it settles say nothing.
+    #[test]
+    fn agent_end_is_the_end_and_an_error_says_what_went_wrong() {
+        let runs = Runs::default();
+        let read = |turn: &str, line: Value| {
+            runs.read(
+                Harness::Omp,
+                TurnRead {
+                    turn: turn.into(),
+                    stream: Stream::Stdout,
+                    line: line.to_string(),
+                    delivery: None,
+                },
+            )
+        };
+        let ended = |last: Value| {
+            serde_json::json!({"type": "agent_end", "isTerminal": true, "messages": [
+                {"role": "user"},
+                last,
+                {"role": "toolResult"}
+            ]})
+        };
+        let stopped =
+            |stop: &str| ended(serde_json::json!({"role": "assistant", "stopReason": stop}));
+        let state = |turn: &str, line: Value| read(turn, line).ended.map(|ended| ended.state);
+        assert_eq!(
+            read(
+                "a",
+                serde_json::json!({"type": "session", "version": 3, "id": "01a0cd6f", "cwd": "/w"})
+            )
+            .named
+            .as_deref(),
+            Some("01a0cd6f")
+        );
+        assert_eq!(
+            read(
+                "a",
+                serde_json::json!({"type": "turn_end", "message": {"stopReason": "stop"}})
+            )
+            .ended,
+            None
+        );
+        assert_eq!(
+            read(
+                "a",
+                serde_json::json!({"type": "agent_end", "isTerminal": false})
+            )
+            .ended,
+            None
+        );
+        assert_eq!(state("a", stopped("stop")), Some(TurnState::Finished));
+        assert_eq!(
+            read("a", serde_json::json!({"type": "message_end"})),
+            TurnLine::default(),
+            "a run that ended says nothing as it settles"
+        );
+        assert_eq!(state("b", stopped("aborted")), Some(TurnState::Interrupted));
+        // As omp keeps it, 2026-09-16.
+        let refused = r#"402 {"type":"error","error":{"type":"unknown_error","message":"Insufficient Balance"}}"#;
+        assert_eq!(
+            read(
+                "c",
+                ended(
+                    serde_json::json!({"role": "assistant", "stopReason": "error",
+                    "errorStatus": 402, "errorMessage": refused})
+                )
+            )
+            .ended,
+            Some(Ended {
+                state: TurnState::Failed,
+                error: Some(refused.to_owned())
+            })
+        );
+    }
+
+    /// A conversation on disk is idle where nobody holds it, which the runtime looks for
+    /// itself; one with no transcript has no sample.
+    #[test]
+    fn a_transcript_nobody_holds_is_an_idle_conversation() {
+        let home = std::env::temp_dir().join(format!("steery-omp-idle-{}", std::process::id()));
+        let root = Harness::Omp.default_root(&home);
+        let folder = root.join("sessions/--tmp--");
+        std::fs::create_dir_all(&folder).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let file = folder.join(format!("2026-09-29T20-00-00-000Z_{id}.jsonl"));
+        std::fs::write(
+            &file,
+            format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"cwd\":\"/tmp\"}}\n"),
+        )
+        .unwrap();
+        let store = Store::new(Harness::Omp, &home, root, None);
+        let held = |id: &str| Held {
+            external_id: id.into(),
+        };
+        let HeldBy::Look(Looked { look }) = super::held(&store, held(id)) else {
+            panic!("the runtime looks for an omp's holder");
+        };
+        assert_eq!(look.transcripts, [file]);
+        assert!(!look.strays, "every omp holds its transcript open");
+        let sample = idle(&store, held(id)).sample.expect("on disk: a sample");
+        assert_eq!(sample.state, Execution::Finished);
+        assert!(sample.if_unheld && sample.vacant);
+        assert!(idle(&store, held("bbbbbbbb")).sample.is_none());
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    /// What a person runs is what the harness gets, each part one literal word: the folder
+    /// entered, the agent folder where it is not the default, the conversation by its own
+    /// way in. Only a plain id and an absolute folder make a command.
+    #[test]
+    fn the_command_runs_literally_in_its_folder_and_configuration() {
+        let home = std::env::temp_dir().join(format!("steery-pi-terminal-{}", std::process::id()));
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let cwd = home.join("it's $HOME; work");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        let filed = |root: &Path| {
+            let folder = root.join("sessions/--w--");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(
+                folder.join(format!("2026-09-29T20-00-00-000Z_{id}.jsonl")),
+                format!("{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"cwd\":\"/w\"}}\n"),
+            )
+            .unwrap();
+        };
+        for harness in [Harness::Omp, Harness::Pi] {
+            let stand_in = bin.join(harness.id());
+            std::fs::write(
+                &stand_in,
+                "#!/bin/sh\npwd\nprintf '%s\\n' \"${PI_CODING_AGENT_DIR-default}\" \"$@\"\n",
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let moved = home.join("agent's $(touch nope)");
+        for (harness, root, args) in [
+            (
+                Harness::Omp,
+                Harness::Omp.default_root(&home),
+                vec![format!("--resume={id}")],
+            ),
+            (Harness::Omp, moved.clone(), vec![format!("--resume={id}")]),
+            (
+                Harness::Pi,
+                moved.clone(),
+                vec!["--session".into(), id.into()],
+            ),
+        ] {
+            filed(&root);
+            let store = Store::new(harness, &home, root.clone(), None);
+            let at = |id: &str, cwd: &Path, holder: Option<Holder>| {
+                terminal(
+                    &home,
+                    &store,
+                    Terminal {
+                        external_id: id.into(),
+                        cwd: cwd.to_owned(),
+                        holder,
+                    },
+                )
+            };
+            let opened = at(id, &cwd, None).unwrap();
+            assert!(opened.app.is_none() && opened.line.is_none());
+            let result = std::process::Command::new("/bin/sh")
+                .args(["-c", &opened.command])
+                .env("PATH", &bin)
+                .env_remove("PI_CODING_AGENT_DIR")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let agent = if root == harness.default_root(&home) {
+                "default".to_owned()
+            } else {
+                root.display().to_string()
+            };
+            let mut expected = vec![cwd.display().to_string(), agent];
+            expected.extend(args);
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                format!("{}\n", expected.join("\n")),
+                "{harness:?}"
+            );
+            assert!(!cwd.join("nope").exists());
+            let beside = at(
+                id,
+                &cwd,
+                Some(Holder::Person {
+                    door: None,
+                    stop: HolderStop::Beyond("a writer".into()),
+                }),
+            )
+            .unwrap();
+            assert!(beside.line.is_some(), "a second writer is said");
+            assert!(at(id, Path::new("relative"), None).is_err());
+            for id in ["--fork", "a b", "bbbbbbbb"] {
+                assert!(at(id, &cwd, None).is_err(), "{id}");
+            }
+        }
+        std::fs::remove_dir_all(home).ok();
     }
 }

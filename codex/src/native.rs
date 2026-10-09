@@ -346,4 +346,111 @@ mod tests {
         assert_eq!(carries(&full, "steery-delivery:d2"), Ok(false));
         assert!(carries(&json!({"id": "t1", "itemsView": "notLoaded"}), "x").is_err());
     }
+
+    /// An app server that serves `CODEX_HOME` and lists a thread's turns as `pages` says,
+    /// by cursor (`start` the first).
+    fn app_server(dir: &Path, pages: &Value) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("pages.json"), serde_json::to_vec(pages).unwrap()).unwrap();
+        let binary = dir.join("codex");
+        std::fs::write(
+            &binary,
+            r#"#!/usr/bin/env python3
+import json, os, sys
+pages = json.load(open(os.path.join(os.path.dirname(__file__), 'pages.json')))
+for line in sys.stdin:
+    request = json.loads(line)
+    if 'id' not in request:
+        continue
+    method = request.get('method')
+    if method == 'initialize':
+        result = {'codexHome': os.environ['CODEX_HOME']}
+    elif method == 'thread/turns/list':
+        result = pages[request['params'].get('cursor') or 'start']
+    else:
+        result = {}
+    print(json.dumps({'id': request['id'], 'result': result}), flush=True)
+"#,
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        binary
+    }
+
+    fn listed(id: &str, marked: bool) -> Value {
+        let items = match marked {
+            true => {
+                json!([{"type": "userMessage", "content": [{"type": "text", "text": "steery-delivery:d1"}]}])
+            }
+            false => json!([{"type": "agentMessage", "text": "steery-delivery:d1"}]),
+        };
+        json!({"id": id, "status": "completed", "itemsView": "full", "items": items})
+    }
+
+    /// The words went in as exactly one turn after the one marked before, read page by
+    /// page: none is no receipt yet; two, the mark gone, a turn listed twice, or pages
+    /// that do not advance are refused.
+    #[tokio::test]
+    async fn only_one_turn_after_the_mark_carries_the_words() {
+        let dir =
+            std::env::temp_dir().join(format!("steery-codex-carrying-{}", uuid::Uuid::now_v7()));
+        let before = listed("t1", false);
+        let page = |data: Vec<Value>, next: Value| json!({"data": data, "nextCursor": next});
+        let scenarios = [
+            (
+                json!({"start": page(vec![listed("t2", false), before.clone()], Value::Null)}),
+                Ok(None),
+            ),
+            (
+                json!({"start": page(vec![listed("t3", true)], json!("p2")),
+                       "p2": page(vec![listed("t2", false), before.clone()], Value::Null)}),
+                Ok(Some("t3".to_owned())),
+            ),
+            (
+                json!({"start": page(vec![listed("t3", true), listed("t2", true), before.clone()], Value::Null)}),
+                Err(()),
+            ),
+            (
+                json!({"start": page(vec![listed("t2", true)], Value::Null)}),
+                Err(()),
+            ),
+            (
+                json!({"start": page(vec![listed("t2", true)], json!(5))}),
+                Err(()),
+            ),
+            (
+                json!({"start": page(vec![listed("t2", true)], json!("loop")),
+                       "loop": page(Vec::new(), json!("loop"))}),
+                Err(()),
+            ),
+            (
+                json!({"start": page(vec![listed("t2", true), listed("t2", true), before.clone()], Value::Null)}),
+                Err(()),
+            ),
+        ];
+        for (pages, expected) in scenarios {
+            let binary = app_server(&dir, &pages);
+            let mut server = reader(&binary, &dir).await.unwrap();
+            let found = carrying(&mut server, "thread", Some("t1"), "steery-delivery:d1").await;
+            server.close().await;
+            assert_eq!(found.map_err(|_| ()), expected, "{pages}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An app server is the driver's only where it serves the home asked for.
+    #[tokio::test]
+    async fn an_app_server_of_another_home_is_refused() {
+        let dir = std::env::temp_dir().join(format!("steery-codex-home-{}", uuid::Uuid::now_v7()));
+        let binary = app_server(&dir, &json!({}));
+        let mut command = crate::home::helper(&binary);
+        command.env("CODEX_HOME", dir.join("elsewhere"));
+        std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
+        let server = AppServer::open(command, false).await.unwrap();
+        assert!(same_home(&server, &dir).is_err());
+        assert!(same_home(&server, &dir.join("elsewhere")).is_ok());
+        server.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
