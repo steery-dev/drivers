@@ -14,9 +14,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Join, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
 
 /// Why a call to the app server came to nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,8 +64,7 @@ pub(crate) const CLOSED_WITHIN: Duration = Duration::from_secs(10);
 /// A running `codex app-server`, initialized.
 pub(crate) struct AppServer {
     child: Child,
-    input: ChildStdin,
-    output: Lines<BufReader<ChildStdout>>,
+    wire: Wire,
     next: u64,
     /// Notifications read while waiting on a response, for a loop that waits on more:
     /// `turn/completed` may arrive while a steer is on the wire.
@@ -74,37 +76,69 @@ pub(crate) struct AppServer {
     home: Option<PathBuf>,
 }
 
+/// How messages travel: lines on an app server's own standard input and output, or
+/// WebSocket messages on a running app server's control socket, whose bytes `codex
+/// app-server proxy` carries over its standard input and output.
+enum Wire {
+    Lines {
+        input: ChildStdin,
+        output: Lines<BufReader<ChildStdout>>,
+    },
+    Socket(Box<WebSocketStream<Join<ChildStdout, ChildStdin>>>),
+}
+
 impl AppServer {
     /// Start `command app-server` and initialize it. `command` carries the binary and the
     /// environment the caller wants ([`crate::home::helper`] for a look that writes no
     /// conversation); its standard input and output are taken here.
     pub(crate) async fn open(command: tokio::process::Command, echo: bool) -> Result<Self, Failed> {
-        Self::spawn(command, &["app-server"], echo).await
+        Self::spawn(command, false, echo).await
     }
 
-    /// The app server already running for this home, reached through `codex app-server
-    /// proxy`, which finds its control socket itself.
+    /// The app server already running for this home, reached on its control socket
+    /// through `codex app-server proxy`, which finds the socket itself.
     pub(crate) async fn running(command: tokio::process::Command) -> Result<Self, Failed> {
-        Self::spawn(command, &["app-server", "proxy"], false).await
+        Self::spawn(command, true, false).await
     }
 
     async fn spawn(
         mut command: tokio::process::Command,
-        args: &[&str],
+        socket: bool,
         echo: bool,
     ) -> Result<Self, Failed> {
+        command.arg("app-server");
+        if socket {
+            command.arg("proxy");
+        }
         let mut child = command
-            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
         let input = child.stdin.take().ok_or(Failed::Ended)?;
-        let output = BufReader::new(child.stdout.take().ok_or(Failed::Ended)?).lines();
+        let output = child.stdout.take().ok_or(Failed::Ended)?;
+        let wire = match socket {
+            false => Wire::Lines {
+                input,
+                output: BufReader::new(output).lines(),
+            },
+            true => {
+                let (stream, _) = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tokio_tungstenite::client_async(
+                        "ws://localhost/",
+                        tokio::io::join(output, input),
+                    ),
+                )
+                .await
+                .map_err(|_| Failed::Io("the control socket did not answer".into()))?
+                .map_err(|e| Failed::Io(e.to_string()))?;
+                Wire::Socket(Box::new(stream))
+            }
+        };
         let mut server = Self {
             child,
-            input,
-            output,
+            wire,
             next: 0,
             pending: VecDeque::new(),
             echo,
@@ -191,9 +225,14 @@ impl AppServer {
     /// is whole on disk; kill it after.
     pub(crate) async fn close(self) {
         let Self {
-            mut child, input, ..
+            mut child, wire, ..
         } = self;
-        drop(input);
+        match wire {
+            Wire::Lines { input, .. } => drop(input),
+            Wire::Socket(mut socket) => {
+                let _ = socket.close(None).await;
+            }
+        }
         if tokio::time::timeout(CLOSED_WITHIN, child.wait())
             .await
             .is_err()
@@ -202,9 +241,23 @@ impl AppServer {
         }
     }
 
-    /// The next line, echoed where asked, a request of the app server's own refused.
+    /// The next message, echoed where asked, a request of the app server's own refused.
     async fn read(&mut self) -> Result<Value, Failed> {
-        let line = self.output.next_line().await?.ok_or(Failed::Ended)?;
+        let line = match &mut self.wire {
+            Wire::Lines { output, .. } => output.next_line().await?.ok_or(Failed::Ended)?,
+            Wire::Socket(socket) => loop {
+                match socket.next().await.ok_or(Failed::Ended)? {
+                    Ok(Message::Text(text)) => break text.to_string(),
+                    Ok(Message::Ping(bytes)) => socket
+                        .send(Message::Pong(bytes))
+                        .await
+                        .map_err(|e| Failed::Io(e.to_string()))?,
+                    Ok(Message::Close(_)) => return Err(Failed::Ended),
+                    Ok(_) => {}
+                    Err(e) => return Err(Failed::Io(e.to_string())),
+                }
+            },
+        };
         if self.echo {
             let mut out = std::io::stdout().lock();
             writeln!(out, "{line}")?;
@@ -220,10 +273,19 @@ impl AppServer {
     }
 
     async fn send(&mut self, message: &Value) -> Result<(), Failed> {
-        let mut line = serde_json::to_vec(message).map_err(|e| Failed::Io(e.to_string()))?;
-        line.push(b'\n');
-        self.input.write_all(&line).await?;
-        self.input.flush().await?;
+        match &mut self.wire {
+            Wire::Lines { input, .. } => {
+                let mut line =
+                    serde_json::to_vec(message).map_err(|e| Failed::Io(e.to_string()))?;
+                line.push(b'\n');
+                input.write_all(&line).await?;
+                input.flush().await?;
+            }
+            Wire::Socket(socket) => socket
+                .send(Message::Text(message.to_string().into()))
+                .await
+                .map_err(|e| Failed::Io(e.to_string()))?,
+        }
         Ok(())
     }
 }

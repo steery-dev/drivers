@@ -14,8 +14,7 @@ the program protocol (`specs/PROTOCOL.md` in Steery's repository).
 | `omp` | omp | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
-
-`codex` follows.
+| `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 
 ## Building
 
@@ -170,6 +169,73 @@ cargo test
 
 `cargo test` needs no Claude Code; the reader's test runs only where `claude` is on `PATH`.
 
+## Codex: `codex/`
+
+One binary, `steery-driver-codex`, with no settings. It speaks to Codex only through what
+Codex publishes: its rollout files, `hooks.json` and `config.toml`, `codex app-server` (its
+JSON-RPC over standard input and output), `codex app-server proxy` (the bytes of a running
+app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`, `codex exec`,
+`codex mcp list` and `codex features list`. Codex's home is `CODEX_HOME`, else `~/.codex`.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). Rollouts are read
+  from `sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl`. A thread continued in
+  more than one rollout is one conversation, its newest rollout the current one; two
+  equally current ones name it ambiguously (`complete: false`). A sub-agent's rollout (its
+  `session_id` names another thread) is listed under its lead, never as a conversation, and
+  so is not a `codex exec` run. A fork's history (`history_base`) is read from its parent's
+  rollout up to where the fork took it, then a `fork` event, then its own. Events are turns
+  and how they ended (a failure classified by its status or Codex's own code), the
+  person's words with the files and pictures they attached (Codex's own fragments left
+  out), the agent's words and reasoning, calls and their results, the running token total
+  with the context left, models and efforts, sub-agents started and how they ended, and
+  rollbacks; a rollback that does not say how many turns went is refused.
+- **Setup** (`setup/plan`). The MCP entry in `config.toml` (`mcp_servers.steery`, its
+  `tool_timeout_sec` the runtime's bound), the skill in `skills/steery/SKILL.md`, and one
+  hook group per moment in `hooks.json`, beside the person's own (`/hooks/<Event>/-`).
+  Codex runs a hook only once its person trusted it, and keys that trust by the hook's
+  place: where a Steery hook its person trusted moved because another tool put a group
+  ahead of it, the plan writes the same trust again where it now stands (asked of Codex's
+  own `hooks/list`, never computed here).
+- **Hooks** (`hook/read`, `hook/answer`). Codex's documents become Moments; an answer
+  becomes what Codex parses: `additionalContext` on `SessionStart` and `UserPromptSubmit`,
+  `decision: "block"` at `Stop`, a `permissionDecision` on `PreToolUse`, and a `decision`
+  with its `behavior` (and the standing permission chosen) on `PermissionRequest`.
+- **Drive.**
+  - `held`: a native owner where one takes the thread's words: the window of the Codex app
+    that owns it, or a running app server of its home that has it loaded with nothing
+    queued. Else the runtime looks, an app server holding it being beyond reach.
+  - `idle`: the owner's own state, else where the rollout's newest turn stands, while
+    nothing holds the rollout.
+  - `start`: this binary in its turn mode, `steery-driver-codex turn --codex <codex>
+    <continue|fork|new> [<thread>] [--worktree] [--model m] [--thinking t] --inbox <socket>`.
+    It opens the thread (`thread/resume`, `thread/fork`, `thread/start`), starts the turn,
+    writes every message of the app server to standard output, takes more words on the
+    inbox (`turn/steer`, or `turn/start` once the turn ended) and ends with the last turn.
+    A worktree is made where Codex makes its own, `<CODEX_HOME>/worktrees/<4 hex>/<repo>`.
+  - `turn/read`: the thread named, the words taken (by their delivery marker), how each turn
+    completed, and the app server's refusals (`harness-busy` beside a live writer).
+  - `stop`: the owner interrupts its own turn and it is seen to end.
+  - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn
+    after them carrying the delivery marker.
+  - `models`: the app server's `model/list`, the default first.
+  - `reader`: `codex exec --json --ephemeral` with every MCP server turned off, every tool
+    and feature it can do without taken away, and a read-only sandbox; `reader/read` takes
+    its last agent message.
+  - `terminal`: `codex resume <thread>`, and the app's `codex://threads/<thread>`.
+- **Live** (`say`, `pick`, and `session/changed`). Words go to the window that owns the
+  thread, as typed in its composer, else into the running app server's queue, whose
+  acknowledgement is not delivery (`took: false`). A pick is checked against the owner's
+  own model list and set as the thread's settings. The windows' own state of each thread
+  the runtime asks about is followed and said as `session/changed`. Codex has no recap
+  short of a turn, so `recap` is unknown.
+
+Build and check it, with Codex on `PATH`:
+
+```sh
+cd codex && cargo build
+steery driver test target/debug/steery-driver-codex
+cargo test
+```
 ## License
 
 MIT, see [LICENSE](LICENSE).

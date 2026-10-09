@@ -156,7 +156,7 @@ impl Drive {
                 transcripts,
                 strays: false,
                 beyond: vec![Beyond {
-                    arg: "app-server".into(),
+                    arg: Some("app-server".into()),
                     line: APP_LOADED.into(),
                 }],
             },
@@ -899,14 +899,16 @@ fn refused(said: &str) -> &'static str {
 }
 
 /// `reader`: `codex exec --json --ephemeral` with every way out taken away: `--disable`
-/// for each tool by name, `-c mcp_servers={}`, `--ignore-rules`, and a `read-only`
+/// for each tool by name, every MCP server turned off, `--ignore-rules`, and a `read-only`
 /// sandbox; asked on standard input. With `tools: read` the shell stays, under the
 /// `read-only` sandbox, which is how Codex reads files. `config.toml` is kept: it holds
 /// the person's provider and model, and dropping it sends Codex to an API key a person
 /// signed in through ChatGPT never set. The instructions go in as
-/// `developer_instructions`.
-pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
+/// `developer_instructions`. Codex refuses a feature it does not know, so only those its
+/// own `codex features list` names are taken away.
+pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let codex = binary()?;
+    let known = features(&codex).await?;
     let mut argv = vec![
         codex.to_string_lossy().into_owned(),
         "exec".into(),
@@ -918,14 +920,19 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
         "never".into(),
         "--sandbox".into(),
         "read-only".into(),
-        "-c".into(),
-        "mcp_servers={}".into(),
     ];
+    for server in servers(&codex, &reader.cwd).await? {
+        argv.push("-c".into());
+        argv.push(format!("mcp_servers.{server}.enabled=false"));
+    }
     let taken = match reader.tools {
         ReaderTools::None => TAKEN,
         ReaderTools::Read => LOOK_TAKEN,
     };
-    for feature in taken {
+    for feature in taken
+        .iter()
+        .filter(|feature| known.iter().any(|known| known == *feature))
+    {
         argv.push("--disable".into());
         argv.push((*feature).into());
     }
@@ -951,10 +958,91 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     })
 }
 
+/// The MCP servers Codex would reach from `cwd`, as `codex mcp list --json` names them:
+/// each is turned off for the read, since `-c mcp_servers={}` merges into them rather than
+/// replacing them (Codex 0.162). A name a dotted override cannot spell is refused.
+async fn servers(codex: &Path, cwd: &Path) -> Result<Vec<String>, Error> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::home::helper(codex)
+            .args(["mcp", "list", "--json"])
+            .current_dir(cwd)
+            .stdout(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        Error::refused(
+            refusal::NO_ANSWER,
+            "`codex mcp list` did not answer in time",
+        )
+    })?
+    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex would not start: {e}")))?;
+    let listed: Value = serde_json::from_slice(&output.stdout)
+        .ok()
+        .filter(|_| output.status.success())
+        .ok_or_else(|| {
+            Error::refused(
+                refusal::REFUSED,
+                "`codex mcp list` did not list its servers",
+            )
+        })?;
+    let mut names = Vec::new();
+    for server in listed.as_array().into_iter().flatten() {
+        let name = server
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(Error::refused(
+                refusal::REFUSED,
+                format!("Codex's MCP server {name:?} cannot be turned off for one read"),
+            ));
+        }
+        names.push(name.to_owned());
+    }
+    Ok(names)
+}
+
+/// The features this Codex knows, as `codex features list` names them, one per line.
+async fn features(codex: &Path) -> Result<Vec<String>, Error> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::home::helper(codex)
+            .args(["features", "list"])
+            .stdout(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        Error::refused(
+            refusal::NO_ANSWER,
+            "`codex features list` did not answer in time",
+        )
+    })?
+    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex would not start: {e}")))?;
+    if !output.status.success() {
+        return Err(Error::refused(
+            refusal::REFUSED,
+            "`codex features list` failed",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// `reader/read`: the last `agent_message` item of `codex exec --json`'s events. Lines
 /// that are not JSON and events of other kinds are stepped over.
 pub fn reader_read(read: ReaderRead) -> Result<Text, Error> {
     let mut said = None;
+    let mut failed = None;
     for line in read.output.lines() {
         let line = line.trim();
         if !line.starts_with('{') {
@@ -963,6 +1051,12 @@ pub fn reader_read(read: ReaderRead) -> Result<Text, Error> {
         let Ok(event) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if event.get("type").and_then(Value::as_str) == Some("turn.failed") {
+            failed = event
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(crate::events::one_line);
+        }
         let item = event.get("item").unwrap_or(&Value::Null);
         if item.get("type").and_then(Value::as_str) != Some("agent_message") {
             continue;
@@ -974,13 +1068,12 @@ pub fn reader_read(read: ReaderRead) -> Result<Text, Error> {
     said.map(|text| Text { text }).ok_or_else(|| {
         Error::refused(
             refusal::NO_ANSWER,
-            "the reader said nothing that reads as an answer",
+            failed.unwrap_or_else(|| "the reader said nothing that reads as an answer".into()),
         )
     })
 }
 
-/// Every Codex feature that would let captured text reach this machine or the network. A
-/// feature it does not have is a switch it ignores.
+/// Every Codex feature that would let captured text reach this machine or the network.
 const TAKEN: &[&str] = &[
     "shell_tool",
     "unified_exec",

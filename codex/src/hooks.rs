@@ -133,7 +133,8 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
             .map(str::to_owned),
         at: None,
         cwd: absolute("cwd"),
-        transcript: absolute("transcript_path"),
+        // Codex keeps every rollout under its own home, which `sessions/list` reads.
+        transcript: None,
         call,
         ok: (kind == HookKind::AfterCall).then(|| succeeded(document.get("tool_response"))),
         outcome: match read.event.as_str() {

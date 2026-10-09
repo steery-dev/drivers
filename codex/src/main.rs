@@ -155,7 +155,7 @@ impl Program for Codex {
             method::STOP => result(self.drive()?.stop(steery_sdk::params(params)?).await?),
             method::RECEIPT_MARK => result(self.drive()?.mark(steery_sdk::params(params)?).await?),
             method::RECEIPT_FIND => result(self.drive()?.find(steery_sdk::params(params)?).await?),
-            method::READER => result(drive::reader(steery_sdk::params(params)?)?),
+            method::READER => result(drive::reader(steery_sdk::params(params)?).await?),
             method::READER_READ => result(drive::reader_read(steery_sdk::params(params)?)?),
             method::TERMINAL => result(self.drive()?.terminal(steery_sdk::params(params)?)?),
             method::SAY => result(self.drive()?.say(steery_sdk::params(params)?).await?),
