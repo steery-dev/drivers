@@ -132,7 +132,7 @@ impl Program for Driver {
         });
         Ok(wire::Initialized {
             protocol: PROTOCOL,
-            program: wire::ProgramInfo { id: "grok-bot".into(), kind: wire::Kind::Harness,
+            program: wire::ProgramInfo { id: "grok-bot".parse().map_err(Error::invalid)?, kind: wire::Kind::Harness,
                 release: env!("CARGO_PKG_VERSION").into(), label: "Grok Bot".into(), short: Some("Grok Bot".into()) },
             harness: Some(Box::new(wire::HarnessInfo {
                 levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],

@@ -38,10 +38,21 @@ entries apply because this harness does not read local skills or configuration.
 No per-bot URL or header substitution was found in the installed app's connector
 schema and resolver. Supply your own bot ID as `session.external_id` with
 `session.harness=grok-bot`. If the bot cannot see its own ID, it must not describe
-a session or guess from the roster. Added-driver runtime routing awaits W4.
+a session or guess from the roster.
 
-Build the Grok Bot crate with its SDK checkout beside this repository as
-`steery-grokbot`, then run `cargo build --manifest-path grok-bot/Cargo.toml`.
+Build against SDK `1.0.0` from server commit `54a34e8ed`, checked out beside this
+repository as `steery-grokbot-cutover`: `cargo build --manifest-path grok-bot/Cargo.toml`.
+The cutover runtime passed all 9 driver conformance checks and an isolated,
+digest-pinned added-driver `Host::local` smoke through real gateway list/read calls.
+Cold Keychain access exceeded the runtime's 30-second call bound. Supply
+`CURSOR_ACCESS_TOKEN` and `SAND_CLIENT_VERSION` in the runtime environment to avoid
+that access. Never put credentials in driver registration JSON.
+
+Register the binary in `<config>/drivers/grok-bot.json` with `id`, `kind: "harness"`,
+`command`, `args`, `source`, `release` and `digest: "sha256:<binary hash>"`.
+Use file mode `0600`. Put `grokbot-gateway.mjs` beside the binary.
+The phone installation card remains unavailable. The live machine report and
+phone harness selection are not yet verified.
 
 
 ## Building
