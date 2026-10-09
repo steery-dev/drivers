@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
     Always, Answer, Append, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment,
-    HookRead, Moment, Says, TurnState, Via,
+    HookRead, Moment, Says, Suggestion, TurnState, Via,
 };
 
 /// The file Claude Code hands a `SessionStart` hook; its shell sources what is appended
@@ -202,13 +202,56 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
             document
                 .get("permission_suggestions")
                 .and_then(Value::as_array)
-                .cloned()
+                .map(|offered| offered.iter().map(suggestion).collect())
                 .unwrap_or_default()
         } else {
             Vec::new()
         },
         external_id,
     })
+}
+
+/// One of Claude Code's `permission_suggestions` as a person reads it, kept at its index
+/// so `always: {suggestion: n}` passes back the entry Claude Code wrote. Every shape it
+/// declares is named; one it grows later is offered by its type, never dropped.
+fn suggestion(update: &Value) -> Suggestion {
+    let about = match text(update, "destination") {
+        Some("session") => "this conversation",
+        Some("projectSettings") => "this project, for everyone",
+        Some("localSettings") => "this project, for you",
+        Some("userSettings") => "everywhere, from now on",
+        _ => "as Claude Code keeps it",
+    };
+    let kind = text(update, "type").unwrap_or("unnamed");
+    let label = match kind {
+        "addRules" | "replaceRules" => {
+            let rules: Vec<String> = update
+                .get("rules")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(
+                    |rule| match (text(rule, "toolName"), text(rule, "ruleContent")) {
+                        (Some(tool), Some(content)) => format!("`{tool}({content})`"),
+                        (Some(tool), None) => format!("`{tool}`"),
+                        _ => "an unnamed rule".to_owned(),
+                    },
+                )
+                .collect();
+            match rules.is_empty() {
+                true => "Always allow what Claude Code offered".to_owned(),
+                false => format!("Always {}", rules.join(", ")),
+            }
+        }
+        "setMode" => format!("Switch to `{}`", text(update, "mode").unwrap_or("—")),
+        "addDirectories" => "Add the directories it named".to_owned(),
+        other => format!("`{other}`, as Claude Code offered it"),
+    };
+    Suggestion {
+        label,
+        about: about.to_owned(),
+    }
 }
 
 /// What Steery decided, printed as Claude Code parses it on this event: a paragraph as
@@ -655,7 +698,14 @@ mod tests {
             "permission_suggestions": [suggestion],
         });
         let moment = read_one("PermissionRequest", event.clone(), &[]).expect("a moment");
-        assert_eq!(moment.suggestions, vec![suggestion.clone()]);
+        assert_eq!(
+            moment.suggestions,
+            vec![Suggestion {
+                label: "Always `Bash(cargo check:*)`".into(),
+                about: "this project, for you".into(),
+            }],
+            "Claude Code's own rule, as a person reads it"
+        );
         let allow = |always| {
             printed(
                 "PermissionRequest",
@@ -686,6 +736,41 @@ mod tests {
             })
             .is_err(),
             "a suggestion Claude Code never offered"
+        );
+    }
+
+    /// A shape Claude Code grows later is still offered, by its type, at its own index,
+    /// and passed back whole: an option a person cannot read is still one it put on the
+    /// table.
+    #[test]
+    fn a_suggestion_of_a_shape_not_yet_known_is_still_offered_and_passed_back_whole() {
+        let strange = json!({"type": "somethingNew", "destination": "session"});
+        let event = json!({
+            "session_id": "abc",
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_1",
+            "tool_input": {"command": "ls"},
+            "permission_suggestions": [strange],
+        });
+        let moment = read_one("PermissionRequest", event.clone(), &[]).expect("a moment");
+        assert_eq!(
+            moment.suggestions,
+            vec![Suggestion {
+                label: "`somethingNew`, as Claude Code offered it".into(),
+                about: "this conversation".into(),
+            }]
+        );
+        let taken = printed(
+            "PermissionRequest",
+            event,
+            decide(Decision::Allow {
+                reason: "go".into(),
+                always: Some(Always::Suggestion(0)),
+            }),
+        );
+        assert_eq!(
+            taken["hookSpecificOutput"]["decision"]["updatedPermissions"],
+            json!([strange])
         );
     }
 

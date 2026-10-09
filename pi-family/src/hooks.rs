@@ -122,6 +122,65 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn read_one(harness: Harness, event: &str, document: Value) -> Option<Moment> {
+        let home = Path::new("/nonexistent-home");
+        let store = Store::new(harness, home, home.join(".pi/agent"));
+        read(
+            &store,
+            HookRead {
+                event: event.into(),
+                document: document.to_string(),
+                env: Default::default(),
+            },
+        )
+        .expect("hook/read answers")
+        .moment
+    }
+
+    /// A moment's document may say how much of the context window is left: kept while
+    /// it is a fraction, and nothing when it is not one.
+    #[test]
+    fn a_pi_moment_keeps_the_room_its_document_says_is_left() {
+        let left = |value: Value| {
+            read_one(
+                Harness::Pi,
+                "Stop",
+                json!({"session_id": "s1", "cwd": "/tmp", "context_left": value}),
+            )
+            .expect("a moment")
+            .context_left
+        };
+        assert_eq!(left(json!(0.4)), Some(0.4));
+        assert_eq!(left(json!(1.5)), None, "not a fraction");
+        assert_eq!(left(json!("most")), None);
+    }
+
+    /// The transcript a moment names is a harness's word: only an absolute `.jsonl` filed
+    /// under that conversation's own id is taken, never a path that names another file.
+    #[test]
+    fn an_identifier_from_a_harness_cannot_name_a_file_elsewhere() {
+        let id = "01a0a013-c9d7-7000-8000-000000000001";
+        let named = |path: &str| {
+            read_one(
+                Harness::Omp,
+                "SessionStart",
+                json!({"session_id": id, "transcript_path": path}),
+            )
+            .expect("a moment")
+            .transcript
+        };
+        let own = format!("/home/a/.omp/agent/sessions/--w--/2026-10-09T10-00-00-000Z_{id}.jsonl");
+        assert_eq!(named(&own), Some(PathBuf::from(&own)));
+        for refused in [
+            format!("relative/2026-10-09T10-00-00-000Z_{id}.jsonl"),
+            format!("/home/a/2026-10-09T10-00-00-000Z_{id}.json"),
+            "/home/a/2026-10-09T10-00-00-000Z_another.jsonl".to_owned(),
+            "/home/a/.ssh/id_ed25519".to_owned(),
+        ] {
+            assert_eq!(named(&refused), None, "{refused} was taken");
+        }
+    }
+
     /// The runtime's rule for a person leaving: omp in its terminal on `dispose` or `new`,
     /// pi on `new`, or on `quit` that no signal caused; never in a one-shot run.
     #[test]

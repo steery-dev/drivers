@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
     Always, Answer, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment, HookRead,
-    Moment, Says, TurnState, Via,
+    Moment, Says, Suggestion, TurnState, Via,
 };
 
 use crate::calls;
@@ -156,7 +156,7 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
                 document
                     .get("permission_suggestions")
                     .and_then(Value::as_array)
-                    .cloned()
+                    .map(|offered| offered.iter().map(suggestion).collect())
             })
             .flatten()
             .unwrap_or_default(),
@@ -164,6 +164,49 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
     Ok(HookMoment {
         moment: Some(moment),
     })
+}
+
+/// One of Codex's `permission_suggestions` as a person reads it, kept at its index so
+/// `always: {suggestion: n}` passes back the entry Codex wrote. Every shape it declares is
+/// named; one it grows later is offered by its type, never dropped.
+fn suggestion(update: &Value) -> Suggestion {
+    let about = match text(update, "destination") {
+        Some("session") => "this conversation",
+        Some("projectSettings") => "this project, for everyone",
+        Some("localSettings") => "this project, for you",
+        Some("userSettings") => "everywhere, from now on",
+        _ => "as Codex keeps it",
+    };
+    let kind = text(update, "type").unwrap_or("unnamed");
+    let label = match kind {
+        "addRules" | "replaceRules" => {
+            let rules: Vec<String> = update
+                .get("rules")
+                .and_then(Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(
+                    |rule| match (text(rule, "toolName"), text(rule, "ruleContent")) {
+                        (Some(tool), Some(content)) => format!("`{tool}({content})`"),
+                        (Some(tool), None) => format!("`{tool}`"),
+                        _ => "an unnamed rule".to_owned(),
+                    },
+                )
+                .collect();
+            match rules.is_empty() {
+                true => "Always allow what Codex offered".to_owned(),
+                false => format!("Always {}", rules.join(", ")),
+            }
+        }
+        "setMode" => format!("Switch to `{}`", text(update, "mode").unwrap_or("—")),
+        "addDirectories" => "Add the directories it named".to_owned(),
+        other => format!("`{other}`, as Codex offered it"),
+    };
+    Suggestion {
+        label,
+        about: about.to_owned(),
+    }
 }
 
 /// Whether a call's response says it worked: an object's own `success`, `is_error` or
@@ -200,14 +243,14 @@ fn printed(event: &str, document: &Value, answer: &Answer) -> Option<Value> {
     let say = answer.say.as_deref().filter(|say| !say.trim().is_empty());
     match (event, &answer.decision) {
         ("Stop", _) => say.map(|say| json!({"decision": "block", "reason": say})),
-        ("PreToolUse", Some(decision)) => {
-            let (verdict, reason) = match decision {
-                Decision::Allow { reason, .. } => ("allow", reason),
-                Decision::Deny { reason } => ("deny", reason),
-            };
+        // Codex runs a call no hook denied, and reads `permissionDecision: allow` as
+        // unsupported (it is reserved for a hook that rewrites the call's input), so an
+        // allow prints nothing.
+        ("PreToolUse", Some(Decision::Allow { .. })) => None,
+        ("PreToolUse", Some(Decision::Deny { reason })) => {
             let mut output = json!({
                 "hookEventName": "PreToolUse",
-                "permissionDecision": verdict,
+                "permissionDecision": "deny",
                 "permissionDecisionReason": reason,
             });
             if let Some(say) = say {
@@ -417,7 +460,7 @@ mod tests {
         );
         let printed: Value = serde_json::from_str(&said(
             "PreToolUse",
-            doc,
+            doc.clone(),
             Answer {
                 decision: Some(Decision::Deny {
                     reason: "They chose One".into(),
@@ -430,6 +473,37 @@ mod tests {
         assert_eq!(
             printed["hookSpecificOutput"]["permissionDecisionReason"],
             "They chose One"
+        );
+        assert_eq!(
+            said("PreToolUse", doc, allow(None)),
+            "",
+            "Codex reads an allow before a call as unsupported: nothing is printed"
+        );
+    }
+
+    /// Each of Codex's `permission_suggestions` is offered as a person reads it, at its
+    /// own index, a shape not yet known by its type rather than dropped.
+    #[test]
+    fn a_permissions_suggestions_read_as_a_person_reads_them() {
+        let doc = json!({"session_id": "s", "tool_name": "Bash", "tool_use_id": "c1",
+        "permission_suggestions": [
+            {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "cargo check:*"}],
+             "behavior": "allow", "destination": "localSettings"},
+            {"type": "somethingNew", "destination": "session"},
+        ]});
+        let read = moment("PermissionRequest", doc).expect("a moment");
+        assert_eq!(
+            read.suggestions,
+            vec![
+                Suggestion {
+                    label: "Always `Bash(cargo check:*)`".into(),
+                    about: "this project, for you".into(),
+                },
+                Suggestion {
+                    label: "`somethingNew`, as Codex offered it".into(),
+                    about: "this conversation".into(),
+                },
+            ]
         );
     }
 
