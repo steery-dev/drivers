@@ -547,22 +547,19 @@ function leadOf(ctx: Context): Named | undefined {
  * it, for any session that is not a sub-agent, pi's or omp's: both keep their
  * conversations wherever a flag, a project setting or a variable of their person's shell
  * says, and the runtime sees none of those. A sub-agent's does not: its document names its
- * lead, and its own file would be another conversation's. The runtime reads neither this
- * process's environment nor its lead marker, so the lead the marker names is said here
- * (`lead`).
+ * lead, and its own file would be another conversation's. The lead the process inherited
+ * is said once, in the door's `hello`, never here.
  */
 function document(ctx: Context, extra: Record<string, unknown> = {}): Record<string, unknown> {
   // Naming the sub-agent is how the runtime knows the conversation is its lead's.
   const who = speaker(ctx);
   const context_left = left(ctx);
   const transcript_path = who.agent_id === undefined ? ctx.sessionManager.getSessionFile?.() : undefined;
-  const lead = marked(ctx);
   return {
     ...who,
     cwd: ctx.cwd,
     ...(context_left === undefined ? {} : { context_left }),
     ...(typeof transcript_path === "string" && transcript_path ? { transcript_path } : {}),
-    ...(lead ? { lead } : {}),
     at: Date.now(),
     ...extra,
   };
@@ -2135,6 +2132,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let failure: string | undefined = kept.failure;
   /** How the turn's last answer stopped, as the harness said it: what its `Stop` document carries. */
   let stopped: { stop_reason?: string; error_message?: string } | undefined;
+  /** A settle's answer kept the turn running now going once: what its `Stop` document says (`continued`). */
+  let keptGoing = false;
   /** Steery's turns that ended lately, oldest first, at most [`SETTLED_KEPT`]. */
   const settled: Settled[] = kept.settled;
   // omp waits between its own retries after `agent_end` and reads as idle meanwhile; it
@@ -3001,13 +3000,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * The refusal of an ask the copy takes nothing for because it is letting the
-   * conversation go: `ending` where the op has that word (`say`, `pick`), else `refused`.
-   */
-  const endingFor = (op: unknown): Said =>
-    op === "say" || op === "pick" ? { refused: "ending" } : { refused: "refused", error: "the conversation is ending here" };
-
-  /**
    * What one ask of the runtime's asks, answered. A sub-agent's copy — whose conversation
    * is its lead's — takes no words, no pick and no stop. A conversation's own copy takes
    * words and picks where a person is at it (`tui`, `rpc`) or a turn runs: a one-shot run's
@@ -3016,7 +3008,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const answer = (request: Frame): Promise<Said> | Said => {
     const ctx = live;
     const op = request.op;
-    if (ending || !wanted || !ctx) return endingFor(op);
+    if (ending || !wanted || !ctx) return { refused: "ending" };
     if (led(ctx) && op !== "recap") return { refused: "refused", error: "a sub-agent's conversation takes this at its lead" };
     if ((op === "say" || op === "pick") && oneShot(ctx) && !turning) {
       return { refused: "refused", error: "this one-shot run takes nothing before its own turn" };
@@ -3059,12 +3051,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const addressed = (id: string, request: Frame): Promise<Said> => {
     const ctx = live;
     const session = sessionId;
-    if (!ctx || session === undefined || !inSession(session)) return Promise.resolve(endingFor(request.op));
+    if (!ctx || session === undefined || !inSession(session)) return Promise.resolve({ refused: "ending" });
     const answered = answeredIn(session);
     let said = answered.get(id);
     if (!said) {
       const asked = Promise.resolve()
-        .then((): Promise<Said> | Said => (inSession(session) ? answer(request) : endingFor(request.op)))
+        .then((): Promise<Said> | Said => (inSession(session) ? answer(request) : { refused: "ending" }))
         .catch((error: unknown): Said => ({ refused: "refused", error: String(error) }));
       said = asked;
       answered.set(id, asked);
@@ -3355,6 +3347,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       turnSays = new Set();
       failure = undefined;
       stopped = undefined;
+      keptGoing = false;
     }
     began ??= Date.now();
     const going = continued !== undefined && input === continued.trim();
@@ -3581,6 +3574,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       if (how === "error" || how === "aborted" || led(ctx)) return undefined;
       const reminder = await settle(event.stop_hook_active === true);
       if (!reminder) return undefined;
+      keptGoing = true;
       continued = reminder;
       return { continue: true, additionalContext: reminder };
     });
@@ -3595,6 +3589,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       if (event.outcome !== "completed" || reminded || led(ctx)) return undefined;
       const reminder = await settle(false);
       if (!reminder) return undefined;
+      keptGoing = true;
       reminded = true;
       return {
         entries: [{ type: "custom_message", customType: "steery", content: reminder, display: false }],
@@ -3710,12 +3705,14 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     turnSays = new Set();
     failure = undefined;
     stopped = undefined;
+    const carried = keptGoing;
+    keptGoing = false;
     turning = false;
     began = undefined;
     calls.clear();
     if (oneShot(ctx)) refuseWaiting(true);
     noteState();
-    moment("Stop", document(ctx, how));
+    moment("Stop", document(ctx, { ...how, continued: carried }));
   });
   /** Let go of all this session holds here: its door and the lead. */
   const letGo = async () => {
