@@ -302,21 +302,10 @@ impl State<'_> {
                 continue;
             };
             let input = block.get("arguments").cloned().unwrap_or(Value::Null);
-            let carried = flattened(&input);
             self.out.push(Event::CallBegan {
                 at,
                 call: calls::call(call, name, input, Some(&id), &self.reading.servers),
             });
-            if !carried.trim().is_empty() {
-                self.words(
-                    at,
-                    format!("{id}:{call}"),
-                    Voice::Tool,
-                    carried,
-                    Some(call.to_owned()),
-                    Vec::new(),
-                );
-            }
         }
         self.runs_on(at, selector(message), text(message, "thinkingLevel"));
         if let Some(usage) = message.get("usage") {
@@ -678,21 +667,6 @@ fn retry_at(said: &str, message: &Value, at: u64) -> Option<u64> {
         .and_then(Value::as_u64)
         .unwrap_or(at)
         .checked_add(wait)
-}
-
-/// Every string a call's input carries, in order, one to a line.
-fn flattened(input: &Value) -> String {
-    fn walk<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
-        match value {
-            Value::String(said) if !said.is_empty() => out.push(said),
-            Value::Array(items) => items.iter().for_each(|item| walk(item, out)),
-            Value::Object(fields) => fields.values().for_each(|field| walk(field, out)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk(input, &mut out);
-    out.join("\n")
 }
 
 /// The words of a content: itself where it is a string, else its text blocks joined.
