@@ -928,4 +928,78 @@ mod tests {
         assert!(!plain_job("-w") && plain_job("6b44d2be"));
         assert_eq!(quoted("it's"), r"'it'\''s'");
     }
+
+    /// What a person runs is what Claude Code gets: the folder entered, the configuration
+    /// the conversation is filed under, the conversation, each one literal word whatever
+    /// it holds.
+    #[test]
+    fn the_command_runs_literally_in_its_folder_and_configuration() {
+        const ID: &str = "11111111-1111-4111-8111-111111111111";
+        let bench = crate::registry::tests::Scratch::new("terminal");
+        let cwd = bench.path().join("it's $HOME; work");
+        let root = bench.path().join("claude's $(touch nope)");
+        let bin = bench.path().join("bin");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        crate::tests::stand_in(
+            &bin.join("claude"),
+            "#!/bin/sh\npwd\necho \"$CLAUDE_CONFIG_DIR\"\nfor arg in \"$@\"; do echo \"$arg\"; done\n",
+        );
+        let transcript = root.join(format!("projects/w/{ID}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type": "user", "cwd": cwd, "entrypoint": "cli", "sessionId": ID,
+                    "message": {"role": "user", "content": "go"}})
+            ),
+        )
+        .unwrap();
+        let store = Store::new(root.clone());
+        let opened = terminal(
+            bench.path(),
+            &store,
+            Terminal {
+                external_id: ID.into(),
+                cwd: cwd.clone(),
+                holder: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            opened.app, None,
+            "a terminal's conversation opens in a terminal"
+        );
+        let ran = std::process::Command::new("/bin/sh")
+            .args(["-c", &opened.command])
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(
+            ran.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(ran.stdout).unwrap(),
+            format!("{}\n{}\n--resume\n{ID}\n", cwd.display(), root.display())
+        );
+        assert!(!cwd.join("nope").exists());
+        for (id, folder) in [(ID, "relative"), ("--fork", "/w"), ("a b", "/w")] {
+            assert!(
+                terminal(
+                    bench.path(),
+                    &store,
+                    Terminal {
+                        external_id: id.into(),
+                        cwd: PathBuf::from(folder),
+                        holder: None,
+                    },
+                )
+                .is_err(),
+                "{id} in {folder}"
+            );
+        }
+    }
 }

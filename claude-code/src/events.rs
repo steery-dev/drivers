@@ -38,10 +38,9 @@ pub struct Reading {
     pub agents: PathBuf,
 }
 
-/// One whole record of a transcript, and where it lies: `None` where it is no JSON.
+/// One whole record of a transcript, and where it starts: `None` where it is no JSON.
 pub struct Record {
     pub start: u64,
-    pub end: u64,
     pub value: Option<Value>,
 }
 
@@ -58,13 +57,12 @@ pub enum Turn {
 /// What a run of records came to.
 pub struct Read {
     pub events: Vec<Event>,
-    /// The offset after the last record read.
-    pub through: u64,
     /// Where the turn stands after them.
     pub turn: Turn,
 }
 
-/// The events of `records`, read on from where `turn` says the turn stands.
+/// The events of `records`, the records of the conversation's path in order, read on from
+/// where `turn` says the turn stands.
 pub fn read(reading: &Reading, records: &[Record], turn: Turn) -> Read {
     let mut state = State {
         reading,
@@ -76,22 +74,58 @@ pub fn read(reading: &Reading, records: &[Record], turn: Turn) -> Read {
         started: None,
         out: Vec::new(),
     };
-    let mut through = records.first().map_or(0, |record| record.start);
     for record in records {
         if let Some(value) = &record.value {
             state.record(record.start, value);
         }
-        through = record.end;
     }
     Read {
         events: state.out,
-        through,
         turn: state.turn,
     }
 }
 
-/// One response's count as last said: its id and what it counted.
-type Counted = (String, [u64; 5]);
+/// What a record off the conversation's path still spent: a response on a branch a rewind
+/// left behind is no part of the conversation's history, and its tokens were spent all the
+/// same. Named by its response's id, as on the path, so a response said twice counts once.
+pub fn spent(record: &Value) -> Option<Event> {
+    let message = record
+        .get("message")
+        .filter(|_| text(record, "type") == Some("assistant"))?;
+    let model = text(message, "model").map(str::trim);
+    if model == Some(SYNTHETIC) || flag(record, "isApiErrorMessage") {
+        return None;
+    }
+    let at = text(record, "timestamp").and_then(millis).unwrap_or(0);
+    Some(tokens(
+        at,
+        text(message, "id")?.to_owned(),
+        model.filter(|model| !model.is_empty()),
+        message.get("usage")?,
+    ))
+}
+
+/// One response's `usage`: what it read fresh, wrote to a cache and read from one are all
+/// of `input`; its thinking is of `output`.
+fn tokens(at: u64, response: String, model: Option<&str>, usage: &Value) -> Event {
+    let number = |value: Option<&Value>| value.and_then(Value::as_u64).unwrap_or(0);
+    let cached = number(usage.get("cache_read_input_tokens"));
+    let cache_write = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+    Event::Tokens {
+        at,
+        count: Count::Response,
+        response: Some(response),
+        model: model.map(str::to_owned),
+        input: number(usage.get("input_tokens")) + cache_write.unwrap_or(0) + cached,
+        cached,
+        cache_write,
+        output: number(usage.get("output_tokens")),
+        reasoning: number(usage.pointer("/output_tokens_details/thinking_tokens")),
+        context_left: None,
+    }
+}
 
 struct State<'a> {
     reading: &'a Reading,
@@ -99,8 +133,9 @@ struct State<'a> {
     turn: Turn,
     /// The model and effort last said.
     model: Option<(String, Option<String>)>,
-    /// The count last said, so a response repeated unchanged on its next block is said once.
-    tokens: Option<Counted>,
+    /// The response and `usage` last said, so a response its next block repeats unchanged
+    /// is said once.
+    tokens: Option<(String, Value)>,
     /// The sub-agents said running.
     running: HashSet<String>,
     /// The sub-agent each call started, by the `.meta.json` Claude Code files beside each:
@@ -152,10 +187,12 @@ impl State<'_> {
             return;
         }
         // The harness talking to itself, and the Claude Agent SDK echoing a message the
-        // person already sent.
-        if ["isMeta", "isSynthetic", "isReplay"]
-            .iter()
-            .any(|name| flag(record, name))
+        // person already sent. Words another session sent through a live session's inbox
+        // are marked `isMeta` too, with a `peer` origin, and are the agent's to work on.
+        let peer = record.pointer("/origin/kind").and_then(Value::as_str) == Some("peer");
+        if (flag(record, "isMeta") && !peer)
+            || flag(record, "isSynthetic")
+            || flag(record, "isReplay")
         {
             return;
         }
@@ -391,37 +428,14 @@ impl State<'_> {
             .cloned()
     }
 
-    /// One response's `usage`: what it read fresh, wrote to a cache and read from one are
-    /// all of `input`; its thinking is of `output`.
+    /// One response's count, said once however many of its blocks repeat it unchanged.
     fn tokens(&mut self, response: String, model: Option<&str>, usage: &Value) {
-        let number = |value: Option<&Value>| value.and_then(Value::as_u64).unwrap_or(0);
-        let cached = number(usage.get("cache_read_input_tokens"));
-        let cache_write = usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64);
-        let input = number(usage.get("input_tokens")) + cache_write.unwrap_or(0) + cached;
-        let output = number(usage.get("output_tokens"));
-        let reasoning = number(usage.pointer("/output_tokens_details/thinking_tokens"));
-        let counted = (
-            response,
-            [input, cached, cache_write.unwrap_or(0), output, reasoning],
-        );
-        if self.tokens.as_ref() == Some(&counted) {
+        let said = (response, usage.clone());
+        if self.tokens.as_ref() == Some(&said) {
             return;
         }
-        self.out.push(Event::Tokens {
-            at: self.at,
-            count: Count::Response,
-            response: Some(counted.0.clone()),
-            model: model.map(str::to_owned),
-            input,
-            cached,
-            cache_write,
-            output,
-            reasoning,
-            context_left: None,
-        });
-        self.tokens = Some(counted);
+        self.out.push(tokens(self.at, said.0.clone(), model, usage));
+        self.tokens = Some(said);
     }
 
     fn begin(&mut self) {
@@ -750,7 +764,6 @@ mod tests {
             .enumerate()
             .map(|(at, value)| Record {
                 start: at as u64 * 10,
-                end: at as u64 * 10 + 10,
                 value: Some(value.clone()),
             })
             .collect()
@@ -1155,6 +1168,44 @@ mod tests {
         );
         assert_eq!(turns(&read.events), ["began", "Finished"]);
         assert_eq!(said(&read.events), [(Voice::Agent, "Half done")]);
+    }
+
+    /// Words another session sent through a live session's inbox are `isMeta` with a
+    /// `peer` origin, and begin a turn all the same; they are no person's words. Records as
+    /// Claude Code 2.1.295 wrote them, signed out, 2026-10-09.
+    #[test]
+    fn a_peer_message_begins_a_turn() {
+        let failed = |uuid: &str, parent: &str, at: &str| {
+            json!({"parentUuid":parent,"type":"assistant","uuid":uuid,"timestamp":at,"isApiErrorMessage":true,"error":"authentication_failed",
+                "message":{"id":uuid,"model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence",
+                    "usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"Not logged in · Please run /login"}]}})
+        };
+        let read = events(&[
+            json!({"parentUuid":null,"type":"user","message":{"role":"user","content":"say hi\n"},"uuid":"7a41","timestamp":"2026-10-09T09:50:13.972Z","origin":{"kind":"human"},"entrypoint":"cli"}),
+            failed("da7c", "7a41", "2026-10-09T09:50:14.121Z"),
+            json!({"parentUuid":"da7c","type":"system","subtype":"turn_duration","timestamp":"2026-10-09T09:50:14.147Z","uuid":"bb62","isMeta":false}),
+            json!({"parentUuid":"bb62","type":"user","message":{"role":"user","content":"Another Claude session sent a message:\nsteery-delivery:d9 hello"},"isMeta":true,"uuid":"45f6","timestamp":"2026-10-09T09:50:31.351Z","origin":{"kind":"peer","from":"unknown"}}),
+            failed("7620", "45f6", "2026-10-09T09:50:31.376Z"),
+            json!({"parentUuid":"7620","type":"system","subtype":"turn_duration","timestamp":"2026-10-09T09:50:31.402Z","uuid":"49be","isMeta":false}),
+        ]);
+        assert_eq!(turns(&read), ["began", "Failed", "began", "Failed"]);
+        assert_eq!(said(&read), [(Voice::Person, "say hi")]);
+        assert!(
+            read.iter()
+                .all(|event| !matches!(event, Event::Tokens { .. })),
+            "Claude Code's own record spent nothing"
+        );
+        assert!(read.iter().any(|event| matches!(
+            event,
+            Event::TurnEnded {
+                failure: Some(Failure {
+                    kind: FailureKind::SignIn,
+                    http_status: None,
+                    ..
+                }),
+                ..
+            }
+        )));
     }
 
     /// A compaction's summary is the harness's summary of earlier history.

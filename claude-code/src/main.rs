@@ -15,6 +15,7 @@ mod live;
 mod registry;
 mod setup;
 mod transcripts;
+mod tree;
 mod turn;
 
 use std::path::{Path, PathBuf};
