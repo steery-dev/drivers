@@ -118,7 +118,7 @@ An official driver ships in Steery's archive, beside `steery`. Any other is adde
 `steery driver add`:
 
 ```sh
-steery driver add <source> [--crate <dir>] [--wait-secs <n>]
+steery driver add <source> [--crate <dir>] [--setting NAME[=VALUE]]… [--wait-secs <n>]
 steery driver add https://github.com/steery-dev/drivers#<rev> --crate pi-family
 ```
 
@@ -130,20 +130,31 @@ the same way. `--crate` names the crate's folder inside the repository. The offi
 `omp`, `pi`, `claude-code` and `codex`, are refused, so a fork of a crate here must answer `initialize` with an id of its
 own.
 
-What runs is a copy, `<config>/programs/bin/<id>-<the first 12 hex of its digest>`. Before
-anything is asked, the copy is started and checked as `steery driver test` checks it: an
-official id, a kind other than a driver's, an `initialize` that fails or speaks another
-protocol, or any failed check refuses it, and nothing is written. Then one card on the
-person's phone, "Add the driver <label>", names it, its source, release, digest, what it
-provides and the settings it declares. Only a verified Go writes its record,
-`<config>/drivers/<id>.json`:
+What runs is a copy, `<config>/programs/bin/<id>-<the first 12 hex of its digest>`. A
+driver's settings (PROTOCOL.md §3.4), an API key or the account it acts as, are given here
+once: `--setting NAME=VALUE`, or `--setting NAME` to take the value from the environment of
+the `steery driver add` you run; a secret one not given is typed at that terminal,
+unechoed, and any other not given is asked on the card. Before anything is asked, the copy
+is started and checked as `steery driver test` checks it, with those settings: an official
+id, a kind other than a driver's, an `initialize` that fails or speaks another protocol, a
+setting it does not declare, or any failed check refuses it, and nothing is written. Then
+one card on the person's phone, "Add the driver <label>", names it, its source, release,
+digest, what it provides and each setting it declares, with whether it was given (never a
+secret's value). Only a verified Go writes its record, `<config>/drivers/<id>.json`, which
+only the person's user can read:
 
 ```json
 {"id": "my-harness", "kind": "harness",
  "command": "<config>/programs/bin/my-harness-<12 hex>", "args": [],
  "source": "https://github.com/me/my-harness#<commit>",
- "release": "0.1.0", "digest": "sha256:<64 lowercase hex>"}
+ "release": "0.1.0", "digest": "sha256:<64 lowercase hex>",
+ "settings": {"MY_HARNESS_TOKEN": "…"}}
 ```
+
+The runtime sends `settings` in each `initialize` it sends the driver. That is how a driver
+gets what its harness needs: the runtime runs as a service (launchd, systemd) whose
+environment holds none of the person's shell variables, so a driver reads nothing it needs
+from its environment.
 
 `<config>` is this computer's Steery folder, `$XDG_CONFIG_HOME/steery`, else
 `~/.config/steery`; every machine this computer runs reads the records there, a sandbox
@@ -155,6 +166,7 @@ and 2 with no answer within `--wait-secs` (by default and at most 3600).
 
 The runtime checks the digest before every start: a driver whose copy changed on disk is
 not started, and reads Missing with "add it again with `steery driver add <source>`".
+Adding it again keeps each setting given before that is not given again.
 `steery driver remove <id>` deletes the record, its copy and its clone; an official id with
 no record is refused.
 
