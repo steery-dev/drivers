@@ -227,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "steery-sdk"
-version = "6.10.2"
+version = "1.0.0"
 dependencies = [
  "libc",
  "serde",
