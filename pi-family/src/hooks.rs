@@ -124,7 +124,7 @@ mod tests {
 
     fn read_one(harness: Harness, event: &str, document: Value) -> Option<Moment> {
         let home = Path::new("/nonexistent-home");
-        let store = Store::new(harness, home, home.join(".pi/agent"));
+        let store = Store::new(harness, home, home.join(".pi/agent"), None);
         read(
             &store,
             HookRead {
