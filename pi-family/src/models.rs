@@ -79,7 +79,7 @@ impl Catalog {
     ) -> Result<Vec<Model>, String> {
         let binary = harness
             .binary()
-            .ok_or_else(|| format!("{} is not on PATH here", harness.id()))?;
+            .ok_or_else(|| format!("{} is not installed here", harness.id()))?;
         let models = match harness {
             Harness::Omp => {
                 let mut models = omp_offers(&said(&binary, &["models", "--json"], within).await?)?;

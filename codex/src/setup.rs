@@ -39,6 +39,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
                 refused: Some(why),
                 entries: Vec::new(),
                 notes: Vec::new(),
+                install: None,
             });
         }
     };
@@ -52,6 +53,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
                  evidence of one."
                     .into(),
             ],
+            install: crate::home::install(),
         });
     };
     let mut notes = Vec::new();
@@ -120,6 +122,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
         refused: None,
         entries,
         notes,
+        install: None,
     })
 }
 
