@@ -111,7 +111,7 @@ impl Program for ClaudeCode {
         Ok(wire::Initialized {
             protocol: PROTOCOL,
             program: wire::ProgramInfo {
-                id: "claude-code".into(),
+                id: "claude-code".parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
                 release: env!("CARGO_PKG_VERSION").into(),
                 label: "Claude Code".into(),
@@ -300,7 +300,7 @@ mod tests {
         let initialized = steery_sdk::wire::Initialized {
             protocol: steery_sdk::PROTOCOL,
             program: steery_sdk::wire::ProgramInfo {
-                id: "claude-code".into(),
+                id: "claude-code".parse().unwrap(),
                 kind: steery_sdk::wire::Kind::Harness,
                 release: "0.1.0".into(),
                 label: "Claude Code".into(),

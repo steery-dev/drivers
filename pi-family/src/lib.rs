@@ -90,7 +90,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol: PROTOCOL,
             program: wire::ProgramInfo {
-                id: harness.id().into(),
+                id: harness.id().parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
                 release: env!("CARGO_PKG_VERSION").into(),
                 label: harness.id().into(),

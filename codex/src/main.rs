@@ -120,7 +120,7 @@ impl Program for Codex {
         Ok(wire::Initialized {
             protocol: PROTOCOL,
             program: wire::ProgramInfo {
-                id: "codex".into(),
+                id: "codex".parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
                 release: env!("CARGO_PKG_VERSION").into(),
                 label: "Codex".into(),
