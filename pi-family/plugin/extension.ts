@@ -3445,7 +3445,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     live = ctx;
     const id = str(event.toolCallId);
     if (!id) return;
-    const tool = str(event.toolName);
+    // Named as a Call names it (PROTOCOL.md §4.1): Steery's own as `mcp__steery__<tool>`.
+    const own = steerys(event.toolName);
+    const tool = own === undefined ? str(event.toolName) : `mcp__steery__${own}`;
     const parent = str(event.parentToolCallId);
     if (!parent) calls.set(id, { id, tool, since: Date.now(), children: [] });
     else outer(parent)?.children.push({ id, tool });
