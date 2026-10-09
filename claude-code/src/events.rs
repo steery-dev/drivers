@@ -274,19 +274,9 @@ impl State<'_> {
                 continue;
             };
             let input = block.get("input").cloned().unwrap_or(Value::Null);
-            let carried = flattened(&input);
             let mut began = calls::call(call, name, input);
             began.response = response.clone();
             self.out.push(Event::CallBegan { at, call: began });
-            if !carried.trim().is_empty() {
-                self.words(
-                    format!("{id}:{call}"),
-                    Voice::Tool,
-                    carried,
-                    Some(call.to_owned()),
-                    Vec::new(),
-                );
-            }
             if AGENTS.contains(&name)
                 && let Some(agent) = self.started_by(call)
             {
@@ -669,21 +659,6 @@ fn flatten(content: Option<&Value>) -> String {
     }
 }
 
-/// Every string a call's input carries, in order, one to a line.
-fn flattened(input: &Value) -> String {
-    fn walk<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
-        match value {
-            Value::String(said) if !said.is_empty() => out.push(said),
-            Value::Array(items) => items.iter().for_each(|item| walk(item, out)),
-            Value::Object(fields) => fields.values().for_each(|field| walk(field, out)),
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk(input, &mut out);
-    out.join("\n")
-}
-
 /// Text with every `<system-reminder>…</system-reminder>` taken out: Claude Code's own
 /// notes, written into a person's message ahead of what they typed and into results.
 fn without_reminders(said: &str) -> String {
@@ -814,7 +789,6 @@ mod tests {
                 (Voice::Person, "the real question"),
                 (Voice::Thought, "private"),
                 (Voice::Agent, "the answer"),
-                (Voice::Tool, "rm -rf /"),
                 (Voice::Tool, "what the tool said"),
             ]
         );

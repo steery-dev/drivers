@@ -368,18 +368,7 @@ impl State {
                     self.agents
                         .insert(call_id.to_owned(), (call.tool.clone(), target));
                 }
-                let carried = flattened(&call.input);
                 out.push(Event::CallBegan { at, call });
-                if !carried.is_empty() {
-                    out.push(Event::Words {
-                        at,
-                        id: format!("{call_id}:in"),
-                        voice: Voice::Tool,
-                        text: carried,
-                        call: Some(call_id.to_owned()),
-                        clips: Vec::new(),
-                    });
-                }
             }
             Some("function_call_output" | "custom_tool_call_output") => {
                 let Some(call_id) = text(payload, "call_id") else {
@@ -647,24 +636,6 @@ fn id(place: &Place<'_>, payload: &Value, n: usize) -> String {
     }
 }
 
-/// A call's input as words: a string as it is, an object's string values each on a line.
-fn flattened(input: &Value) -> String {
-    match input {
-        Value::String(text) => text.clone(),
-        Value::Object(fields) => fields
-            .values()
-            .filter_map(|value| match value {
-                Value::String(text) => Some(text.clone()),
-                Value::Null => None,
-                other => Some(other.to_string()),
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
 /// A call's output as text: a string, or the content items Codex writes it as.
 fn output_text(output: Option<&Value>) -> String {
     match output {
@@ -891,7 +862,6 @@ mod tests {
             [
                 (Voice::Person, "say hi"),
                 (Voice::Thought, "thinking it over"),
-                (Voice::Tool, "false"),
                 (Voice::Tool, "Process exited with code 1\nOutput:\nnope"),
                 (Voice::Agent, "hi"),
             ]
