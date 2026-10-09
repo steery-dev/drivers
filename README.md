@@ -55,7 +55,8 @@ What each driver does:
   there, the next read starts again from the beginning (`reset`). Events are turns and how
   they ended, words, calls grouped as Steery groups them, tokens per response, models (in
   pi with their thinking level), forks and omp's sub-agents. A failed model call ends its
-  turn only once the harness went no further.
+  turn only once the harness went no further. What a branch left behind spent is still
+  given, as each of its responses' `tokens`, once.
 - **Setup** (`setup/plan`). It plans the skill, Steery's plugin and, in omp, the MCP entry
   in `mcp.json`. The plugin is a loader in `extensions/steery.ts` plus the copy of the
   extension it runs, kept in the runtime's config folder. In pi the plugin carries the MCP

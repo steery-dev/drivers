@@ -567,17 +567,19 @@ fn clean(title: &str) -> Option<String> {
 
 /// Where a read of one transcript stands: the file it was, by its device and inode; the
 /// last entry of its path whose events were said (`tip`, counted from 1, 0 for none) and
-/// where that entry's record starts; and whether the fork was said.
+/// where that entry's record starts; how far into the file the entries off the path were
+/// counted (`aside`); and whether the fork was said.
 struct Cursor {
     device: u64,
     inode: u64,
     tip: u32,
     at: u64,
+    aside: u64,
     forked: bool,
 }
 
 impl Cursor {
-    const VERSION: &str = "2";
+    const VERSION: &str = "3";
 
     fn parse(cursor: &str) -> Result<Self, Error> {
         let invalid = || Error::invalid(format!("`{cursor}` is no cursor this driver gave"));
@@ -591,8 +593,14 @@ impl Cursor {
                 .and_then(|part| part.parse().ok())
                 .ok_or_else(invalid)
         };
-        let (device, inode, tip, at, forked) =
-            (number()?, number()?, number()?, number()?, number()?);
+        let (device, inode, tip, at, aside, forked) = (
+            number()?,
+            number()?,
+            number()?,
+            number()?,
+            number()?,
+            number()?,
+        );
         if parts.next().is_some() || forked > 1 {
             return Err(invalid());
         }
@@ -601,28 +609,47 @@ impl Cursor {
             inode,
             tip: u32::try_from(tip).map_err(|_| invalid())?,
             at,
+            aside,
             forked: forked == 1,
         })
     }
 
     fn said(&self) -> String {
         format!(
-            "{}.{}.{}.{}.{}.{}",
+            "{}.{}.{}.{}.{}.{}.{}",
             Self::VERSION,
             self.device,
             self.inode,
             self.tip,
             self.at,
+            self.aside,
             u8::from(self.forked)
         )
     }
+}
+
+/// One record of the file, `None` where it is longer than read or no JSON.
+fn record(walk: &mut tree::Walk<'_>, node: tree::Node, file: &Path) -> Result<Record, String> {
+    let value = if node.end - node.start > RECORD {
+        None
+    } else {
+        let bytes = tree::bytes(walk.open, node.start, node.end)
+            .map_err(|e| format!("{}: {e}", file.display()))?;
+        serde_json::from_slice(&bytes).ok()
+    };
+    Ok(Record {
+        start: node.start,
+        value,
+    })
 }
 
 /// The events of a transcript's active path after `cursor`, or of its entries within
 /// `tail` bytes of its end. A cursor goes on from its entry where that entry is still on
 /// the path, in the same file; where the conversation went back to an earlier entry and
 /// on from there (a branch), or the file was replaced or written whole again, the events
-/// start again from the beginning (`reset`).
+/// start again from the beginning (`reset`). What a branch left behind spent is still
+/// spent: once the path is read to its end, every entry off it written since the last
+/// read is given as its `tokens` alone, each response once.
 fn read_from(
     trees: &Trees,
     reading: &Reading,
@@ -636,7 +663,7 @@ fn read_from(
         .and_then(|at| SystemTime::now().duration_since(at).ok())
         .is_some_and(|still| still >= events::SETTLE);
     trees
-        .walk(&reading.file, |walk| {
+        .walk(&reading.file, |mut walk| {
             let path = walk.tree.path()?;
             let length = walk.open.metadata().map_err(|e| e.to_string())?.len();
             // Where on the path the cursor's entry is: the entries before `from` are read.
@@ -650,6 +677,12 @@ fn read_from(
                 (walk.tree.node(tip).start == cursor.at).then_some(at + 1)
             });
             let reset = given.is_some() && on.is_none();
+            // From where in the file the entries off the path are still to be counted.
+            let mut aside = match (on, tail) {
+                (Some(_), _) => given.as_ref().map_or(0, |cursor| cursor.aside),
+                (None, Some(tail)) if !reset => length.saturating_sub(tail),
+                (None, _) => 0,
+            };
             let (from, forked) = match (on, tail) {
                 (Some(from), _) => (from, given.as_ref().map(|cursor| cursor.forked)),
                 (None, Some(tail)) if !reset => {
@@ -669,19 +702,8 @@ fn read_from(
                     break;
                 }
                 let node = walk.tree.node(*node);
-                let size = node.end - node.start;
-                taken += size;
-                let value = if size > RECORD {
-                    None
-                } else {
-                    let bytes = tree::bytes(walk.open, node.start, node.end)
-                        .map_err(|e| format!("{}: {e}", reading.file.display()))?;
-                    serde_json::from_slice(&bytes).ok()
-                };
-                records.push(Record {
-                    start: node.start,
-                    value,
-                });
+                taken += node.end - node.start;
+                records.push(record(&mut walk, node, &reading.file)?);
             }
             let more = from + records.len() < path.len();
             // Where a tail begins inside a fork's copy of its parent, the fork is still to
@@ -701,6 +723,24 @@ fn read_from(
             if more && read.consumed == 0 {
                 read = events::read(reading, &records, forked, true);
             }
+            if !more {
+                let mut on_path = vec![false; walk.tree.entries()];
+                for node in &path {
+                    on_path[*node as usize] = true;
+                }
+                let mut through = aside;
+                for (at, on) in on_path.into_iter().enumerate() {
+                    let node = walk.tree.node(at as u32);
+                    through = through.max(node.end + 1);
+                    if on || node.start < aside {
+                        continue;
+                    }
+                    if let Some(value) = record(&mut walk, node, &reading.file)?.value {
+                        read.events.extend(events::spent(reading, &value));
+                    }
+                }
+                aside = through;
+            }
             let tip = (from + read.consumed).checked_sub(1).map(|at| path[at]);
             Ok(Events {
                 cursor: Cursor {
@@ -708,6 +748,7 @@ fn read_from(
                     inode: walk.file.1,
                     tip: tip.map_or(0, |tip| tip + 1),
                     at: tip.map_or(0, |tip| walk.tree.node(tip).start),
+                    aside,
                     forked: read.forked,
                 }
                 .said(),
@@ -842,6 +883,87 @@ mod tests {
         let branched = read(Some(on.cursor.clone()));
         assert!(branched.reset && branched.whole);
         assert_eq!(words(&branched.events), ["first", "answer two"]);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// What a branch left behind spent is still given, once per response: the first read
+    /// gives every answer's tokens, the abandoned one's included; a read on from its
+    /// cursor gives only what was written since, on the path or off it.
+    #[test]
+    fn a_branch_left_behind_is_counted_once_per_response() {
+        let home = std::env::temp_dir().join(format!("steery-pi-spent-{}", std::process::id()));
+        let folder = home.join(".pi/agent/sessions/--tmp--");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("2026-10-01T10-00-00-000Z_c2.jsonl");
+        let answer = |id: &str, parent: &str, output: u64| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "message", "id": id, "parentId": parent,
+                    "timestamp": "2026-10-01T10:00:00Z",
+                    "message": {"role": "assistant", "stopReason": "stop",
+                        "content": [{"type": "text", "text": id}],
+                        "usage": {"input": 10, "output": output}}})
+            )
+        };
+        std::fs::write(
+            &file,
+            format!(
+                "{}{}{}{}",
+                "{\"type\":\"session\",\"version\":3,\"id\":\"c2\",\"timestamp\":\"2026-10-01T10:00:00Z\"}\n",
+                entry("a", None, "user", "ask"),
+                answer("b", "a", 5),
+                answer("c", "a", 7),
+            ),
+        )
+        .unwrap();
+        let store = Store::new(Harness::Pi, &home, home.join(".pi/agent"));
+        let read = |cursor: Option<String>| {
+            store
+                .read(Read {
+                    external_id: "c2".into(),
+                    sub_agent: None,
+                    cursor,
+                    tail: None,
+                })
+                .unwrap()
+        };
+        let spent = |events: &[Event]| {
+            let mut spent: Vec<(String, u64)> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Tokens {
+                        response: Some(response),
+                        output,
+                        ..
+                    } => Some((response.clone(), *output)),
+                    _ => None,
+                })
+                .collect();
+            spent.sort();
+            spent
+        };
+        let first = read(None);
+        assert_eq!(words(&first.events), ["ask", "c"], "the path alone is read");
+        assert_eq!(
+            spent(&first.events),
+            [("b".to_owned(), 5), ("c".to_owned(), 7)],
+            "the branch left behind spent too, each response once"
+        );
+        let again = read(Some(first.cursor.clone()));
+        assert!(spent(&again.events).is_empty(), "nothing is counted twice");
+        let mut appended = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        std::io::Write::write_all(&mut appended, answer("d", "a", 9).as_bytes()).unwrap();
+        let on = read(Some(again.cursor.clone()));
+        assert!(on.reset, "the leaf moved to another branch");
+        let counted: Vec<String> = spent(&on.events).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(
+            counted,
+            ["b", "c", "d"],
+            "each response, said again, still once each"
+        );
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

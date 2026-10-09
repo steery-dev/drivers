@@ -137,6 +137,11 @@ impl Tree {
     pub fn node(&self, at: u32) -> Node {
         self.nodes[at as usize]
     }
+
+    /// How many entries it holds.
+    pub fn entries(&self) -> usize {
+        self.nodes.len()
+    }
 }
 
 /// One transcript's tree, as far as the file has been read.
