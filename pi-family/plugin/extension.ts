@@ -1047,7 +1047,6 @@ function waysOf(request: Record<string, unknown>): Way[] {
 }
 
 function titleOf(card: Card): string {
-  if (card.request.foreign) return "Foreign words";
   return str(card.request.title).trim() || "A request";
 }
 
@@ -1062,7 +1061,7 @@ function withoutRows(card: Card): string[] {
   const first = input.find(
     (control) => control?.kind === "choice" && (control.rows ?? []).some((row) => str(row?.detail).trim()),
   );
-  if (!first || card.request.foreign) return lines;
+  if (!first) return lines;
   const cut = lines.lastIndexOf(`▸ ${str(first.label).trim() || str(first.name).trim()}`);
   return cut < 0 ? lines : lines.slice(0, cut);
 }
@@ -1075,7 +1074,6 @@ function withoutRows(card: Card): string[] {
 function underTitle(card: Card): string[] {
   const lines = withoutRows(card);
   if (lines[0]?.trim() === titleOf(card)) lines.shift();
-  if (card.request.foreign) return lines;
   const shown: string[] = [];
   let fenced = false;
   for (const line of lines) {
@@ -1417,7 +1415,7 @@ function requestCard(input: CardInput): View {
       const line = raw.replaceAll("\t", "  ");
       const bare = line.trimStart();
       const indent = line.length - bare.length;
-      if (!request.foreign && bare.startsWith("```")) {
+      if (bare.startsWith("```")) {
         fenced = !fenced;
         out.push(paint.fg("dim", kit.truncateToWidth(line, width)));
         continue;
