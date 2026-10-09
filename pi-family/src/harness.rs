@@ -257,7 +257,9 @@ impl Harness {
 
     /// The harness's own installer, where what it needs is here: omp's prebuilt binary
     /// into `~/.local/bin`, and pi's, which installs its npm package, into a folder on
-    /// `PATH` or its agent folder's `bin`.
+    /// `PATH` or its agent folder's `bin`. pi's installer needs Node.js 22.19 or newer and
+    /// npm, and without them exits 0 having installed nothing, so it is offered only where
+    /// both are here.
     pub fn install(self) -> Option<harness::Install> {
         on_path("sh")?;
         on_path("curl")?;
@@ -266,11 +268,17 @@ impl Harness {
                 "curl -fsSL https://omp.sh/install | sh -s -- --binary",
                 "omp's own installer, its prebuilt binary into ~/.local/bin",
             ),
-            Self::Pi => (
-                "curl -fsSL https://pi.dev/install.sh | sh",
-                "pi's own installer, which needs Node.js and npm, into a folder on PATH or \
-                 ~/.pi/agent/bin",
-            ),
+            Self::Pi => {
+                on_path("npm")?;
+                if !node_at_least(PI_NODE)? {
+                    return None;
+                }
+                (
+                    "curl -fsSL https://pi.dev/install.sh | sh",
+                    "pi's own installer, its npm package into a folder on PATH or \
+                     ~/.pi/agent/bin",
+                )
+            }
         };
         Some(harness::Install {
             argv: vec!["sh".into(), "-c".into(), line.into()],
@@ -308,6 +316,25 @@ fn executable(path: PathBuf) -> Option<PathBuf> {
     std::fs::metadata(&path)
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .then_some(path)
+}
+
+/// The oldest Node.js pi's installer accepts.
+const PI_NODE: (u32, u32, u32) = (22, 19, 0);
+
+/// Whether the `node` on `PATH` is `least` or newer; none where there is no `node` or its
+/// version does not read as `vMAJOR.MINOR.PATCH`.
+fn node_at_least(least: (u32, u32, u32)) -> Option<bool> {
+    let node = on_path("node")?;
+    let printed = std::process::Command::new(node)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let version = String::from_utf8_lossy(&printed.stdout);
+    let mut parts = version.trim().strip_prefix('v')?.split('.');
+    let mut part = || parts.next()?.parse::<u32>().ok();
+    Some((part()?, part()?, part()?) >= least)
 }
 
 /// The harness, started by this driver for something that writes no conversation: a
