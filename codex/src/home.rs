@@ -32,16 +32,42 @@ pub(crate) fn default_root(home: &Path) -> PathBuf {
     home.join(".codex")
 }
 
-/// The first executable named `codex` on `PATH`.
+/// Codex's executable: the first `codex` on `PATH`, else the one its own installer writes,
+/// in `CODEX_INSTALL_DIR`, else `~/.local/bin`, which a shell that has not read its
+/// profile since may not have on `PATH`.
 pub(crate) fn binary() -> Option<PathBuf> {
+    on_path("codex").or_else(|| {
+        let installed = match std::env::var_os("CODEX_INSTALL_DIR").filter(|v| !v.is_empty()) {
+            Some(dir) => PathBuf::from(dir),
+            None => PathBuf::from(std::env::var_os("HOME")?).join(".local/bin"),
+        };
+        executable(installed.join("codex"))
+    })
+}
+
+/// Codex's own installer, where `sh` and `curl` are here: its release into
+/// `~/.local/bin`, asking nothing (`CODEX_NON_INTERACTIVE`: it would offer to start Codex).
+pub(crate) fn install() -> Option<steery_sdk::wire::harness::Install> {
+    on_path("sh")?;
+    on_path("curl")?;
+    let line = "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
+    Some(steery_sdk::wire::harness::Install {
+        argv: vec!["sh".into(), "-c".into(), line.into()],
+        about: format!("Codex's own installer, its release into ~/.local/bin: {line}"),
+    })
+}
+
+/// The first executable named `name` on `PATH`.
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| executable(dir.join(name)))
+}
+
+/// `path`, where it is an executable file.
+fn executable(path: PathBuf) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("codex"))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+    std::fs::metadata(&path)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .then_some(path)
 }
 
 /// Codex, started by this driver for something that writes no conversation: a release, a

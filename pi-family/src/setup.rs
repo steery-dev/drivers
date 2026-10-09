@@ -47,6 +47,7 @@ pub async fn plan(
         refused: Some(why),
         entries: Vec::new(),
         notes: Vec::new(),
+        install: None,
     };
     let root = match harness.root(home) {
         Ok(root) => root,
@@ -62,6 +63,7 @@ pub async fn plan(
                  evidence of one."
                     .into(),
             ],
+            install: harness.install(),
         });
     };
     // omp and pi read the same variable for their folder, and one folder holds one skill
@@ -169,6 +171,7 @@ pub async fn plan(
         refused: None,
         entries,
         notes,
+        install: None,
     })
 }
 
@@ -421,5 +424,65 @@ mod tests {
             std::env::remove_var("PI_CODING_AGENT_DIR");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// omp's installer writes `~/.local/bin/omp`, which a shell that has not read its
+    /// profile since lacks on `PATH`: the plan finds it there, by its absolute path, and
+    /// where it is not there either, offers omp's own installer.
+    #[test]
+    fn omp_in_its_installers_folder_off_path_is_found() {
+        let _held = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let home = std::env::temp_dir().join(format!("pi-family-installed-{}", std::process::id()));
+        let tools = home.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for tool in ["sh", "curl"] {
+            let real = ["/usr/bin", "/bin"]
+                .iter()
+                .map(|dir| Path::new(dir).join(tool))
+                .find(|candidate| candidate.exists())
+                .expect("sh and curl on this machine");
+            std::os::unix::fs::symlink(real, tools.join(tool)).unwrap();
+        }
+        let (path, home_was) = (std::env::var_os("PATH"), std::env::var_os("HOME"));
+        // SAFETY: the environment is changed only under `ENVIRONMENT`.
+        unsafe {
+            std::env::set_var("PATH", &tools);
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("PI_INSTALL_DIR");
+        }
+        let missing = runtime
+            .block_on(plan(Harness::Omp, &home, &home.join("config"), given()))
+            .unwrap();
+        assert!(missing.found.is_none());
+        let install = missing.install.expect("omp's installer is offered");
+        assert_eq!(install.argv[..2], ["sh".to_owned(), "-c".to_owned()]);
+        assert!(
+            install.about.contains(&install.argv[2]),
+            "{}",
+            install.about
+        );
+        let omp = home.join(".local/bin/omp");
+        std::fs::create_dir_all(omp.parent().unwrap()).unwrap();
+        std::fs::write(&omp, "#!/bin/sh\necho 99.0.0\n").unwrap();
+        std::fs::set_permissions(&omp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let found = runtime
+            .block_on(plan(Harness::Omp, &home, &home.join("config"), given()))
+            .unwrap();
+        assert_eq!(found.found.map(|found| found.binary), Some(omp));
+        assert_eq!(found.install, None);
+        unsafe {
+            for (name, was) in [("PATH", path), ("HOME", home_was)] {
+                match was {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

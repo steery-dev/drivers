@@ -237,16 +237,45 @@ impl Harness {
         }
     }
 
-    /// The first executable of the harness on `PATH`.
+    /// The harness's executable: the first on `PATH`, else the one in the folder its own
+    /// installer writes it to — omp's `PI_INSTALL_DIR`, else `~/.local/bin`; pi's agent
+    /// folder's `bin` — which a shell that has not read its profile since may not have on
+    /// `PATH`.
     pub fn binary(self) -> Option<PathBuf> {
-        use std::os::unix::fs::PermissionsExt;
-        let path = std::env::var_os("PATH")?;
-        std::env::split_paths(&path)
-            .map(|dir| dir.join(self.id()))
-            .find(|candidate| {
-                std::fs::metadata(candidate)
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
+        on_path(self.id()).or_else(|| {
+            let home = PathBuf::from(std::env::var_os("HOME")?);
+            let installed = match self {
+                Self::Omp => std::env::var_os("PI_INSTALL_DIR")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.join(".local/bin")),
+                Self::Pi => self.root(&home).ok()?.join("bin"),
+            };
+            executable(installed.join(self.id()))
+        })
+    }
+
+    /// The harness's own installer, where what it needs is here: omp's prebuilt binary
+    /// into `~/.local/bin`, and pi's, which installs its npm package, into a folder on
+    /// `PATH` or its agent folder's `bin`.
+    pub fn install(self) -> Option<harness::Install> {
+        on_path("sh")?;
+        on_path("curl")?;
+        let (line, into) = match self {
+            Self::Omp => (
+                "curl -fsSL https://omp.sh/install | sh -s -- --binary",
+                "omp's own installer, its prebuilt binary into ~/.local/bin",
+            ),
+            Self::Pi => (
+                "curl -fsSL https://pi.dev/install.sh | sh",
+                "pi's own installer, which needs Node.js and npm, into a folder on PATH or \
+                 ~/.pi/agent/bin",
+            ),
+        };
+        Some(harness::Install {
+            argv: vec!["sh".into(), "-c".into(), line.into()],
+            about: format!("{into}: {line}"),
+        })
     }
 
     /// The executable, or `no-binary`.
@@ -254,7 +283,7 @@ impl Harness {
         self.binary().ok_or_else(|| {
             steery_sdk::Error::refused(
                 steery_sdk::refusal::NO_BINARY,
-                format!("{} is not on PATH here", self.id()),
+                format!("{} is not installed here", self.id()),
             )
         })
     }
@@ -266,6 +295,19 @@ fn absolute(path: PathBuf) -> Result<PathBuf, String> {
     } else {
         Err(format!("{} must be an absolute path", path.display()))
     }
+}
+
+/// The first executable named `name` on `PATH`.
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| executable(dir.join(name)))
+}
+
+/// `path`, where it is an executable file.
+fn executable(path: PathBuf) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(&path)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .then_some(path)
 }
 
 /// The harness, started by this driver for something that writes no conversation: a

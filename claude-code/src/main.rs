@@ -257,16 +257,37 @@ pub(crate) fn default_root(home: &Path) -> PathBuf {
     home.join(".claude")
 }
 
-/// The first executable named `claude` on `PATH`.
+/// Claude Code's executable: the first `claude` on `PATH`, else the one its own installer
+/// writes, `~/.local/bin/claude`, which a shell that has not read its profile since may
+/// not have on `PATH`.
 pub(crate) fn binary() -> Option<PathBuf> {
+    on_path("claude")
+        .or_else(|| executable(PathBuf::from(std::env::var_os("HOME")?).join(".local/bin/claude")))
+}
+
+/// Claude Code's own installer, where `bash` and `curl` are here: its native build into
+/// `~/.local/bin`.
+pub(crate) fn install() -> Option<steery_sdk::wire::harness::Install> {
+    on_path("bash")?;
+    on_path("curl")?;
+    let line = "curl -fsSL https://claude.ai/install.sh | bash";
+    Some(steery_sdk::wire::harness::Install {
+        argv: vec!["bash".into(), "-c".into(), line.into()],
+        about: format!("Claude Code's own installer, its native build into ~/.local/bin: {line}"),
+    })
+}
+
+/// The first executable named `name` on `PATH`.
+fn on_path(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| executable(dir.join(name)))
+}
+
+/// `path`, where it is an executable file.
+fn executable(path: PathBuf) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("claude"))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
+    std::fs::metadata(&path)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .then_some(path)
 }
 
 /// Claude Code, started by this driver for something that writes no conversation: a

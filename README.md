@@ -16,6 +16,21 @@ the program protocol (`specs/PROTOCOL.md` in Steery's repository).
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 
+## Finding and installing the harness
+
+A driver finds its harness's executable on `PATH`, then in the folder the harness's own
+installer writes it to, which a shell that has not read its profile since may not have on
+`PATH`; `setup/plan`'s `found.binary` is the one found, and every later start runs it.
+Where the harness is not found, `setup/plan` answers `install`: the vendor's own installer,
+which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.md §4.1).
+
+| Driver | Installer folder | `install` (offered where its shell and `curl` are on `PATH`) |
+|---|---|---|
+| `omp` | `PI_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://omp.sh/install \| sh -s -- --binary"` |
+| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"` (needs Node.js and npm) |
+| `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
+| `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
+
 ## Building
 
 The SDK and the protocol live in Steery's own repository until they are published. Check it

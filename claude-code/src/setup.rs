@@ -25,6 +25,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
                  evidence of one."
                     .into(),
             ],
+            install: crate::install(),
         });
     };
     let release = version(&binary).await.as_deref().and_then(release_within);
@@ -41,6 +42,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
         refused: None,
         entries: entries(home, root, &setup),
         notes,
+        install: None,
     })
 }
 

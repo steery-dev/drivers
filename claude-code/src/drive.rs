@@ -278,7 +278,7 @@ pub async fn stop(root: &Path, stop: Stop) -> Result<Stopped, Error> {
         });
     }
     let binary = crate::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not on PATH here"))?;
+        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     let left = || deadline.saturating_duration_since(tokio::time::Instant::now());
     let out = agents::said(&binary, &["stop", &job.job], left())
         .await
@@ -506,7 +506,7 @@ pub fn models(root: &Path) -> Models {
 /// Claude Code has here; an effort is one of Claude's own levels.
 pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
     let binary = crate::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not on PATH here"))?;
+        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     match (start.act, start.external_id.as_deref()) {
         (Act::Continue | Act::Fork, Some(id)) => {
             store.session(id)?;
@@ -672,7 +672,7 @@ fn quoted(word: &str) -> String {
 /// `--no-session-persistence` leaves nothing behind. The answer is the whole output.
 pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let binary = crate::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not on PATH here"))?;
+        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     if !reader.cwd.is_absolute() {
         return Err(Error::invalid("the reader's folder is no absolute path"));
     }

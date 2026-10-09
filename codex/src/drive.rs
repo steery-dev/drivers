@@ -38,7 +38,7 @@ pub struct Drive {
 
 fn binary() -> Result<PathBuf, Error> {
     crate::home::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "codex is not on PATH here"))
+        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "codex is not installed here"))
 }
 
 fn uuid(id: &str) -> Result<(), Error> {
