@@ -13,8 +13,9 @@ the program protocol (`specs/PROTOCOL.md` in Steery's repository).
 |---|---|---|---|
 | `omp` | omp | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
+| `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 
-`codex` and `claude-code` follow.
+`codex` follows.
 
 ## Building
 
@@ -112,6 +113,62 @@ surface draws a request by. Typecheck them against pi's published types:
 ```sh
 cd pi-family/plugin && npm i && npm run check
 ```
+
+## Claude Code: `claude-code/`
+
+One crate, one binary, `steery-driver-claude-code`. It has no settings. Claude Code keeps
+everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). They are read
+  from `projects/<folder>/<id>.jsonl` under the root, and from the `projects` folder of any
+  transcript the harness's moments named. A conversation resumed goes on in its own file.
+  A sub-agent's transcript is filed under its conversation's,
+  `<id>/subagents/agent-<agent>.jsonl`, with the `.meta.json` beside it naming its type,
+  task and the call that started it. A run a program started (`entrypoint: sdk-cli`) is
+  no conversation until a person carries it on; one the Claude app started
+  (`entrypoint: claude-desktop`) is `app`. Events are turns and how they ended (an API
+  error with its status and code), words, calls grouped as Steery groups them, tokens per
+  response, models and sub-agents.
+- **Setup** (`setup/plan`). Steery's MCP entry in `.claude.json` (beside the root where
+  it is `~/.claude`), the skill in `skills/steery/SKILL.md`, and one hook per event in
+  `settings.json`, at `/hooks/<event>/-`: one group beside the person's own that runs
+  `steery hook claude-code <event>`. `found.release` is what `claude --version` says.
+- **Moments** (`hook/read`, `hook/answer`). A hook's document becomes a Moment; Steery's
+  answer becomes what Claude Code reads: `hookSpecificOutput.additionalContext`, a
+  `Stop` that keeps the turn going (`decision: block`), a `PreToolUse` or
+  `PermissionRequest` decision, and the conversation's lead written to `CLAUDE_ENV_FILE`
+  (`append`).
+- **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
+  `reader`, `terminal`).
+  - `held`: Claude Code's registry, `sessions/<pid>.json`, names the live session in a
+    conversation. A background session is its owner's to stop, by `claude stop`, through
+    an owner token; a terminal is a process the runtime stops. Without a registered
+    session, the runtime looks for processes holding the transcript.
+  - `idle`: what `claude agents --json --all` lists, with the registry.
+  - `start`: a turn is a background session (`claude --bg`, `--resume`, `--fork-session`,
+    `-w`, `--model`, `--effort`). The plan runs this driver's own binary in its turn mode
+    (`steery-driver-claude-code turn …`), which starts the session and follows it through
+    `claude agents` to where its turn stopped; `turn/read` reads those lines and Claude
+    Code's own refusals (`untrusted`, `not-found`, `harness-busy`).
+  - `receipt/mark`, `receipt/find`: the person's input carrying the delivery marker, in
+    the transcript past a mark.
+  - `models`: the model in `settings.json`, and Claude Code's effort levels for any other.
+  - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode` and no session
+    kept.
+  - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session
+    holds it, and the Claude app's link for a conversation it started.
+- **Live** (`say`). Words go into the inbox socket the registered session opens, after its
+  peer token; the socket says nothing back, so they are unconfirmed and the runtime finds
+  them with `receipt/find`. The session keeps its own model, so `pick` is unsupported, and
+  there is no `recap`.
+
+```sh
+cd claude-code && cargo build
+steery driver test target/debug/steery-driver-claude-code
+cargo test
+```
+
+`cargo test` needs no Claude Code; the reader's test runs only where `claude` is on `PATH`.
 
 ## License
 

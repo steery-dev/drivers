@@ -1,0 +1,19 @@
+[package]
+name = "steery-driver-claude-code"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Steery's official driver for Claude Code: it reads Claude Code's conversations, plans its setup, answers its hooks, and starts, reads, reaches and stops its turns."
+
+[dependencies]
+steery-sdk = { path = "../../server/crates/steery-sdk" }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+serde = { version = "1", features = ["derive"] }
+libc = "0.2"
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "macros", "process", "time", "net", "io-util", "fs", "sync"] }
+
+# Its own workspace, so it builds alone.
+[workspace]
