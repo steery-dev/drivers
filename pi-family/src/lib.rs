@@ -83,9 +83,12 @@ impl Program for Driver {
         let _ = self.place.set(Place {
             home: params.home.clone(),
             config: params.config.clone(),
-            store: harness
-                .root(&params.home)
-                .map(|root| transcripts::Store::new(harness, &params.home, root)),
+            store: harness.root(&params.home).map(|root| {
+                let chosen = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+                    .filter(|dir| !dir.is_empty())
+                    .map(PathBuf::from);
+                transcripts::Store::new(harness, &params.home, root, chosen)
+            }),
         });
         Ok(wire::Initialized {
             protocol: PROTOCOL,
