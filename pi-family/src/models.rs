@@ -39,9 +39,10 @@ pub struct Catalog {
 
 impl Catalog {
     /// `models`: every model the harness has a sign-in for, as it lists them, the default
-    /// first, and the files whose change changes the list. A list the harness will not
-    /// give is refused with why.
+    /// first, and the files whose change changes the list. `no-binary` where the harness
+    /// is not here; a list it will not give is refused with why.
     pub async fn list(&self, harness: Harness, home: &Path, root: &Path) -> Result<Models, Error> {
+        harness.need_binary()?;
         let models = self
             .ask(harness, root, LISTED_WITHIN)
             .await
