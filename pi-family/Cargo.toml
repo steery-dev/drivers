@@ -1,16 +1,25 @@
 [package]
-name = "steery-driver-omp"
+name = "steery-driver-pi-family"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Steery's official driver for omp: it reads omp's conversations, plans its setup, and says how to start, read and resume an omp turn."
+description = "Steery's official drivers for omp and pi: they read the harness's conversations, plan its setup, read its moments, and say how to start, read and resume a turn."
+
+[[bin]]
+name = "steery-driver-omp"
+path = "src/bin/omp.rs"
+
+[[bin]]
+name = "steery-driver-pi"
+path = "src/bin/pi.rs"
 
 [dependencies]
 steery-sdk = { path = "../../server/crates/steery-sdk" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["rt", "macros", "process", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "process", "time", "io-util"] }
 
 # Its own workspace, so it builds alone.
 [workspace]

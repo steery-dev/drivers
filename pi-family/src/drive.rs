@@ -1,57 +1,55 @@
-//! omp's own way in, from its command line.
+//! The harness's own way in, from its command line.
 //!
-//! `omp -p --mode json` runs one turn and exits, reading the words on standard input when
-//! it is not a terminal. `--resume <id>` continues a conversation — by id, which omp
-//! refuses when it has none — and `--fork <id>` starts a second one from it in the folder
-//! the turn starts in. A conversation whose folder is gone omp will not resume, and says
-//! so; forked, it goes on in the folder given (omp 18.4.4). omp makes no worktree of its
-//! own.
+//! `<harness> -p --mode json` runs one turn and exits, reading the words on standard input
+//! when it is not a terminal. omp continues a conversation by id, `--resume <id>`, and
+//! forks one with `--fork <id>`; pi by its transcript, `--session <file>` and
+//! `--fork <file>`. A fork starts in the folder the turn starts in. A conversation whose
+//! folder is gone neither resumes, and says so. Neither makes a worktree of its own.
 //!
 //! A run says itself in pi's JSON lines: the `session` line names the conversation before
-//! anything is asked of a model, the person's `message_end` is omp's receipt of the words,
-//! and `agent_end` says how the run ended. `--model` resolves loosely, so a pick goes to
-//! omp only as one of its own catalog's entries.
+//! anything is asked of a model, the person's `message_end` is the receipt of the words,
+//! and `agent_end` says how the run ended. omp's `--model` resolves loosely, so a pick goes
+//! to omp only as one of its own catalog's entries; pi's goes to Steery's plugin
+//! (`--steery-model`), which refuses one pi does not run exactly.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Act, Ended, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Model, Models, ReadAs,
-    Reader, ReaderFile, ReaderPlan, ReaderTools, Sample, Sampled, Start, Stdin, Stream, Terminal,
-    TerminalCommand, TurnLine, TurnRead, TurnState,
+    Act, Ended, Execution, Held, HeldBy, Holder, Launch, Look, Looked, ReadAs, Reader, ReaderFile,
+    ReaderPlan, ReaderTools, Sample, Sampled, Start, Stdin, Stream, Terminal, TerminalCommand,
+    TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
+use crate::Harness;
+use crate::models::{Catalog, PI_SETTINGS};
 use crate::transcripts::{self, Store};
 
-/// How long `omp models` has to answer `models`: omp took over 20 s on a Mac that had
-/// just started and was swapping.
-const LISTED_WITHIN: Duration = Duration::from_secs(25);
-/// How long a `start` waits to learn whether omp lists the model it was told to run.
-const A_TURN_WAITS: Duration = Duration::from_secs(8);
-/// How long a list answers a `start` without asking omp again.
-const KEPT: Duration = Duration::from_secs(600);
 /// The file a reader is asked through, in its private folder.
 const ASKED: &str = "asked.txt";
 
-/// `held`: omp keeps no registry of its own, so the runtime looks for an omp process
+/// `held`: neither harness keeps a registry of its own, so the runtime looks for a process
 /// holding the transcript open or naming it, and asks the plugin door. Every omp process
-/// holds its conversation's transcript open, so none holds one without.
+/// holds its conversation's transcript open. A pi without Steery's plugin holds nothing
+/// open and renames its process `pi`, so a pi no door, turn or `STEERY_STARTED` answers
+/// for may hold any conversation: a stray.
 pub fn held(store: &Store, held: Held) -> HeldBy {
     HeldBy::Look(Looked {
         look: Look {
             transcripts: store.transcripts(&held.external_id),
-            strays: false,
+            strays: store.harness() == Harness::Pi,
+            beyond: Vec::new(),
         },
     })
 }
 
-/// `idle`: omp writes nothing that says a conversation is running but its plugin door, and
-/// the runtime reads the door itself. Without one, a conversation omp has on disk is idle
-/// exactly where no process holds it.
+/// `idle`: the harness writes nothing that says a conversation is running but its plugin
+/// door, and the runtime reads the door itself. Without one, a conversation on disk is
+/// idle exactly where no process holds it (and, in pi, no stray runs).
 pub fn idle(store: &Store, held: Held) -> Sampled {
     let observed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -73,189 +71,30 @@ pub fn idle(store: &Store, held: Held) -> Sampled {
     }
 }
 
-/// omp's catalog as `omp models --json` lists it, and when it was listed last.
-#[derive(Default)]
-pub struct Catalog {
-    kept: Mutex<Option<(Instant, Vec<Model>)>>,
-}
+/// Steery's plugin's own flags in pi, which pick exactly or refuse.
+const STEERY_MODEL: &str = "steery-model";
+const STEERY_THINKING: &str = "steery-thinking";
 
-impl Catalog {
-    /// `models`: every model omp has a sign-in for, as it lists them, the default its
-    /// `config.yml` names first, and the files whose change changes the list. A list omp
-    /// will not give is refused with why.
-    pub async fn list(&self, home: &Path, root: &Path) -> Result<Models, Error> {
-        let mut models = self
-            .ask(LISTED_WITHIN)
-            .await
-            .map_err(|why| Error::refused(refusal::REFUSED, why))?;
-        if let Some(default) = default_model(root, &models)
-            && let Some(at) = models.iter().position(|offer| offer.model == default)
-        {
-            let offer = models.remove(at);
-            models.insert(0, offer);
-        }
-        Ok(Models {
-            models,
-            unlisted: None,
-            watch: watched(home, root),
-        })
-    }
-
-    /// Whether omp runs `model` as itself: one of its catalog's entries, which its
-    /// `--model` finds exactly. omp resolves anything else loosely and runs what it found
-    /// without a word, so a pick it does not list is never handed to it.
-    async fn lists(&self, model: &str) -> Result<bool, String> {
-        let named = |models: &[Model]| models.iter().any(|offer| offer.model == model);
-        {
-            let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, models)) = kept.as_ref()
-                && at.elapsed() < KEPT
-                && named(models)
-            {
-                return Ok(true);
-            }
-        }
-        Ok(named(&self.ask(A_TURN_WAITS).await?))
-    }
-
-    async fn ask(&self, within: Duration) -> Result<Vec<Model>, String> {
-        let binary = crate::binary().ok_or("omp is not on PATH here")?;
-        let output = tokio::time::timeout(
-            within,
-            crate::helper(&binary)
-                .args(["models", "--json"])
-                .stdout(std::process::Stdio::piped())
-                .output(),
-        )
-        .await
-        .map_err(|_| format!("omp did not list its models within {} s", within.as_secs()))?
-        .map_err(|e| format!("omp models: {e}"))?;
-        if !output.status.success() {
-            return Err(format!("omp models exited with {}", output.status));
-        }
-        let listed: Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("omp models said no JSON: {e}"))?;
-        let models = offers(&listed)?;
-        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((Instant::now(), models.clone()));
-        Ok(models)
-    }
-}
-
-/// `{"models": [{provider, id, selector, name, thinking, cost}]}`: each by its selector,
-/// `provider/id`, which is what `--model` takes exactly, at `cost.input` dollars per
-/// million input tokens where omp prices it.
-fn offers(listed: &Value) -> Result<Vec<Model>, String> {
-    let rows = listed
-        .get("models")
-        .and_then(Value::as_array)
-        .ok_or("omp models has no models array")?;
-    rows.iter()
-        .map(|row| {
-            let selector = row
-                .get("selector")
-                .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .ok_or("omp model has no selector")?;
-            let label = row
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty() && *name != selector);
-            let thinking = match row.get("thinking") {
-                None | Some(Value::Null) => Vec::new(),
-                Some(Value::Array(levels)) => levels
-                    .iter()
-                    .map(|level| {
-                        level
-                            .as_str()
-                            .filter(|level| !level.is_empty())
-                            .map(str::to_owned)
-                            .ok_or("omp model has an invalid thinking level")
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                _ => return Err("omp model has invalid thinking levels".to_owned()),
-            };
-            let cost = row
-                .pointer("/cost/input")
-                .and_then(Value::as_f64)
-                .filter(|cost| cost.is_finite() && *cost >= 0.0);
-            Ok(Model {
-                provider: row
-                    .get("provider")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                model: selector.to_owned(),
-                label: label.map(str::to_owned),
-                thinking,
-                cost,
-            })
-        })
-        .collect()
-}
-
-/// The model omp runs when told none: `modelRoles.default` in its `config.yml`, a
-/// selector with its thinking level after a `:`, where that names one it lists.
-fn default_model(root: &Path, models: &[Model]) -> Option<String> {
-    let text = ["config.yml", "config.yaml"]
-        .iter()
-        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())?;
-    let mut roles = false;
-    let named = text.lines().find_map(|line| {
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            return None;
-        }
-        if !line.starts_with([' ', '\t']) {
-            roles = line.trim_end() == "modelRoles:";
-            return None;
-        }
-        roles
-            .then(|| line.trim_start().strip_prefix("default:"))
-            .flatten()
-            .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
-    })?;
-    let listed = |selector: &str| models.iter().any(|offer| offer.model == selector);
-    if listed(&named) {
-        return Some(named);
-    }
-    let (selector, _level) = named.rsplit_once(':')?;
-    listed(selector).then(|| selector.to_owned())
-}
-
-/// The files whose change changes what omp lists: its configuration and model files, and
-/// the `.env` files it takes provider keys from, in its agent folder, its config folder
-/// and home. Its stored sign-ins live in `agent.db`, which every conversation writes.
-fn watched(home: &Path, root: &Path) -> Vec<PathBuf> {
-    let mut files: Vec<PathBuf> = [
-        "config.yml",
-        "config.yaml",
-        "models.yml",
-        "models.yaml",
-        "models.json",
-        ".env",
-    ]
-    .iter()
-    .map(|name| root.join(name))
-    .collect();
-    if let Ok(base) = crate::base(home) {
-        files.push(base.join(".env"));
-    }
-    files.push(home.join(".env"));
-    files
-}
-
-/// `start`: the launch plan of an omp turn. The words go on standard input; omp makes no
-/// worktree of its own.
+/// `start`: the launch plan of a turn. The words go on standard input.
 pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Launch, Error> {
+    let harness = store.harness();
     if start.worktree {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
-            "omp makes no worktree of its own",
+            format!("{} makes no worktree of its own", harness.id()),
         ));
     }
-    let binary = crate::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "omp is not on PATH here"))?;
+    let binary = harness.need_binary()?;
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned()];
     argv.extend(["-p", "--mode", "json"].map(String::from));
+    // omp names a conversation by its id, pi by its transcript.
+    let named = |id: &str, file: PathBuf| match harness {
+        Harness::Omp => Ok(id.to_owned()),
+        Harness::Pi => file
+            .into_os_string()
+            .into_string()
+            .map_err(|_| Error::invalid("the transcript's path is not UTF-8")),
+    };
     match (start.act, start.external_id.as_deref()) {
         (Act::Continue, Some(id)) => {
             let file = store.find(id)?;
@@ -265,16 +104,21 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
                 return Err(Error::refused(
                     refusal::NO_PLACE,
                     format!(
-                        "{} is gone, and omp resumes a conversation only there",
-                        cwd.display()
+                        "{} is gone, and {} resumes a conversation only there",
+                        cwd.display(),
+                        harness.id()
                     ),
                 ));
             }
-            argv.extend(["--resume".into(), id.into()]);
+            let flag = match harness {
+                Harness::Omp => "--resume",
+                Harness::Pi => "--session",
+            };
+            argv.extend([flag.into(), named(id, file)?]);
         }
         (Act::Fork, Some(id)) => {
-            store.find(id)?;
-            argv.extend(["--fork".into(), id.into()]);
+            let file = store.find(id)?;
+            argv.extend(["--fork".into(), named(id, file)?]);
         }
         (Act::Continue | Act::Fork, None) => {
             return Err(Error::invalid(
@@ -285,12 +129,14 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
         (Act::Hand, _) => {
             return Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
-                "omp takes no handed-over conversation",
+                format!("{} takes no handed-over conversation", harness.id()),
             ));
         }
     }
-    if let Some(model) = &start.model {
-        match catalog.lists(model).await {
+    if harness == Harness::Omp
+        && let Some(model) = &start.model
+    {
+        match catalog.lists(store.root(), model).await {
             Ok(true) => {}
             Ok(false) => {
                 return Err(Error::refused(
@@ -300,10 +146,20 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
             }
             Err(why) => return Err(Error::refused(refusal::START_FAILED, why)),
         }
+    }
+    if let Some(model) = &start.model {
         argv.extend(["--model".into(), model.clone()]);
     }
     if let Some(thinking) = &start.thinking {
         argv.extend(["--thinking".into(), thinking.clone()]);
+    }
+    if harness == Harness::Pi {
+        if let Some(model) = &start.model {
+            argv.push(format!("--{STEERY_MODEL}={model}"));
+        }
+        if let Some(thinking) = &start.thinking {
+            argv.push(format!("--{STEERY_THINKING}={thinking}"));
+        }
     }
     Ok(Launch {
         argv,
@@ -323,20 +179,20 @@ pub struct Runs {
 
 /// One turn's lines so far.
 struct Run {
-    /// omp took the words.
+    /// The harness took the words.
     took: bool,
 }
 
 impl Runs {
-    /// `turn/read`: what one line of an omp run says. Standard output is pi's JSON lines;
-    /// standard error is omp's own words for what it will not run. A turn's words are
-    /// taken once; past the line that ended it, the lines omp writes as it settles say
-    /// nothing, and a run omp starts again (`agent_start`) is read on.
-    pub fn read(&self, read: TurnRead) -> TurnLine {
+    /// `turn/read`: what one line of a run says. Standard output is pi's JSON lines;
+    /// standard error is the harness's own words for what it will not run. A turn's words
+    /// are taken once; past the line that ended it, the lines the harness writes as it
+    /// settles say nothing, and a run started again (`agent_start`) is read on.
+    pub fn read(&self, harness: Harness, read: TurnRead) -> TurnLine {
         let line = match read.stream {
             Stream::Stderr => {
                 return TurnLine {
-                    refused: refused_by(&read.line).map(str::to_owned),
+                    refused: refused_by(harness, &read.line).map(str::to_owned),
                     ..TurnLine::default()
                 };
             }
@@ -349,9 +205,9 @@ impl Runs {
         let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
         let run = match runs.get_mut(&read.turn) {
             Some(run) => run,
-            // A turn not held is a new one, which omp opens with its naming line, or one
-            // whose end was answered: settling lines say nothing, and a run started again
-            // took its words before.
+            // A turn not held is a new one, which the harness opens with its naming line,
+            // or one whose end was answered: settling lines say nothing, and a run started
+            // again took its words before.
             None if named.is_none() && after_end(&line) => return TurnLine::default(),
             None => runs.entry(read.turn.clone()).or_insert(Run {
                 took: named.is_none(),
@@ -384,10 +240,10 @@ fn named(line: &Value) -> Option<String> {
 const DELIVERED: &str = "steery-delivery:";
 
 /// The receipt of the turn's words: the person's message going into the conversation
-/// (`message_end`, which omp writes to its transcript as it says it). Words that carry a
-/// `delivery` are taken only by a message naming it whole — `aim.<throw>.1` is not
-/// `aim.<throw>.10` — so nothing else the run takes in is read as them; words without
-/// one by the run's first message of the person's.
+/// (`message_end`, which the harness writes to its transcript as it says it). Words that
+/// carry a `delivery` are taken only by a message naming it whole — `aim.<throw>.1` is not
+/// `aim.<throw>.10` — so nothing else the run takes in is read as them; words without one
+/// by the run's first message of the person's.
 fn taken(line: &Value, delivery: Option<&str>) -> bool {
     if line.get("type").and_then(Value::as_str) != Some("message_end") {
         return false;
@@ -421,7 +277,7 @@ fn taken(line: &Value, delivery: Option<&str>) -> bool {
 }
 
 /// Every line after a run's `agent_end` but one that starts or ends the run again: what
-/// omp writes as it settles.
+/// the harness writes as it settles.
 fn after_end(line: &Value) -> bool {
     !matches!(
         line.get("type").and_then(Value::as_str),
@@ -430,10 +286,10 @@ fn after_end(line: &Value) -> bool {
 }
 
 /// `agent_end`: the run ran to its end when the model's last word stopped of its own
-/// accord, failed when it stopped on an `error`, with omp's `errorMessage`, and was
-/// interrupted on an `aborted` request. A run that goes on is no end: one retried
-/// (`willRetry`), and one omp continues itself (`isTerminal: false`) unless it yielded
-/// while work it started runs on, where print mode exits.
+/// accord, failed when it stopped on an `error`, with the harness's `errorMessage`, and
+/// was interrupted on an `aborted` request. A run that goes on is no end: one retried
+/// (`willRetry`), and one the harness continues itself (`isTerminal: false`) unless it
+/// yielded while work it started runs on, where print mode exits.
 fn end(line: &Value) -> Option<Ended> {
     if line.get("type").and_then(Value::as_str) != Some("agent_end") {
         return None;
@@ -474,27 +330,30 @@ fn end(line: &Value) -> Option<Ended> {
     }
 }
 
-/// omp 18.4.12's own lines on standard error for what it will not run.
-///
-/// The folder a `--resume` conversation ran in is gone.
-const NO_FOLDER: &str = "belongs to a directory that no longer exists";
-/// `--resume` or `--fork` of an id omp has no conversation for: `Session "<id>" not found.`
-const SESSION: &str = "Session \"";
-/// A model omp cannot find: `Model "<pick>" not found`.
-const MODEL: &str = "Model \"";
-const NOT_FOUND: &str = "\" not found";
-/// No model at all, a provider omp does not know, and no sign-in for the model: the run
-/// exits before the words go in.
-const NO_MODEL: [&str; 4] = [
-    "No models available",
-    "Unknown provider \"",
-    "No model selected",
-    "No API key found for ",
-];
+/// What the harness will not run, by the words it says it in on standard error. Any
+/// other line is no refusal.
+fn refused_by(harness: Harness, said: &str) -> Option<&'static str> {
+    match harness {
+        Harness::Omp => omp_refused(said),
+        Harness::Pi => pi_refused(said),
+    }
+}
 
-/// What omp will not run, by the words it says it in: a folder gone, a model it cannot
-/// run here, and a conversation it has not. Any other line is no refusal.
-fn refused_by(said: &str) -> Option<&'static str> {
+/// omp 18.4.12's own lines: a `--resume` conversation whose folder is gone; `Session
+/// "<id>" not found.` for an id it has no conversation for; `Model "<pick>" not found`;
+/// and no model, a provider it does not know or no sign-in for the model, where the run
+/// exits before the words go in.
+fn omp_refused(said: &str) -> Option<&'static str> {
+    const NO_FOLDER: &str = "belongs to a directory that no longer exists";
+    const SESSION: &str = "Session \"";
+    const MODEL: &str = "Model \"";
+    const NOT_FOUND: &str = "\" not found";
+    const NO_MODEL: [&str; 4] = [
+        "No models available",
+        "Unknown provider \"",
+        "No model selected",
+        "No API key found for ",
+    ];
     let says = |what: &str| said.contains(what) && said.contains(NOT_FOUND);
     if said.contains(NO_FOLDER) {
         Some(refusal::NO_PLACE)
@@ -507,16 +366,50 @@ fn refused_by(said: &str) -> Option<&'static str> {
     }
 }
 
-/// `reader`: omp as a one-shot reader, everything closed that a flag closes, on the model
-/// it is given, else on omp's own default. Its MCP servers arrive through discovery and no
-/// switch turns that off. `--no-extensions` keeps out what an extension brings, Steery's
-/// plugin among them. A reader with no tools runs in a private folder and is asked through
-/// a file there, named to omp as `@path`; one that reads runs in the place it looks at,
-/// which it must leave as it found it, and is asked on its command line. The answer is
-/// the whole output.
-pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
-    let binary = crate::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "omp is not on PATH here"))?;
+/// pi 1.0's own lines, and Steery's plugin's `steery-refused: <word>[: why]`, which it
+/// says before pi looks for a model or a sign-in: a `--session` folder gone, a fork of a
+/// file that is not there, a model pi cannot find or finds twice, and a thinking level or
+/// a flag of the plugin's it does not take.
+fn pi_refused(said: &str) -> Option<&'static str> {
+    if let Some(word) = said.trim().strip_prefix("steery-refused: ") {
+        let word = word.split(':').next().unwrap_or_default().trim();
+        return Some(if word == refusal::MODEL_MISSING {
+            refusal::MODEL_MISSING
+        } else {
+            refusal::SELECTION_UNSUPPORTED
+        });
+    }
+    if said.contains("Stored session working directory does not exist: ") {
+        Some(refusal::NO_PLACE)
+    } else if said.contains("Cannot fork: source session ") {
+        Some(refusal::NOT_FOUND)
+    } else if said.contains("\" not found. Use --list-models")
+        || said.contains("\" is ambiguous across providers: ")
+    {
+        Some(refusal::MODEL_MISSING)
+    } else if said.contains("Invalid thinking level \"")
+        || (said.contains("Unknown option")
+            && (said.contains(STEERY_MODEL) || said.contains(STEERY_THINKING)))
+    {
+        Some(refusal::SELECTION_UNSUPPORTED)
+    } else {
+        None
+    }
+}
+
+/// `reader`: the harness as a one-shot reader, on the model it is given, else on its own
+/// default. A reader with no tools runs in a private folder and is asked through a file
+/// there, named as `@path`; one that reads runs in the place it looks at, which it must
+/// leave as it found it, and is asked on its command line. The answer is the whole
+/// output.
+///
+/// omp: everything closed that a flag closes; its MCP servers arrive through discovery,
+/// which no switch turns off, and `--no-extensions` keeps out what an extension brings,
+/// Steery's plugin among them. pi: no tools, skills, templates, themes or context files,
+/// and its MCP and code-mode extensions turned off by a settings file in the private
+/// folder; other extensions stay, since a provider may come from one.
+pub fn reader(harness: Harness, reader: Reader) -> Result<ReaderPlan, Error> {
+    let binary = harness.need_binary()?;
     if !reader.cwd.is_absolute() {
         return Err(Error::invalid("the reader's folder is no absolute path"));
     }
@@ -527,14 +420,17 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     if let Some(system) = reader.system {
         argv.extend(["--system-prompt".into(), system]);
     }
-    let tools = match reader.tools {
-        ReaderTools::None => "--no-tools",
+    let shut: &[&str] = match (harness, reader.tools) {
+        (Harness::Omp, ReaderTools::None) => &["--no-tools"],
         // omp's reading tools are `read`, `grep` and `glob`.
-        ReaderTools::Read => "--tools=read,grep,glob",
+        (Harness::Omp, ReaderTools::Read) => &["--tools=read,grep,glob"],
+        (Harness::Pi, ReaderTools::None) => &["--no-tools"],
+        // pi's are `read`, `grep`, `find` and `ls`.
+        (Harness::Pi, ReaderTools::Read) => &["--tools", "read,grep,find,ls", "--no-extensions"],
     };
-    argv.extend(
-        [
-            tools,
+    argv.extend(shut.iter().map(|flag| (*flag).to_owned()));
+    let closed: &[&str] = match harness {
+        Harness::Omp => &[
             "--no-lsp",
             "--no-pty",
             "--no-extensions",
@@ -542,23 +438,43 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
             "--no-rules",
             "--no-session",
             "--no-title",
-        ]
-        .map(String::from),
-    );
+        ],
+        Harness::Pi => &[
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-themes",
+            "--no-context-files",
+            "--no-session",
+        ],
+    };
+    argv.extend(closed.iter().map(|flag| (*flag).to_owned()));
     let files = match reader.tools {
         ReaderTools::None => {
+            match harness {
+                Harness::Omp => argv.extend(["--thinking", "off", "--"].map(String::from)),
+                Harness::Pi => argv.extend(["--approve", "--thinking", "off"].map(String::from)),
+            }
             let asked = reader.cwd.join(ASKED);
             let asked = asked
                 .to_str()
                 .ok_or_else(|| Error::invalid("the reader's folder is not UTF-8"))?;
-            argv.extend(["--thinking", "off", "--"].map(String::from));
             argv.push(format!("@{asked}"));
-            vec![ReaderFile {
+            let mut files = vec![ReaderFile {
                 path: PathBuf::from(ASKED),
                 content: reader.asked,
-            }]
+            }];
+            if harness == Harness::Pi {
+                files.push(ReaderFile {
+                    path: PathBuf::from(".pi/settings.json"),
+                    content: PI_SETTINGS.into(),
+                });
+            }
+            files
         }
         ReaderTools::Read => {
+            if harness == Harness::Pi {
+                argv.push("--no-approve".into());
+            }
             argv.extend(["--".into(), reader.asked]);
             Vec::new()
         }
@@ -573,15 +489,16 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     })
 }
 
-/// `terminal`: `cd '<cwd>' && omp --resume=<id>`, with `PI_CODING_AGENT_DIR='<root>'`
-/// before omp where the conversation is filed under another agent folder than omp's
-/// default.
+/// `terminal`: `cd '<cwd>' && omp --resume=<id>` or `pi --session <id>`, with
+/// `PI_CODING_AGENT_DIR='<root>'` before it where the conversation is filed under another
+/// agent folder than the harness's default.
 pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<TerminalCommand, Error> {
+    let harness = store.harness();
     let id = &terminal.external_id;
     if !plain_id(id) {
         return Err(Error::refused(
             refusal::NOT_FOUND,
-            format!("omp has no conversation {id} here"),
+            format!("{} has no conversation {id} here", harness.id()),
         ));
     }
     store.find(id)?;
@@ -594,17 +511,22 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
         .ok_or_else(|| Error::invalid("the folder is not UTF-8"))?;
     let mut command = format!("cd {} && ", quoted(cwd));
     let root = store.root();
-    if root != crate::default_root(home) {
+    if root != harness.default_root(home) {
         let root = root
             .to_str()
-            .ok_or_else(|| Error::invalid("omp's agent folder is not UTF-8"))?;
+            .ok_or_else(|| Error::invalid("the agent folder is not UTF-8"))?;
         command.push_str(&format!("PI_CODING_AGENT_DIR={} ", quoted(root)));
     }
-    command.push_str(&format!("omp --resume={id}"));
-    // A second omp on one conversation appends to its transcript beside the first.
+    command.push_str(&match harness {
+        Harness::Omp => format!("omp --resume={id}"),
+        Harness::Pi => format!("pi --session {id}"),
+    });
+    // A second process on one conversation appends to its transcript beside the first.
     let line = matches!(terminal.holder, Some(Holder::Person { .. })).then(|| {
-        "omp has it open already; this opens a second omp writing to the same conversation."
-            .to_owned()
+        format!(
+            "{0} has it open already; this opens a second {0} writing to the same conversation.",
+            harness.id()
+        )
     });
     Ok(TerminalCommand {
         command,
@@ -618,12 +540,54 @@ fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-/// Whether a conversation's id is one plain word a command takes as it is, and omp
-/// cannot read as a flag.
+/// Whether a conversation's id is one plain word a command takes as it is, and the
+/// harness cannot read as a flag.
 fn plain_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_delivery_is_taken_only_whole() {
+        let line = |text: &str| {
+            serde_json::json!({"type": "message_end",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+        };
+        assert!(taken(
+            &line("go steery-delivery:aim.t.1 now"),
+            Some("aim.t.1")
+        ));
+        assert!(!taken(
+            &line("go steery-delivery:aim.t.10"),
+            Some("aim.t.1")
+        ));
+        assert!(taken(&line("anything"), None));
+    }
+
+    #[test]
+    fn each_harness_refuses_in_its_own_words() {
+        assert_eq!(
+            refused_by(Harness::Pi, "steery-refused: model-missing: no such model"),
+            Some(refusal::MODEL_MISSING)
+        );
+        assert_eq!(
+            refused_by(Harness::Pi, "Cannot fork: source session /x.jsonl"),
+            Some(refusal::NOT_FOUND)
+        );
+        assert_eq!(
+            refused_by(Harness::Omp, "Session \"abc\" not found."),
+            Some(refusal::NOT_FOUND)
+        );
+        assert_eq!(
+            refused_by(Harness::Omp, "Cannot fork: source session"),
+            None
+        );
+    }
 }

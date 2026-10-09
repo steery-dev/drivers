@@ -1,11 +1,14 @@
-//! What omp's records say happened, as the protocol's events.
+//! What a pi-family transcript's records say happened, as the protocol's events.
 //!
 //! A turn begins at a `user` message and ends at the assistant message that stops of its
-//! own accord (`stop`), on an `error` or `aborted`. omp retries a failed model call
-//! itself and writes the failed attempt first, so an error ends its turn only once the
+//! own accord (`stop`), on an `error` or `aborted`. omp and pi retry a failed model call
+//! themselves and write the failed attempt first, so an error ends its turn only once the
 //! conversation went no further: a person's next message, retries given up (an `aborted`
 //! answer with nothing in it), the process leaving (`session_exit`), or the transcript
 //! still for [`SETTLE`]. Until then the error and what follows it are read again later.
+//!
+//! pi also says the thinking level a conversation runs at, what its tool results and its
+//! own summaries spent, and, through Steery's plugin, a prompt past the model's limit.
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +17,11 @@ use steery_sdk::wire::harness::{
     Clip, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
 };
 
-use crate::calls;
+use crate::{Harness, calls};
+
+/// The custom entry Steery's plugin appends in pi once pi gave up compacting a prompt over
+/// the model's limit.
+const CONTEXT_FULL: &str = "steery-context-full";
 
 /// How long a transcript that ends on a failed model call stays still before the failure
 /// is the turn's end: longer than omp waits between its own retries.
@@ -22,6 +29,7 @@ pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What reading one transcript needs besides its records.
 pub struct Reading {
+    pub harness: Harness,
     /// The transcript.
     pub file: PathBuf,
     /// omp's blob store, where a picture's bytes are kept by their digest.
@@ -35,18 +43,19 @@ pub struct Reading {
     pub fork: Option<(String, u64)>,
 }
 
-/// One whole record of a transcript, and where it lies: `None` where it is no JSON.
+/// One whole record on the conversation's path, and where it starts: `None` where it is
+/// no JSON.
 pub struct Record {
     pub start: u64,
-    pub end: u64,
     pub value: Option<Value>,
 }
 
 /// What a run of records came to.
 pub struct Read {
     pub events: Vec<Event>,
-    /// The offset after the last record whose events these are.
-    pub through: u64,
+    /// How many of the records these events are of: a failure still undecided and what
+    /// follows it are left for the next read.
+    pub consumed: usize,
     /// The fork event was said.
     pub forked: bool,
 }
@@ -58,21 +67,24 @@ pub fn read(reading: &Reading, records: &[Record], forked: bool, settled: bool) 
     let mut state = State {
         reading,
         at: 0,
+        index: 0,
         forked,
         pending: None,
+        model: None,
+        thinking: None,
         out: Vec::new(),
     };
-    let mut through = records.first().map_or(0, |record| record.start);
-    for record in records {
+    let mut consumed = records.len();
+    for (index, record) in records.iter().enumerate() {
+        state.index = index;
         if let Some(value) = &record.value {
             state.record(record.start, value);
         }
-        through = record.end;
     }
     match state.pending.take() {
         Some(pending) if !settled => {
             state.out.truncate(pending.mark);
-            through = pending.start;
+            consumed = pending.index;
             state.forked = pending.forked;
         }
         Some(pending) => state.out.push(pending.ended()),
@@ -80,7 +92,7 @@ pub fn read(reading: &Reading, records: &[Record], forked: bool, settled: bool) 
     }
     Read {
         events: state.out,
-        through,
+        consumed,
         forked: state.forked,
     }
 }
@@ -89,8 +101,8 @@ pub fn read(reading: &Reading, records: &[Record], forked: bool, settled: bool) 
 struct Pending {
     at: u64,
     failure: Failure,
-    /// Where its record starts, and how many events came before it.
-    start: u64,
+    /// Which record it is, and how many events came before it.
+    index: usize,
     mark: usize,
     forked: bool,
 }
@@ -106,11 +118,46 @@ impl Pending {
     }
 }
 
+impl State<'_> {
+    /// What the conversation runs on now: a `model` event where the model, or in pi the
+    /// thinking level, changed. omp's transcript says no level Steery reads: its level is
+    /// the door's alone.
+    fn runs_on(&mut self, at: u64, model: Option<String>, thinking: Option<&str>) {
+        let thinking = thinking
+            .filter(|_| self.reading.harness == Harness::Pi)
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+            .map(str::to_owned);
+        let model = model.or_else(|| self.model.clone());
+        let thinking = thinking.or_else(|| self.thinking.clone());
+        if model == self.model && thinking == self.thinking {
+            return;
+        }
+        self.model = model;
+        self.thinking = thinking;
+        if let Some(model) = &self.model {
+            self.out.push(Event::Model {
+                at,
+                model: model.clone(),
+                provider: model
+                    .split_once('/')
+                    .map(|(provider, _)| provider.to_owned()),
+                thinking: self.thinking.clone(),
+            });
+        }
+    }
+}
+
 struct State<'a> {
     reading: &'a Reading,
     at: u64,
+    /// Which record is being read.
+    index: usize,
     forked: bool,
     pending: Option<Pending>,
+    /// What the conversation runs on, as last said.
+    model: Option<String>,
+    thinking: Option<String>,
     out: Vec<Event>,
 }
 
@@ -135,22 +182,31 @@ impl State<'_> {
         }
         let id = text(record, "id").map_or_else(|| format!("@{start}"), str::to_owned);
         let at = self.at;
+        let pi = self.reading.harness == Harness::Pi;
         match kind {
-            Some("model_change") => {
-                if let Some(model) = text(record, "model").filter(|model| !model.is_empty()) {
-                    self.out.push(Event::Model {
-                        at,
-                        model: model.to_owned(),
-                        provider: model
-                            .split_once('/')
-                            .map(|(provider, _)| provider.to_owned()),
-                        thinking: None,
-                    });
-                }
+            Some("model_change") => self.runs_on(at, selector(record), None),
+            Some("thinking_level_change") => {
+                self.runs_on(at, None, text(record, "thinkingLevel"));
             }
             Some("compaction" | "branch_summary") => {
                 if let Some(summary) = text(record, "summary").filter(|s| !s.trim().is_empty()) {
-                    self.words(at, id, Voice::Summary, summary.to_owned(), None, Vec::new());
+                    self.words(
+                        at,
+                        id.clone(),
+                        Voice::Summary,
+                        summary.to_owned(),
+                        None,
+                        Vec::new(),
+                    );
+                }
+                if pi && let Some(usage) = record.get("usage") {
+                    self.out.push(tokens(at, &id, record, usage));
+                }
+            }
+            // pi counts what its own entries spent too.
+            Some("usage") if pi => {
+                if let Some(usage) = record.get("usage") {
+                    self.out.push(tokens(at, &id, record, usage));
                 }
             }
             Some("custom_message") if text(record, "customType") == Some("async-result") => {
@@ -159,16 +215,23 @@ impl State<'_> {
             Some("custom") if text(record, "customType") == Some("session_exit") => {
                 self.settle();
             }
+            // Steery's plugin says so in pi, which classifies no error, once pi gave up
+            // compacting a prompt over the model's limit.
+            Some("custom") if pi && text(record, "customType") == Some(CONTEXT_FULL) => {
+                if let Some(pending) = &mut self.pending {
+                    pending.failure.kind = FailureKind::ContextFull;
+                }
+            }
             Some("message") => {
                 if let Some(message) = record.get("message") {
-                    self.message(start, at, id, message);
+                    self.message(at, id, message);
                 }
             }
             _ => {}
         }
     }
 
-    fn message(&mut self, start: u64, at: u64, id: String, message: &Value) {
+    fn message(&mut self, at: u64, id: String, message: &Value) {
         match text(message, "role") {
             Some("user") => {
                 self.settle();
@@ -187,14 +250,14 @@ impl State<'_> {
                     self.words(at, id, Voice::Person, String::new(), None, clips);
                 }
             }
-            Some("assistant") => self.answer(start, at, id, message),
+            Some("assistant") => self.answer(at, id, message),
             Some("toolResult") => self.result(at, id, message),
             // developer, bashExecution, pythonExecution and the rest: nobody's words.
             _ => {}
         }
     }
 
-    fn answer(&mut self, start: u64, at: u64, id: String, message: &Value) {
+    fn answer(&mut self, at: u64, id: String, message: &Value) {
         let stop = text(message, "stopReason");
         let blocks: &[Value] = message
             .get("content")
@@ -242,7 +305,7 @@ impl State<'_> {
             let carried = flattened(&input);
             self.out.push(Event::CallBegan {
                 at,
-                call: calls::call(call, name, input, &id, &self.reading.servers),
+                call: calls::call(call, name, input, Some(&id), &self.reading.servers),
             });
             if !carried.trim().is_empty() {
                 self.words(
@@ -255,6 +318,7 @@ impl State<'_> {
                 );
             }
         }
+        self.runs_on(at, selector(message), text(message, "thinkingLevel"));
         if let Some(usage) = message.get("usage") {
             self.out.push(tokens(at, &id, message, usage));
         }
@@ -264,7 +328,7 @@ impl State<'_> {
                 self.pending = Some(Pending {
                     at,
                     failure: failure(message, at),
-                    start,
+                    index: self.index,
                     mark,
                     forked,
                 });
@@ -298,6 +362,11 @@ impl State<'_> {
             .and_then(Value::as_u64)
             .unwrap_or(at);
         let said = texts(message.get("content"));
+        if self.reading.harness == Harness::Pi
+            && let Some(usage) = message.get("usage")
+        {
+            self.out.push(tokens(at, &id, message, usage));
+        }
         let lines: Vec<&str> = said.lines().collect();
         let tail = lines[lines.len().saturating_sub(8)..].join("\n");
         self.out.push(Event::CallEnded {
@@ -496,10 +565,11 @@ fn tokens(at: u64, response: &str, message: &Value, usage: &Value) -> Event {
     }
 }
 
-/// A message's model as omp selects it: `provider/model`.
+/// A record's model as the harness selects it: `provider/model`, from a message's
+/// `model` or a `model_change`'s `modelId` (pi) or `model` (omp, already a selector).
 fn selector(message: &Value) -> Option<String> {
-    let model = text(message, "model")
-        .or_else(|| text(message, "modelId"))?
+    let model = text(message, "modelId")
+        .or_else(|| text(message, "model"))?
         .trim();
     if model.is_empty() {
         return None;

@@ -1,46 +1,58 @@
-//! `setup/plan`: what sets omp up for Steery. Four things, each an entry the runtime
-//! writes and records: Steery's MCP server in omp's `mcp.json`; Steery's skill; Steery's
-//! plugin, which is a loader in omp's `extensions` folder and the copy of Steery's
-//! extension it runs, kept in the runtime's config folder and named there. omp runs no
-//! hook commands: the plugin says its moments over the door.
+//! `setup/plan`: what sets the harness up for Steery, each an entry the runtime writes and
+//! records: Steery's skill; Steery's plugin, which is a loader in the harness's
+//! `extensions` folder and the copy of Steery's extension it runs, kept in the runtime's
+//! config folder and named there; and Steery's MCP server. omp reads that from its
+//! `mcp.json`; pi lets an extension register a server for each conversation, so in pi the
+//! plugin carries it, with headers naming the conversation. Neither runs hook commands:
+//! the plugin says the moments over the door.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
-/// Steery's extension, as Steery writes it into omp: the module that dials the runtime's
-/// door and says what the conversation is doing. What is this machine's sits in
+use crate::Harness;
+use crate::harness::helper;
+
+/// Steery's extension, as Steery writes it into the harness: the module that dials the
+/// runtime's door and says what the conversation is doing. What is this machine's sits in
 /// placeholders inside string literals, so the source stays valid as it stands.
 const EXTENSION: &str = include_str!("../plugin/extension.ts");
-/// The file omp loads: it runs the copy of the extension named in one file of the
+/// The file the harness loads: it runs the copy of the extension named in one file of the
 /// runtime's, and moves every session onto a newer copy once one is named there.
 const LOADER: &str = include_str!("../plugin/loader.ts");
 /// The rule every surface draws a request's form by, carried whole into the extension
 /// because a copy loads nothing over the network.
 const FORM_JS: &str = include_str!("../plugin/form.js");
 
-/// How long `omp --version` has to answer before nothing about the build is claimed.
+/// How long `--version` has to answer before nothing about the build is claimed.
 const PROBE: Duration = Duration::from_secs(5);
+
+/// Steery's MCP server, as the entries name it.
+const SERVER: &str = "steery";
 
 /// The plan for this machine. Whether the release found is one Steery speaks to is the
 /// runtime's to say, from `initialize`'s minimum.
-pub async fn plan(home: &Path, config: &Path, setup: Setup) -> Result<Planned, Error> {
-    let root = match crate::root(home) {
-        Ok(root) => root,
-        Err(why) => {
-            return Ok(Planned {
-                found: None,
-                refused: Some(why),
-                entries: Vec::new(),
-                notes: Vec::new(),
-            });
-        }
+pub async fn plan(
+    harness: Harness,
+    home: &Path,
+    config: &Path,
+    setup: Setup,
+) -> Result<Planned, Error> {
+    let refused = |why: String| Planned {
+        found: None,
+        refused: Some(why),
+        entries: Vec::new(),
+        notes: Vec::new(),
     };
-    let Some(binary) = crate::binary() else {
+    let root = match harness.root(home) {
+        Ok(root) => root,
+        Err(why) => return Ok(refused(why)),
+    };
+    let Some(binary) = harness.binary() else {
         return Ok(Planned {
             found: None,
             refused: None,
@@ -52,10 +64,21 @@ pub async fn plan(home: &Path, config: &Path, setup: Setup) -> Result<Planned, E
             ],
         });
     };
+    // omp and pi read the same variable for their folder, and one folder holds one skill
+    // and one plugin: where both are installed there, neither is set up.
+    let other = harness.other();
+    if other.binary().is_some() && other.root(home).as_ref() == Ok(&root) {
+        return Ok(refused(format!(
+            "pi and omp are both installed here and both keep their configuration in {} — the \
+             skill Steery writes is one file, and it cannot belong to both. Unset the variable \
+             that moved them together, or give each one its own directory, and run setup again.",
+            root.display()
+        )));
+    }
     let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
     if release.is_none() {
-        notes.push("`--version` named no release, so nothing about this build is claimed.".into());
+        notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
     }
     let found = Found {
         binary,
@@ -64,25 +87,28 @@ pub async fn plan(home: &Path, config: &Path, setup: Setup) -> Result<Planned, E
             .unwrap_or_default(),
         root: root.clone(),
     };
-    let named = config.join("extension").join("omp");
-    let extension = extension(&setup)?;
+    let named = config.join("extension").join(harness.id());
+    let extension = extension(harness, &setup)?;
     let digest = Sha256::digest(extension.as_bytes());
     let digest: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     let copy = config
         .join("extension")
-        .join(format!("omp-{}.ts", &digest[..16]));
-    let entries = vec![
+        .join(format!("{}-{}.ts", harness.id(), &digest[..16]));
+    let mut entries = Vec::new();
+    if harness == Harness::Omp {
         // omp documents `timeout: 0` as turning its client's MCP timeout off, which a call
         // that waits for a person needs; a process-wide `OMP_MCP_TIMEOUT_MS` still takes
         // precedence, and Steery sets that for nobody. omp has no way to hide a tool from
         // its model, so the card's own tools stay listed.
-        Entry {
+        entries.push(Entry {
             path: root.join("mcp.json"),
             format: Format::Json,
-            at: Some("/mcpServers/steery".into()),
+            at: Some(format!("/mcpServers/{SERVER}")),
             value: json!({ "type": "http", "url": setup.mcp_url, "timeout": 0 }),
             carries: vec![Part::Mcp],
-        },
+        });
+    }
+    entries.extend([
         Entry {
             path: root.join("skills/steery/SKILL.md"),
             format: Format::Text,
@@ -109,9 +135,35 @@ pub async fn plan(home: &Path, config: &Path, setup: Setup) -> Result<Planned, E
             format: Format::Text,
             at: None,
             value: json!(extension),
-            carries: vec![Part::Plugin],
+            carries: match harness {
+                Harness::Omp => vec![Part::Plugin],
+                Harness::Pi => vec![Part::Plugin, Part::Mcp],
+            },
         },
-    ];
+    ]);
+    notes.push(format!(
+        "It gets {} {} decides for itself when to ask and when to ask for the next \
+         instruction; nothing Steery writes stands in front of it.",
+        match harness {
+            Harness::Omp => "the MCP entry, the skill and Steery's extension.",
+            Harness::Pi => "the skill and Steery's extension, which carries its MCP entry.",
+        },
+        harness.id()
+    ));
+    notes.push(
+        "Steery's extension says what each of its conversations is doing, and takes your \
+         words into one that is open. Whatever fails in it leaves the harness as it would be \
+         with no Steery."
+            .into(),
+    );
+    if harness == Harness::Pi {
+        notes.extend(own_servers(&root).into_iter().map(|file| {
+            format!(
+                "{} has its own `{SERVER}` server; remove it to use Steery's extension.",
+                file.display()
+            )
+        }));
+    }
     Ok(Planned {
         found: Some(found),
         refused: None,
@@ -120,36 +172,95 @@ pub async fn plan(home: &Path, config: &Path, setup: Setup) -> Result<Planned, E
     })
 }
 
-/// Steery's extension for omp, its placeholders filled: the harness; the runtime's
-/// release, the only one its door accepts; the runtime's loopback address, where the card
-/// hands a person's answer to `/answer`, which is the MCP URL without its `/mcp`; the
-/// door's address; and the MCP entry the extension registers, none in omp, which reads
-/// Steery's from its own `mcp.json`.
-fn extension(setup: &Setup) -> Result<String, Error> {
+/// Steery's MCP entry as pi's plugin registers it. pi bounds one request at `timeout`
+/// seconds, 60 unless the entry says otherwise, and refuses anything but a positive
+/// number. Its default exposure, `codemode`, declares a server's tools to the model only
+/// inside scripts and keeps the server's instructions out of every prompt; `direct`
+/// declares them as tools, the way every other harness holds them. A tool for the card
+/// alone is `hidden`: the card Steery's plugin draws answers through the runtime's
+/// `/answer`, and pi's model must not reach it.
+fn pi_entry(setup: &Setup) -> Value {
+    let mut entry = json!({
+        "url": setup.mcp_url,
+        "type": "http",
+        "timeout": setup.timeout,
+        "exposure": "direct",
+    });
+    if !setup.card_tools.is_empty() {
+        entry["toolExposure"] = setup
+            .card_tools
+            .iter()
+            .map(|tool| (tool.clone(), json!("hidden")))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
+    entry
+}
+
+/// Steery's extension for the harness, its placeholders filled: the harness; the
+/// runtime's loopback address, where the card hands a person's answer to `/answer`, which
+/// is the MCP URL without its `/mcp`; the door's address; and the MCP entry the extension
+/// registers, none in omp, which reads Steery's from its own `mcp.json`.
+fn extension(harness: Harness, setup: &Setup) -> Result<String, Error> {
     let runtime = setup.mcp_url.strip_suffix("/mcp").ok_or_else(|| {
         Error::invalid(format!(
             "the MCP URL does not end in /mcp: {}",
             setup.mcp_url
         ))
     })?;
-    for (what, value) in [
-        ("release", setup.release.as_str()),
-        ("MCP URL", runtime),
-        ("door", setup.door.as_str()),
-    ] {
+    for (what, value) in [("MCP URL", runtime), ("door", setup.door.as_str())] {
         if value.is_empty() || value.contains(['"', '\\', '\n', '\r']) {
             return Err(Error::invalid(format!(
                 "this {what} cannot be written into a string literal: {value}"
             )));
         }
     }
+    let mcp = match harness {
+        Harness::Omp => "{}".to_owned(),
+        Harness::Pi => pi_entry(setup).to_string(),
+    };
+    // Written into a "…" literal: the JSON's own quotes and escapes are escaped once more.
+    let mcp = mcp.replace('\\', "\\\\").replace('"', "\\\"");
     Ok(EXTENSION
-        .replace("__STEERY_HARNESS__", "omp")
-        .replace("__STEERY_RELEASE__", &setup.release)
+        .replace("__STEERY_HARNESS__", harness.id())
         .replace("__STEERY_RUNTIME__", runtime)
         .replace("__STEERY_DOOR__", &setup.door)
-        .replace("__STEERY_MCP__", "{}")
+        .replace("__STEERY_MCP__", &mcp)
         .replace("/*__STEERY_FORM_JS__*/", FORM_JS))
+}
+
+/// The `mcp.json` files pi reads that hold a `steery` server of a person's own, which
+/// would stand beside the one the plugin registers: pi's own, and each trusted project's
+/// `.pi/mcp.json`. pi reads `-` and `_` in a server's name alike.
+fn own_servers(root: &Path) -> Vec<PathBuf> {
+    let json = |file: &Path| -> Option<Value> {
+        let bytes = std::fs::read(file).ok()?;
+        serde_json::from_slice(bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes)).ok()
+    };
+    let mut files = vec![root.join("mcp.json")];
+    if let Some(Value::Object(decisions)) = json(&root.join("trust.json")) {
+        files.extend(
+            decisions
+                .iter()
+                .filter(|(folder, trusted)| {
+                    trusted.as_bool() == Some(true) && Path::new(folder).is_absolute()
+                })
+                .map(|(folder, _)| Path::new(folder).join(".pi/mcp.json")),
+        );
+    }
+    files
+        .into_iter()
+        .filter(|file| {
+            json(file)
+                .and_then(|config| match config.get("mcpServers") {
+                    Some(Value::Object(servers)) => {
+                        Some(servers.keys().any(|name| name.replace('-', "_") == SERVER))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
 /// A path as it goes into a string literal of the plugin.
@@ -158,17 +269,17 @@ fn literal(path: &Path) -> Result<&str, Error> {
         .filter(|path| !path.contains(['"', '\\', '\n', '\r']))
         .ok_or_else(|| {
             Error::invalid(format!(
-                "this path cannot be named in omp's plugin: {}",
+                "this path cannot be named in the plugin: {}",
                 path.display()
             ))
         })
 }
 
-/// The first line `omp --version` prints, or none where it did not answer in time.
+/// The first line `--version` prints, or none where it did not answer in time.
 async fn version(binary: &Path) -> Option<String> {
     let output = tokio::time::timeout(
         PROBE,
-        crate::helper(binary)
+        helper(binary)
             .arg("--version")
             .stdout(std::process::Stdio::piped())
             .output(),

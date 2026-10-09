@@ -214,10 +214,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "steery-driver-omp"
+name = "steery-driver-pi-family"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
  "serde_json",
  "sha2",
  "steery-sdk",

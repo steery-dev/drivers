@@ -31,9 +31,15 @@ pub fn servers(root: &Path) -> Vec<String> {
     servers
 }
 
-/// One call as omp wrote it: `toolCall {id, name, arguments}` in the assistant message
-/// `response`.
-pub fn call(id: &str, name: &str, input: Value, response: &str, servers: &[String]) -> Call {
+/// One call as the harness wrote it: `toolCall {id, name, arguments}` in the assistant
+/// message `response`, or as a moment names it, which says no response.
+pub fn call(
+    id: &str,
+    name: &str,
+    input: Value,
+    response: Option<&str>,
+    servers: &[String],
+) -> Call {
     let tool = spelled(name, servers);
     // omp's `write` to `xd://<tool>` invokes that tool: the call is the device's.
     let device = renames(&name.to_lowercase(), "write")
@@ -59,7 +65,7 @@ pub fn call(id: &str, name: &str, input: Value, response: &str, servers: &[Strin
         steery,
         asks,
         parent: None,
-        response: Some(response.to_owned()),
+        response: response.map(str::to_owned),
     }
 }
 
