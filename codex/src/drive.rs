@@ -909,6 +909,18 @@ fn refused(said: &str) -> &'static str {
 pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let codex = binary()?;
     let known = features(&codex).await?;
+    let servers = servers(&codex, &reader.cwd).await?;
+    planned(&codex, &known, &servers, reader)
+}
+
+/// [`reader`]'s plan for the Codex at `codex`, which knows the features `known` and
+/// reaches the MCP servers `servers` from the reader's folder.
+fn planned(
+    codex: &Path,
+    known: &[String],
+    servers: &[String],
+    reader: Reader,
+) -> Result<ReaderPlan, Error> {
     let mut argv = vec![
         codex.to_string_lossy().into_owned(),
         "exec".into(),
@@ -921,7 +933,7 @@ pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
         "--sandbox".into(),
         "read-only".into(),
     ];
-    for server in servers(&codex, &reader.cwd).await? {
+    for server in servers {
         argv.push("-c".into());
         argv.push(format!("mcp_servers.{server}.enabled=false"));
     }
@@ -1177,6 +1189,88 @@ mod tests {
             Some(refusal::NOT_FOUND)
         );
         assert_eq!(line(Stream::Stdout, "not json", None), TurnLine::default());
+    }
+
+    fn asked(tools: ReaderTools, model: Option<&str>) -> Reader {
+        Reader {
+            system: Some("you read".into()),
+            model: model.map(str::to_owned),
+            tools,
+            cwd: PathBuf::from("/tmp/steery-read"),
+            asked: "q".into(),
+        }
+    }
+
+    fn known() -> Vec<String> {
+        TAKEN
+            .iter()
+            .chain(LOOK_TAKEN)
+            .map(|f| (*f).to_owned())
+            .collect()
+    }
+
+    /// Codex keeps its own `config.toml` — that is where the provider a person signed in
+    /// to lives — loses every tool and MCP server, reads only, keeps no session, and is
+    /// asked on standard input; no model named asks for its own.
+    #[test]
+    fn codex_keeps_its_sign_in_and_loses_its_tools() {
+        let servers = vec!["steery".to_owned()];
+        let plan = planned(
+            Path::new("/bin/codex"),
+            &known(),
+            &servers,
+            asked(ReaderTools::None, None),
+        )
+        .unwrap();
+        let argv = &plan.argv;
+        assert_eq!(argv[1], "exec");
+        for expected in ["--json", "--ignore-rules", "--ephemeral", "--sandbox"] {
+            assert!(argv.iter().any(|arg| arg == expected), "missing {expected}");
+        }
+        assert!(
+            !argv.iter().any(|arg| arg == "--ignore-user-config"),
+            "keeps config.toml"
+        );
+        let sandbox = argv.iter().position(|arg| arg == "--sandbox").unwrap();
+        assert_eq!(argv[sandbox + 1], "read-only");
+        assert!(
+            argv.iter()
+                .any(|arg| arg == "mcp_servers.steery.enabled=false")
+        );
+        assert!(!argv.iter().any(|arg| arg == "--model"), "its own model");
+        assert_eq!((plan.stdin, plan.read), (Stdin::Words, ReadAs::Events));
+        assert!(plan.files.is_empty());
+        let named = planned(
+            Path::new("/bin/codex"),
+            &known(),
+            &[],
+            asked(ReaderTools::None, Some("m")),
+        )
+        .unwrap();
+        let model = named.argv.iter().position(|arg| arg == "--model").unwrap();
+        assert_eq!(named.argv[model + 1], "m");
+    }
+
+    /// Every feature taken away is passed with its own `--disable`, in pairs; a look keeps
+    /// the shell, how Codex reads a file; a feature this Codex does not know is not named.
+    #[test]
+    fn every_taken_tool_is_named_with_its_own_switch() {
+        let disabled = |tools, known: &[String]| {
+            let plan = planned(Path::new("/bin/codex"), known, &[], asked(tools, None)).unwrap();
+            plan.argv
+                .windows(2)
+                .filter(|pair| pair[0] == "--disable")
+                .map(|pair| pair[1].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(disabled(ReaderTools::None, &known()), TAKEN);
+        let look = disabled(ReaderTools::Read, &known());
+        assert_eq!(look, LOOK_TAKEN);
+        assert!(!look.iter().any(|f| f == "shell_tool"));
+        assert_eq!(
+            disabled(ReaderTools::None, &["hooks".to_owned()]),
+            ["hooks"]
+        );
     }
 
     /// The reader's answer is the last agent message, whatever else `codex exec` prints.
