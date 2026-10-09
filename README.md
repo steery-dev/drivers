@@ -20,6 +20,13 @@ Steery's repository names, and update with it.
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`, so it builds alone.
+What the drivers share is the [`common`](common/) crate, `steery-driver-common`, each
+driver naming it by path (`../common`): finding the harness's executable and asking its
+release under a bounded, killed probe (`program`); a transcript's lines read within
+bounds (`lines`); a file only appended to, read on from where the last read left it
+(`follow`); and a transcript that is a tree of records, kept between reads and read along
+its path in batches, records off the path within the same bound (`tree`). Each driver
+keeps only how its harness's records name their parent and what they say.
 
 ## Finding and installing the harness
 
@@ -32,7 +39,7 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 | Driver | Installer folder | `install` (offered where its shell and `curl` are on `PATH`) |
 |---|---|---|
 | `omp` | `PI_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://omp.sh/install \| sh -s -- --binary"` |
-| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"` (needs Node.js and npm) |
+| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"` (offered only where npm is here and `node --version` names 22.19 or newer within 5 s) |
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 
@@ -79,8 +86,10 @@ to pass. Each crate's own `cargo test` covers what it reads and writes.
 A driver for a harness Steery does not ship is a program like these. `pi-family/` is the
 worked example; copy it and keep its shape (the layout is below, under omp and pi).
 
-- **Its crate** depends on `steery-sdk` by path as above, with `tokio` for its runtime and
-  `serde_json` for the parameters, and declares an empty `[workspace]` so it builds alone.
+- **Its crate** depends on `steery-sdk` by path as above, and on `steery-driver-common` by
+  path where it keeps a tree or follows a file (in this repository `../common`; copied
+  elsewhere, beside it), with `tokio` for its runtime and `serde_json` for the parameters,
+  and declares an empty `[workspace]` so it builds alone.
   Its binary is named `steery-driver-<id>`; `src/bin/omp.rs` is one line,
   `steery_driver_pi_family::serve(Harness::Omp)`, which calls
   `steery_sdk::serve(|_notifier| Driver::new(harness))`. The SDK reads requests, answers
@@ -204,8 +213,8 @@ To connect another harness, copy `pi-family/` and keep its shape:
 | `src/bin/<id>.rs` | The binary: `serve(Harness::…)`. |
 | `src/lib.rs` | `initialize`, and one match from each method to the module that answers it. Methods the harness cannot do answer `Error::Unknown`. |
 | `src/harness.rs` | Everything about the harness as Steery reads it: id, `HarnessInfo` (levels, minimum, identity, facts, hooks), its folders, its executable. Every other module asks here and never names a harness itself. |
-| `src/transcripts.rs` | Where the harness files conversations; `sessions/list`, `locate`, `read`, and the cursor. |
-| `src/tree.rs` | The transcript's format: here, a tree read along its active path. |
+| `src/transcripts.rs` | Where the harness files conversations; `sessions/list`, `locate`, `read`, and the cursor's `mark`: the rest of the cursor and the batched read are `steery_driver_common::tree`'s. |
+| `src/tree.rs` | The transcript's format: here, how pi's entries name their parent, as a `steery_driver_common::tree::Shape`. |
 | `src/events.rs` | One record → the protocol's events. |
 | `src/calls.rs` | A tool call → `Call`: its group, MCP server, Steery's own tool, the questions it asks. |
 | `src/hooks.rs` | `hook/read`: a hook's document → `Moment`. |

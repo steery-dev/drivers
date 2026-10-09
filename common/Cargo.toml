@@ -1,0 +1,16 @@
+[package]
+name = "steery-driver-common"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "What Steery's official drivers share: finding and asking a harness's executable, reading a transcript's records within bounds, following a file only appended to, and a transcript that is a tree of records."
+
+[dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["process", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# Its own workspace, so it builds alone.
+[workspace]

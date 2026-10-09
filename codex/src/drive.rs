@@ -632,7 +632,7 @@ impl Drive {
         let codex = binary()?;
         let root = self.store.root();
         let listed = tokio::time::timeout(std::time::Duration::from_secs(25), async {
-            let mut command = crate::home::helper(&codex);
+            let mut command = steery_driver_common::program::helper(&codex);
             command.env("CODEX_HOME", root);
             let mut server = AppServer::open(command, false)
                 .await
@@ -976,7 +976,7 @@ fn planned(
 async fn servers(codex: &Path, cwd: &Path) -> Result<Vec<String>, Error> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        crate::home::helper(codex)
+        steery_driver_common::program::helper(codex)
             .args(["mcp", "list", "--json"])
             .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
@@ -1024,7 +1024,7 @@ async fn servers(codex: &Path, cwd: &Path) -> Result<Vec<String>, Error> {
 async fn features(codex: &Path) -> Result<Vec<String>, Error> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        crate::home::helper(codex)
+        steery_driver_common::program::helper(codex)
             .args(["features", "list"])
             .stdout(std::process::Stdio::piped())
             .output(),

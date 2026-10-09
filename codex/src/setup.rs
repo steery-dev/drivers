@@ -18,14 +18,13 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use steery_driver_common::program::{release_within, version};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
 use crate::appserver::AppServer;
 use crate::hooks;
 
-/// How long `codex --version` has to answer before nothing about the build is claimed.
-const PROBE: Duration = Duration::from_secs(5);
 /// How long Codex's app server has to list its hooks.
 const LIST_WITHIN: Duration = Duration::from_secs(15);
 
@@ -57,7 +56,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
         });
     };
     let mut notes = Vec::new();
-    let release = version(&binary).await;
+    let release = release(&binary).await;
     if release.is_none() {
         notes.push("`--version` named no release, so nothing about this build is claimed.".into());
     }
@@ -152,31 +151,9 @@ fn quoted(key: &str) -> String {
 
 /// The release `codex --version` names (`codex-cli 0.162.0`), or none where it did not
 /// answer in time.
-async fn version(binary: &Path) -> Option<String> {
-    let output = tokio::time::timeout(
-        PROBE,
-        crate::home::helper(binary)
-            .arg("--version")
-            .stdout(std::process::Stdio::piped())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    release_within(&String::from_utf8_lossy(&output.stdout))
-}
-
-/// The first `major.minor.patch` a text names.
-pub fn release_within(text: &str) -> Option<String> {
-    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .find(|word| {
-            let parts: Vec<&str> = word.trim_matches('.').split('.').collect();
-            parts.len() == 3 && parts.iter().all(|part| part.parse::<u64>().is_ok())
-        })
-        .map(|word| word.trim_matches('.').to_owned())
+async fn release(binary: &Path) -> Option<String> {
+    let (major, minor, patch) = release_within(&version(binary).await?)?;
+    Some(format!("{major}.{minor}.{patch}"))
 }
 
 /// One hook as `hooks/list` names it.
@@ -205,7 +182,7 @@ async fn trust(binary: &Path, root: &Path, hook: &str) -> Result<Vec<(String, St
     }
     let cwd = root.parent().unwrap_or(root).to_owned();
     let listed = tokio::time::timeout(LIST_WITHIN, async {
-        let mut command = crate::home::helper(binary);
+        let mut command = steery_driver_common::program::helper(binary);
         command.env("CODEX_HOME", root);
         let mut server = AppServer::open(command, false)
             .await
@@ -381,10 +358,7 @@ mod tests {
 
     #[test]
     fn a_release_is_read_off_codex_s_version_line() {
-        assert_eq!(
-            release_within("codex-cli 0.162.0\n").as_deref(),
-            Some("0.162.0")
-        );
+        assert_eq!(release_within("codex-cli 0.162.0\n"), Some((0, 162, 0)));
         assert_eq!(release_within("codex-cli dev"), None);
         assert!(steery(&format!("{HOOK} SessionStart || true"), HOOK));
         assert!(!steery(&format!("{HOOK} Other || true"), HOOK));

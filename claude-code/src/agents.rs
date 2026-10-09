@@ -37,7 +37,7 @@ pub const RUNNING: [&str; 2] = [
 /// `claude <args>`, which writes no conversation, within `within`: its output, at most
 /// [`MOST`] of each stream.
 pub async fn said(binary: &Path, args: &[&str], within: Duration) -> Result<Output, String> {
-    let mut command = crate::helper(binary);
+    let mut command = steery_driver_common::program::helper(binary);
     command
         .args(args)
         .stdout(std::process::Stdio::piped())

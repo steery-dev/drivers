@@ -510,11 +510,20 @@ dependencies = [
  "quick-xml",
  "serde",
  "serde_json",
+ "steery-driver-common",
  "steery-sdk",
  "tokio",
  "tokio-tungstenite",
  "toml",
  "uuid",
+]
+
+[[package]]
+name = "steery-driver-common"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

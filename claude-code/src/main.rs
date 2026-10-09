@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::Value;
+use steery_driver_common::program::{executable, on_path};
 use steery_sdk::wire::{self, harness};
 use steery_sdk::{Error, PROTOCOL, Program, method, refusal, result};
 
@@ -275,31 +276,6 @@ pub(crate) fn install() -> Option<steery_sdk::wire::harness::Install> {
         argv: vec!["bash".into(), "-c".into(), line.into()],
         about: format!("Claude Code's own installer, its native build into ~/.local/bin: {line}"),
     })
-}
-
-/// The first executable named `name` on `PATH`.
-fn on_path(name: &str) -> Option<PathBuf> {
-    std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| executable(dir.join(name)))
-}
-
-/// `path`, where it is an executable file.
-fn executable(path: PathBuf) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(&path)
-        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        .then_some(path)
-}
-
-/// Claude Code, started by this driver for something that writes no conversation: a
-/// release, a listing of its sessions, a stop. `STEERY_STARTED` says so.
-pub(crate) fn helper(binary: &Path) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(binary);
-    command
-        .env("STEERY_STARTED", format!("{}:nothing", std::process::id()))
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    command
 }
 
 #[cfg(test)]

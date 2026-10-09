@@ -7,15 +7,14 @@
 //! the plugin says the moments over the door.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use steery_driver_common::program::{release_within, version};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
 use crate::Harness;
-use crate::harness::helper;
 
 /// Steery's extension, as Steery writes it into the harness: the module that dials the
 /// runtime's door and says what the conversation is doing. What is this machine's sits in
@@ -27,9 +26,6 @@ const LOADER: &str = include_str!("../plugin/loader.ts");
 /// The rule every surface draws a request's form by, carried whole into the extension
 /// because a copy loads nothing over the network.
 const FORM_JS: &str = include_str!("../plugin/form.js");
-
-/// How long `--version` has to answer before nothing about the build is claimed.
-const PROBE: Duration = Duration::from_secs(5);
 
 /// Steery's MCP server, as the entries name it.
 const SERVER: &str = "steery";
@@ -63,7 +59,7 @@ pub async fn plan(
                  evidence of one."
                     .into(),
             ],
-            install: harness.install(),
+            install: harness.install().await,
         });
     };
     // omp and pi read the same variable for their folder, and one folder holds one skill
@@ -278,43 +274,6 @@ fn literal(path: &Path) -> Result<&str, Error> {
         })
 }
 
-/// The first line `--version` prints, or none where it did not answer in time.
-async fn version(binary: &Path) -> Option<String> {
-    let output = tokio::time::timeout(
-        PROBE,
-        helper(binary)
-            .arg("--version")
-            .stdout(std::process::Stdio::piped())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned)
-}
-
-/// The first `major.minor.patch` a line names: `omp/18.4.12` is 18.4.12, a build's `+…`
-/// aside.
-fn release_within(text: &str) -> Option<(u64, u64, u64)> {
-    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .find_map(|word| {
-            let mut parts = word.trim_matches('.').split('.');
-            let release = (
-                parts.next()?.parse().ok()?,
-                parts.next()?.parse().ok()?,
-                parts.next()?.parse().ok()?,
-            );
-            parts.next().is_none().then_some(release)
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,6 +434,90 @@ mod tests {
             .unwrap();
         assert_eq!(found.found.map(|found| found.binary), Some(omp));
         assert_eq!(found.install, None);
+        unsafe {
+            for (name, was) in [("PATH", path), ("HOME", home_was)] {
+                match was {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// pi's installer is offered only where `node` names a release new enough; one whose
+    /// `--version` hangs (a broken shim, a version manager waiting on input) is given up
+    /// on after the probe's time and killed, and never holds the driver meanwhile.
+    #[test]
+    fn pi_is_offered_only_where_node_answers_new_enough() {
+        let _held = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let home = std::env::temp_dir().join(format!("pi-family-node-{}", std::process::id()));
+        let tools = home.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for tool in ["sh", "curl"] {
+            let real = ["/usr/bin", "/bin"]
+                .iter()
+                .map(|dir| Path::new(dir).join(tool))
+                .find(|candidate| candidate.exists())
+                .expect("sh and curl on this machine");
+            std::os::unix::fs::symlink(real, tools.join(tool)).unwrap();
+        }
+        // Written whole before it is in place, so none is run half written.
+        let script = |name: &str, body: &str| {
+            let written = tools.join(format!("{name}.tmp"));
+            std::fs::write(&written, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&written, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::rename(&written, tools.join(name)).unwrap();
+        };
+        script("npm", "exit 0");
+        let (path, home_was) = (std::env::var_os("PATH"), std::env::var_os("HOME"));
+        // SAFETY: the environment is changed only under `ENVIRONMENT`.
+        unsafe {
+            std::env::set_var("PATH", &tools);
+            std::env::set_var("HOME", &home);
+        }
+        let offered = || {
+            runtime
+                .block_on(plan(Harness::Pi, &home, &home.join("config"), given()))
+                .unwrap()
+                .install
+                .is_some()
+        };
+        script("node", "echo v22.19.0");
+        assert!(offered(), "new enough");
+        script("node", "echo v20.11.1");
+        assert!(!offered(), "too old");
+        let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+            .into_iter()
+            .find(|sleep| Path::new(sleep).exists())
+            .expect("sleep on this machine");
+        script("node", &format!("exec {sleep} 60"));
+        let began = std::time::Instant::now();
+        let (planned, ticked) = runtime.block_on(async {
+            let ticked = async {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                std::time::Instant::now()
+            };
+            let planned = async {
+                let planned = plan(Harness::Pi, &home, &home.join("config"), given()).await;
+                (planned, std::time::Instant::now())
+            };
+            let ((planned, at), ticked) = tokio::join!(planned, ticked);
+            (planned.map(|planned| (planned, at)), ticked)
+        });
+        let (planned, at) = planned.unwrap();
+        assert_eq!(planned.install, None, "a node that hangs names no release");
+        assert!(ticked < at, "the driver went on meanwhile");
+        let took = began.elapsed();
+        assert!(
+            took < steery_driver_common::program::PROBE + std::time::Duration::from_secs(3),
+            "{took:?}"
+        );
         unsafe {
             for (name, was) in [("PATH", path), ("HOME", home_was)] {
                 match was {

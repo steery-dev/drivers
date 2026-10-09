@@ -367,7 +367,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "steery-driver-common",
  "steery-sdk",
+ "tokio",
+]
+
+[[package]]
+name = "steery-driver-common"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
  "tokio",
 ]
 

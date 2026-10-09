@@ -74,7 +74,7 @@ fn read<T>(result: Result<T, Failed>) -> Result<T, String> {
 
 /// An app server of the driver's own in `home`, its home checked.
 pub async fn reader(binary: &Path, home: &Path) -> Result<AppServer, String> {
-    let mut command = crate::home::helper(binary);
+    let mut command = steery_driver_common::program::helper(binary);
     command.env("CODEX_HOME", home);
     let server = read(AppServer::open(command, false).await)?;
     same_home(&server, home)?;
@@ -84,7 +84,7 @@ pub async fn reader(binary: &Path, home: &Path) -> Result<AppServer, String> {
 /// The app server already running for `home`, where one owns `thread`: loaded there, its
 /// queue readable.
 pub async fn queue(binary: &Path, home: &Path, thread: &str) -> Result<AppServer, String> {
-    let mut command = crate::home::helper(binary);
+    let mut command = steery_driver_common::program::helper(binary);
     command.env("CODEX_HOME", home);
     let mut server = read(AppServer::running(command).await)?;
     same_home(&server, home)?;
@@ -444,7 +444,7 @@ for line in sys.stdin:
     async fn an_app_server_of_another_home_is_refused() {
         let dir = std::env::temp_dir().join(format!("steery-codex-home-{}", uuid::Uuid::now_v7()));
         let binary = app_server(&dir, &json!({}));
-        let mut command = crate::home::helper(&binary);
+        let mut command = steery_driver_common::program::helper(&binary);
         command.env("CODEX_HOME", dir.join("elsewhere"));
         std::fs::create_dir_all(dir.join("elsewhere")).unwrap();
         let server = AppServer::open(command, false).await.unwrap();

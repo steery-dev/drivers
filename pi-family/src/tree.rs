@@ -4,23 +4,13 @@
 //! file, read by nobody. Only a first-version header, which could leave its version out,
 //! makes the entries a line, each the parent of the next.
 //!
-//! What is kept of a transcript between reads is its tree — where each entry's record
-//! lies and which entry is its parent, never a word of a record — read on from where the
-//! last read left the file. A transcript that cannot be read as a tree, or whose leaf's
-//! ancestry does not reach a beginning, is an error and never a shorter conversation.
-
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{self, BufRead as _, Read as _, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+//! The tree, kept between reads and walked in batches, is the drivers' own
+//! ([`steery_driver_common::tree`]); this is how pi's entries make it. pi and omp append a
+//! child to a leaf already written, so a parent named later in the file is a transcript
+//! this does not read.
 
 use serde::{Deserialize, Deserializer};
-
-/// Why a walk stopped short of a beginning. Said, rather than handing back what had been
-/// walked, which would read exactly like a whole short conversation.
-const CARRIED_ON: &str = "that conversation carries on from one this machine does not hold, so only part of it can be read";
+use steery_driver_common::tree::{Parent, Shape, Tree};
 
 /// The fields of a record the tree is made of, and nothing of what was said in it.
 #[derive(Deserialize)]
@@ -41,37 +31,24 @@ fn present<'de, D: Deserializer<'de>>(given: D) -> Result<Option<Option<String>>
     Option::<String>::deserialize(given).map(Some)
 }
 
-/// One entry: where its record lies, and its parent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Node {
-    pub start: u64,
-    pub end: u64,
-    parent: u32,
-}
-
-/// The parent of an entry that has none: where a conversation begins.
-const ROOT: u32 = u32::MAX;
-/// The parent of an entry whose parent is no entry before it in the file.
-const UNHELD: u32 = u32::MAX - 1;
-
-/// The tree of one transcript. A parent is looked up among the entries before it when an
-/// entry is added, so every parent comes before its child and no walk can go round in a
-/// circle. pi and omp append a child to a leaf already written, so a parent named later in
-/// the file is a transcript this does not read.
+/// How a pi or omp transcript's entries make its tree.
 #[derive(Default)]
-pub struct Tree {
+pub struct Entries {
     /// The header's `version` once the header is read; 1 where it names none.
     version: Option<u64>,
-    ids: HashMap<Box<str>, u32>,
-    nodes: Vec<Node>,
 }
 
-impl Tree {
-    /// One more record, at `start..end` (its newline not included). omp's `title` slot,
-    /// rewritten in place above the header, is no entry. Every version past the first
-    /// names each entry's parent, and an entry naming none, or one id given twice, is a
-    /// transcript that cannot be read as a tree.
-    fn push(&mut self, head: &Head, start: u64, end: u64) -> Result<(), String> {
+impl Shape for Entries {
+    /// omp's `title` slot, rewritten in place above the header, is no entry. Every version
+    /// past the first names each entry's parent, and an entry naming none, or one id given
+    /// twice, is a transcript that cannot be read as a tree. A line that is not JSON says
+    /// nothing, as pi reads it; one that is JSON and no entry cannot be read as a tree.
+    fn read(&mut self, tree: &mut Tree, line: &[u8], start: u64, end: u64) -> Result<(), String> {
+        let head = match serde_json::from_slice::<Head>(line) {
+            Ok(head) => head,
+            Err(error) if !error.is_data() => return Ok(()),
+            Err(_) => return Err("that transcript has a record that is no entry".into()),
+        };
         match head.kind.as_str() {
             "title" => return Ok(()),
             "session" => {
@@ -88,253 +65,36 @@ impl Tree {
         let version = self
             .version
             .ok_or("that transcript has no session header")?;
-        let at = u32::try_from(self.nodes.len())
-            .ok()
-            .filter(|at| *at < UNHELD)
-            .ok_or("that transcript holds more entries than can be read")?;
-        let parent = if version == 1 {
-            at.checked_sub(1).unwrap_or(ROOT)
-        } else {
-            let id = head
-                .id
-                .as_deref()
-                .filter(|id| !id.is_empty())
-                .ok_or("that transcript has an entry with no id")?;
-            let parent = match &head.parent {
-                Some(None) => ROOT,
-                Some(Some(parent)) if !parent.is_empty() => {
-                    self.ids.get(parent.as_str()).copied().unwrap_or(UNHELD)
-                }
-                _ => return Err("that transcript has an entry that names no parent".into()),
-            };
-            if self.ids.insert(id.into(), at).is_some() {
-                return Err("that transcript gives two entries one id".into());
-            }
-            parent
+        let full = || "that transcript holds more entries than can be read".to_owned();
+        if version == 1 {
+            tree.add(start, end, tree.last()).ok_or_else(full)?;
+            return Ok(());
+        }
+        let id = head
+            .id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .ok_or("that transcript has an entry with no id")?;
+        let parent = match &head.parent {
+            Some(None) => Parent::Root,
+            Some(Some(parent)) if !parent.is_empty() => tree.find(parent),
+            _ => return Err("that transcript has an entry that names no parent".into()),
         };
-        self.nodes.push(Node { start, end, parent });
-        Ok(())
-    }
-
-    /// The entries from a root to the leaf, the last entry, which is where the
-    /// conversation was when it was last written to; an error where the leaf's ancestry
-    /// stops at a parent the file does not hold.
-    pub fn path(&self) -> Result<Vec<u32>, String> {
-        let mut path = Vec::new();
-        let mut at = self.nodes.len().checked_sub(1).map(|at| at as u32);
-        while let Some(step) = at {
-            path.push(step);
-            at = match self.nodes[step as usize].parent {
-                ROOT => None,
-                UNHELD => return Err(CARRIED_ON.into()),
-                parent => Some(parent),
-            };
-        }
-        path.reverse();
-        Ok(path)
-    }
-
-    pub fn node(&self, at: u32) -> Node {
-        self.nodes[at as usize]
-    }
-
-    /// How many entries it holds.
-    pub fn entries(&self) -> usize {
-        self.nodes.len()
-    }
-}
-
-/// One transcript's tree, as far as the file has been read.
-#[derive(Default)]
-struct Index {
-    /// Its device and inode: a transcript replaced under the same name is another file.
-    file: (u64, u64),
-    /// How long the file was when it was last read.
-    len: u64,
-    /// Just past the newline of the last record indexed.
-    through: u64,
-    /// The last bytes indexed, up to [`SEAL`] of them. pi and omp only append; bytes there
-    /// that changed are a file written whole again — pi migrating it to a newer version —
-    /// and read again from its start.
-    seal: Vec<u8>,
-    tree: Tree,
-    /// Why the file cannot be read as a tree, once it cannot: kept until it is replaced.
-    broken: Option<String>,
-    /// When this tree was last walked, by the clock of [`Trees`].
-    used: u64,
-}
-
-/// How much of what was indexed last is read again to know the file was only appended to.
-const SEAL: u64 = 64;
-
-impl Index {
-    /// Read what was appended since the last read, up to its last newline. A file
-    /// replaced, shortened or written whole again is read again from its start.
-    fn update(&mut self, open: &mut File, file: (u64, u64), len: u64) -> io::Result<()> {
-        let rewritten = self.file != file
-            || len < self.len
-            || bytes(open, self.through - self.seal.len() as u64, self.through)? != self.seal;
-        if rewritten {
-            *self = Index {
-                file,
-                used: self.used,
-                ..Index::default()
-            };
-        }
-        if self.broken.is_none() && len != self.len {
-            self.len = len;
-            self.read_on(open, len)?;
-            self.seal = bytes(open, self.through.saturating_sub(SEAL), self.through)?;
+        let at = tree.add(start, end, parent).ok_or_else(full)?;
+        if !tree.name(id, at) {
+            return Err("that transcript gives two entries one id".into());
         }
         Ok(())
     }
-
-    fn read_on(&mut self, open: &mut File, len: u64) -> io::Result<()> {
-        open.seek(SeekFrom::Start(self.through))?;
-        let mut lines = io::BufReader::new((&*open).take(len - self.through));
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            if lines.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
-                return Ok(());
-            }
-            let start = self.through;
-            self.through += line.len() as u64;
-            let head = match serde_json::from_slice::<Head>(&line[..line.len() - 1]) {
-                Ok(head) => head,
-                // A line that is not JSON says nothing, as pi reads it; one that is JSON
-                // and no entry is a transcript that cannot be read as a tree.
-                Err(error) if !error.is_data() => continue,
-                Err(_) => {
-                    self.broke("that transcript has a record that is no entry".to_owned());
-                    return Ok(());
-                }
-            };
-            if let Err(why) = self.tree.push(&head, start, self.through - 1) {
-                self.broke(why);
-                return Ok(());
-            }
-        }
-    }
-
-    fn broke(&mut self, why: String) {
-        self.broken = Some(why);
-        self.tree = Tree::default();
-    }
-
-    fn weight(&self) -> usize {
-        self.tree.nodes.len() + 1
-    }
-}
-
-/// How many entries the trees kept may hold between them; past it, the tree walked
-/// longest ago is dropped first. An entry is under a hundred bytes: about 45 MiB at the
-/// bound. Counted in entries rather than transcripts because a listing walks every
-/// transcript written to in its window, however many that is.
-const ENTRIES: usize = 1 << 19;
-
-/// Every tree kept, by transcript, with a clock that says which was walked last.
-#[derive(Default)]
-pub struct Trees {
-    kept: Mutex<(u64, Kept)>,
-}
-
-type Kept = HashMap<PathBuf, Arc<Mutex<Index>>>;
-
-/// A transcript's tree as it stands now, and the file open to read its records from.
-pub struct Walk<'a> {
-    pub tree: &'a Tree,
-    pub open: &'a mut File,
-    /// The file's device and inode.
-    pub file: (u64, u64),
-}
-
-impl Trees {
-    /// Read `file`'s tree on to its end, and hand it to `read`; an error where the file
-    /// cannot be read as a tree.
-    pub fn walk<T>(
-        &self,
-        file: &Path,
-        read: impl FnOnce(Walk<'_>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let failed = |e: io::Error| format!("{}: {e}", file.display());
-        let mut open = File::open(file).map_err(failed)?;
-        let meta = open.metadata().map_err(failed)?;
-        let index = {
-            let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-            let (clock, trees) = &mut *kept;
-            *clock += 1;
-            let index = trees.entry(file.to_owned()).or_default().clone();
-            index.lock().unwrap_or_else(PoisonError::into_inner).used = *clock;
-            index
-        };
-        let mut index = index.lock().unwrap_or_else(PoisonError::into_inner);
-        let identity = (meta.dev(), meta.ino());
-        index
-            .update(&mut open, identity, meta.len())
-            .map_err(failed)?;
-        let weight = index.weight();
-        if let Some(broken) = &index.broken {
-            return Err(broken.clone());
-        }
-        let result = read(Walk {
-            tree: &index.tree,
-            open: &mut open,
-            file: identity,
-        });
-        drop(index);
-        self.shed(file, weight);
-        result
-    }
-
-    /// Drop the trees walked longest ago until those left hold at most [`ENTRIES`]
-    /// entries; the one just walked stays whatever it holds.
-    fn shed(&self, walked: &Path, weight: usize) {
-        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
-        let trees = &mut kept.1;
-        let weigh = |index: &Arc<Mutex<Index>>| {
-            index
-                .try_lock()
-                .map_or((0, u64::MAX), |index| (index.weight(), index.used))
-        };
-        let mut held: usize = trees
-            .iter()
-            .map(|(path, index)| {
-                if path == walked {
-                    weight
-                } else {
-                    weigh(index).0
-                }
-            })
-            .sum();
-        while held > ENTRIES && trees.len() > 1 {
-            let Some((oldest, weight)) = trees
-                .iter()
-                .filter(|(path, _)| path.as_path() != walked)
-                .map(|(path, index)| (path, weigh(index)))
-                .min_by_key(|(_, (_, used))| *used)
-                .map(|(path, (weight, _))| (path.clone(), weight))
-            else {
-                return;
-            };
-            trees.remove(&oldest);
-            held -= weight;
-        }
-    }
-}
-
-/// The bytes of the file from `start` to `end`.
-pub fn bytes(open: &mut File, start: u64, end: u64) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; usize::try_from(end - start).map_err(io::Error::other)?];
-    open.seek(SeekFrom::Start(start))?;
-    open.read_exact(&mut bytes)?;
-    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use steery_driver_common::tree::Trees;
+
     use super::*;
-    use serde_json::Value;
 
     fn file(text: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -370,15 +130,12 @@ mod tests {
     }
 
     /// The active path, leaf first, as each entry's `n`.
-    fn walked(trees: &Trees, path: &Path) -> Result<Vec<i64>, String> {
-        trees.walk(path, |walk| {
+    fn walked(trees: &Trees<Entries>, path: &Path) -> Result<Vec<i64>, String> {
+        trees.walk(path, Entries::default(), |walk| {
             let mut seen = Vec::new();
             for at in walk.tree.path()?.into_iter().rev() {
-                let node = walk.tree.node(at);
-                let record: Value =
-                    serde_json::from_slice(&bytes(walk.open, node.start, node.end).unwrap())
-                        .unwrap();
-                seen.push(record["n"].as_i64().unwrap_or(-1));
+                let record = walk.record(walk.tree.node(at))?.value;
+                seen.push(record.and_then(|record| record["n"].as_i64()).unwrap_or(-1));
             }
             Ok(seen)
         })

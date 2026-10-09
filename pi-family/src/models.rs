@@ -11,11 +11,12 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use steery_driver_common::program::helper;
 use steery_sdk::wire::harness::{Model, Models};
 use steery_sdk::{Error, refusal};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
-use crate::harness::{Harness, helper};
+use crate::harness::Harness;
 
 /// How long the harness has to answer `models`: omp took over 20 s on a Mac that had just
 /// started and was swapping.

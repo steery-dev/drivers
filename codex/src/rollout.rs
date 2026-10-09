@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read as _, Seek, SeekFrom};
+use std::io::{BufReader, Read as _, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -20,6 +20,7 @@ use std::time::UNIX_EPOCH;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steery_driver_common::lines::{BATCH, Line, RECORD, capped, consumed, first_whole};
 use steery_sdk::wire::harness::{
     Event, Events, List, Listed, Locate, Located, Read, Session, SubAgent,
 };
@@ -28,10 +29,6 @@ use steery_sdk::{Error, refusal};
 use crate::events::{self, Place, State, stamped, text};
 use crate::words;
 
-/// The longest record read; a longer one is stepped over.
-const RECORD: usize = 8 << 20;
-/// How many bytes of records one `sessions/read` answers at most; `more` says the rest.
-const BATCH: u64 = 4 << 20;
 /// How many opening records are read for the first thing a person asked.
 const OPENING: usize = 64;
 /// How many threads up a history is followed.
@@ -766,17 +763,11 @@ fn records(
     align: bool,
 ) -> std::io::Result<(Records, bool)> {
     let mut file = open;
-    let mut at = start;
-    if align && start > 0 {
-        file.seek(SeekFrom::Start(start - 1))?;
-        let mut reader = BufReader::new(file.take(length - (start - 1)));
-        let mut skipped = Vec::new();
-        let consumed = match capped(&mut reader, &mut skipped, 0)? {
-            Line::Partial => length - (start - 1),
-            _ => consumed(&reader, length - (start - 1)),
-        };
-        at = start - 1 + consumed;
-    }
+    let mut at = if align {
+        first_whole(open, start, length)?
+    } else {
+        start
+    };
     file.seek(SeekFrom::Start(at))?;
     let total = length - at;
     let mut reader = BufReader::with_capacity(1 << 16, file.take(total));
@@ -809,42 +800,6 @@ fn records(
             Line::Whole => records.push((at, serde_json::from_slice(&line).ok())),
         }
         at = end;
-    }
-}
-
-fn consumed<R: std::io::Read>(reader: &BufReader<std::io::Take<R>>, total: u64) -> u64 {
-    total - reader.get_ref().limit() - reader.buffer().len() as u64
-}
-
-enum Line {
-    Whole,
-    Long,
-    Partial,
-}
-
-/// The next line into `line`, without its newline, kept only up to `most` bytes.
-fn capped<R: BufRead>(reader: &mut R, line: &mut Vec<u8>, most: usize) -> std::io::Result<Line> {
-    line.clear();
-    let mut long = false;
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            return Ok(Line::Partial);
-        }
-        let (taken, ended) = match buffer.iter().position(|&byte| byte == b'\n') {
-            Some(at) => (at, true),
-            None => (buffer.len(), false),
-        };
-        if !long && line.len() + taken <= most {
-            line.extend_from_slice(&buffer[..taken]);
-        } else {
-            long = true;
-            line.clear();
-        }
-        reader.consume(taken + usize::from(ended));
-        if ended {
-            return Ok(if long { Line::Long } else { Line::Whole });
-        }
     }
 }
 

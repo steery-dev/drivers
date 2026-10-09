@@ -39,10 +39,7 @@ pub struct Reading {
 }
 
 /// One whole record of a transcript, and where it starts: `None` where it is no JSON.
-pub struct Record {
-    pub start: u64,
-    pub value: Option<Value>,
-}
+pub use steery_driver_common::tree::Record;
 
 /// Where a turn stands between reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

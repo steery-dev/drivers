@@ -12,27 +12,25 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read as _, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use steery_driver_common::follow::Followed;
+use steery_driver_common::lines::{Line, RECORD, capped};
+use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
 use crate::Harness;
-use crate::events::{self, Reading, Record, millis, text};
-use crate::tree::{self, Trees};
+use crate::events::{self, Reading, millis, text};
+use crate::tree::Entries;
 
 /// How deep sub-agents are filed below their conversation's folder: a sub-agent's, the
 /// one it started, and the one that one started (omp 18.4).
 const SUB_AGENT_DEPTH: usize = 3;
-/// The longest record read; a longer one is stepped over.
-const RECORD: u64 = 8 << 20;
-/// How many bytes of records one `sessions/read` answers at most; `more` says the rest.
-const BATCH: u64 = 4 << 20;
 /// The records the head of a transcript is read from: its `title` and `session`.
 const HEAD: usize = 4;
 /// The longest head record read.
@@ -51,7 +49,7 @@ pub struct Store {
     /// `PI_CODING_AGENT_SESSION_DIR`, where this driver was started with it.
     chosen: Option<PathBuf>,
     named: Mutex<BTreeSet<PathBuf>>,
-    trees: Trees,
+    trees: Trees<Entries>,
     titles: Titles,
     starts: Starts,
 }
@@ -542,11 +540,8 @@ struct Start {
 /// What one transcript's `task` calls started, as far as it has been read.
 #[derive(Default)]
 struct Started {
-    /// Its device and inode, how far it was read, and the last bytes read: bytes there
-    /// that changed are a file written whole again, read again from its start.
-    file: (u64, u64),
-    through: u64,
-    seal: Vec<u8>,
+    /// How far it was read: a file written whole again is read again from its start.
+    followed: Followed,
     /// By job, as omp's result names each sub-agent it filed (`details.progress[].id`).
     jobs: BTreeMap<String, Start>,
     /// The tasks of a call whose result is not written yet, by the call: each task's name,
@@ -581,45 +576,26 @@ impl Started {
     }
 
     fn read_on(&mut self, file: &Path) -> io::Result<()> {
-        const SEAL: u64 = 64;
-        let mut open = File::open(file)?;
-        let meta = open.metadata()?;
-        let (identity, len) = ((meta.dev(), meta.ino()), meta.len());
-        if self.file != identity
-            || len < self.through
-            || tree::bytes(
-                &mut open,
-                self.through - self.seal.len() as u64,
-                self.through,
-            )? != self.seal
-        {
-            *self = Self {
-                file: identity,
-                ..Self::default()
-            };
+        let open = File::open(file)?;
+        if self.followed.restart(&open)? {
+            self.jobs.clear();
+            self.asked.clear();
         }
-        if len == self.through {
-            return Ok(());
-        }
-        open.seek(SeekFrom::Start(self.through))?;
-        let mut lines = BufReader::new((&open).take(len - self.through));
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            if lines.read_until(b'\n', &mut line)? == 0 || line.last() != Some(&b'\n') {
-                break;
-            }
-            self.through += line.len() as u64;
-            if line.len() as u64 <= RECORD
+        let mut messages = Vec::new();
+        self.followed.read_on(&open, |line, _, _| {
+            if line.len() <= RECORD
                 && line.windows(6).any(|bytes| bytes == b"\"task\"")
-                && let Ok(record) = serde_json::from_slice::<Value>(&line)
+                && let Ok(mut record) = serde_json::from_slice::<Value>(line)
                 && text(&record, "type") == Some("message")
-                && let Some(message) = record.get("message")
+                && let Some(message) = record.get_mut("message")
             {
-                self.record(message);
+                messages.push(message.take());
             }
+            true
+        })?;
+        for message in &messages {
+            self.record(message);
         }
-        self.seal = tree::bytes(&mut open, self.through.saturating_sub(SEAL), self.through)?;
         Ok(())
     }
 
@@ -768,236 +744,77 @@ fn clean(title: &str) -> Option<String> {
         .then(|| title.to_owned())
 }
 
-/// Where a read of one transcript stands: the file it was, by its device and inode; the
-/// last entry of its path whose events were said (`tip`, counted from 1, 0 for none) and
-/// where that entry's record starts; how far into the file the entries off the path were
-/// counted (`aside`); and whether the fork was said.
-struct Cursor {
-    device: u64,
-    inode: u64,
-    tip: u32,
-    at: u64,
-    aside: u64,
-    forked: bool,
-}
+/// What a cursor's `mark` keeps: whether the fork was said. Its cursors are
+/// `3.<device>.<inode>.<tip>.<at>.<aside>.<forked>` (`steery_driver_common::tree::Cursor`).
+const CURSOR: &str = "3";
 
-impl Cursor {
-    const VERSION: &str = "3";
-
-    fn parse(cursor: &str) -> Result<Self, Error> {
-        let invalid = || Error::invalid(format!("`{cursor}` is no cursor this driver gave"));
-        let mut parts = cursor.split('.');
-        if parts.next() != Some(Self::VERSION) {
-            return Err(invalid());
-        }
-        let mut number = || -> Result<u64, Error> {
-            parts
-                .next()
-                .and_then(|part| part.parse().ok())
-                .ok_or_else(invalid)
-        };
-        let (device, inode, tip, at, aside, forked) = (
-            number()?,
-            number()?,
-            number()?,
-            number()?,
-            number()?,
-            number()?,
-        );
-        if parts.next().is_some() || forked > 1 {
-            return Err(invalid());
-        }
-        Ok(Self {
-            device,
-            inode,
-            tip: u32::try_from(tip).map_err(|_| invalid())?,
-            at,
-            aside,
-            forked: forked == 1,
-        })
-    }
-
-    fn said(&self) -> String {
-        format!(
-            "{}.{}.{}.{}.{}.{}.{}",
-            Self::VERSION,
-            self.device,
-            self.inode,
-            self.tip,
-            self.at,
-            self.aside,
-            u8::from(self.forked)
-        )
-    }
-}
-
-/// One record of the file, `None` where it is longer than read or no JSON.
-fn record(walk: &mut tree::Walk<'_>, node: tree::Node, file: &Path) -> Result<Record, String> {
-    let value = if node.end - node.start > RECORD {
-        None
-    } else {
-        let bytes = tree::bytes(walk.open, node.start, node.end)
-            .map_err(|e| format!("{}: {e}", file.display()))?;
-        serde_json::from_slice(&bytes).ok()
-    };
-    Ok(Record {
-        start: node.start,
-        value,
-    })
+fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
+    Cursor::parse(CURSOR, cursor)
+        .filter(|cursor| cursor.mark <= 1)
+        .ok_or_else(|| Error::invalid(format!("`{cursor}` is no cursor this driver gave")))
 }
 
 /// The events of a transcript's active path after `cursor`, or of its entries within
-/// `tail` bytes of its end. A cursor goes on from its entry where that entry is still on
-/// the path, in the same file; where the conversation went back to an earlier entry and
-/// on from there (a branch), or the file was replaced or written whole again, the events
-/// start again from the beginning (`reset`). What a branch left behind spent is still
+/// `tail` bytes of its end (`Walk::read`). What a branch left behind spent is still
 /// spent: once the path is read to its end, every entry off it written since the last
 /// read is given as its `tokens` alone, each response once.
 fn read_from(
-    trees: &Trees,
+    trees: &Trees<Entries>,
     reading: &Reading,
     cursor: Option<&str>,
     tail: Option<u64>,
 ) -> Result<Events, Error> {
-    let given = cursor.map(Cursor::parse).transpose()?;
+    let given = cursor.map(parse_cursor).transpose()?;
     let still = std::fs::metadata(&reading.file)
         .and_then(|meta| meta.modified())
         .ok()
         .and_then(|at| SystemTime::now().duration_since(at).ok())
         .is_some_and(|still| still >= events::SETTLE);
     trees
-        .walk(&reading.file, |mut walk| {
+        .walk(&reading.file, Entries::default(), |walk| {
             let path = walk.tree.path()?;
-            let length = walk.open.metadata().map_err(|e| e.to_string())?.len();
-            // Where on the path the cursor's entry is: the entries before `from` are read.
-            let on = given.as_ref().and_then(|cursor| {
-                ((cursor.device, cursor.inode) == walk.file).then_some(())?;
-                if cursor.tip == 0 {
-                    return Some(0);
-                }
-                let tip = cursor.tip - 1;
-                let at = path.iter().position(|node| *node == tip)?;
-                (walk.tree.node(tip).start == cursor.at).then_some(at + 1)
-            });
-            let reset = given.is_some() && on.is_none();
-            // From where in the file the entries off the path are still to be counted.
-            let mut aside = match (on, tail) {
-                (Some(_), _) => given.as_ref().map_or(0, |cursor| cursor.aside),
-                (None, Some(tail)) if !reset => length.saturating_sub(tail),
-                (None, _) => 0,
-            };
-            let (from, forked) = match (on, tail) {
-                (Some(from), _) => (from, given.as_ref().map(|cursor| cursor.forked)),
-                (None, Some(tail)) if !reset => {
-                    let edge = length.saturating_sub(tail);
-                    let from = path
-                        .iter()
-                        .position(|node| walk.tree.node(*node).start >= edge)
-                        .unwrap_or(path.len());
-                    (from, (from == 0).then_some(false))
-                }
-                (None, _) => (0, Some(false)),
-            };
-            let mut records = Vec::new();
-            let mut taken = 0;
-            for node in &path[from..] {
-                if taken >= BATCH {
-                    break;
-                }
-                let node = walk.tree.node(*node);
-                taken += node.end - node.start;
-                records.push(record(&mut walk, node, &reading.file)?);
-            }
-            let more = from + records.len() < path.len();
+            let read = walk.read(&path, given.as_ref(), tail)?;
+            let records = &read.records;
             // Where a tail begins inside a fork's copy of its parent, the fork is still to
             // come.
-            let forked = forked.unwrap_or_else(|| {
-                reading.fork.as_ref().is_none_or(|(_, began)| {
+            let forked = match read.mark {
+                Some(mark) => mark == 1,
+                None if read.from == 0 => false,
+                None => reading.fork.as_ref().is_none_or(|(_, began)| {
                     records
                         .iter()
                         .filter_map(|record| record.value.as_ref())
                         .find_map(|record| text(record, "timestamp").and_then(millis))
                         .is_none_or(|at| at >= *began)
-                })
-            });
-            let mut read = events::read(reading, &records, forked, !more && still);
+                }),
+            };
+            let mut said = events::read(reading, records, forked, !read.rest && still);
             // A batch that held back everything it read would never move on: what it held
             // stands.
-            if more && read.consumed == 0 {
-                read = events::read(reading, &records, forked, true);
+            if read.rest && said.consumed == 0 {
+                said = events::read(reading, records, forked, true);
             }
-            if !more {
-                let mut on_path = vec![false; walk.tree.entries()];
-                for node in &path {
-                    on_path[*node as usize] = true;
+            for record in &read.aside {
+                if let Some(value) = &record.value {
+                    said.events.extend(events::spent(reading, value));
                 }
-                let mut through = aside;
-                for (at, on) in on_path.into_iter().enumerate() {
-                    let node = walk.tree.node(at as u32);
-                    through = through.max(node.end + 1);
-                    if on || node.start < aside {
-                        continue;
-                    }
-                    if let Some(value) = record(&mut walk, node, &reading.file)?.value {
-                        read.events.extend(events::spent(reading, &value));
-                    }
-                }
-                aside = through;
             }
-            let tip = (from + read.consumed).checked_sub(1).map(|at| path[at]);
             Ok(Events {
-                cursor: Cursor {
-                    device: walk.file.0,
-                    inode: walk.file.1,
-                    tip: tip.map_or(0, |tip| tip + 1),
-                    at: tip.map_or(0, |tip| walk.tree.node(tip).start),
-                    aside,
-                    forked: read.forked,
-                }
-                .said(),
-                events: read.events,
-                more,
-                reset,
-                whole: from == 0,
+                cursor: walk
+                    .cursor(
+                        &path,
+                        read.from + said.consumed,
+                        read.through,
+                        u64::from(said.forked),
+                    )
+                    .said(CURSOR),
+                events: said.events,
+                more: read.more,
+                reset: read.reset,
+                whole: read.from == 0,
             })
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))
-}
-
-/// How a line read.
-enum Line {
-    /// Ended by its newline, and kept.
-    Whole,
-    /// Ended by its newline, and longer than kept.
-    Long,
-    /// No newline before the end: nothing whole.
-    Partial,
-}
-
-/// The next line into `line`, without its newline, kept only up to `most` bytes.
-fn capped<R: BufRead>(reader: &mut R, line: &mut Vec<u8>, most: usize) -> std::io::Result<Line> {
-    line.clear();
-    let mut long = false;
-    loop {
-        let buffer = reader.fill_buf()?;
-        if buffer.is_empty() {
-            return Ok(Line::Partial);
-        }
-        let (taken, ended) = match buffer.iter().position(|&byte| byte == b'\n') {
-            Some(at) => (at, true),
-            None => (buffer.len(), false),
-        };
-        if !long && line.len() + taken <= most {
-            line.extend_from_slice(&buffer[..taken]);
-        } else {
-            long = true;
-            line.clear();
-        }
-        reader.consume(taken + usize::from(ended));
-        if ended {
-            return Ok(if long { Line::Long } else { Line::Whole });
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1250,6 +1067,70 @@ pub(crate) mod tests {
             counted,
             ["b", "c", "d"],
             "each response, said again, still once each"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A long, branch-heavy transcript read for the first time is said in batches: what
+    /// the branches left behind spent counts against the same bound as the path, so no
+    /// read runs past its own, and the cursor goes on from where it stopped among them
+    /// until every response off the path is given, each once.
+    #[test]
+    fn branches_left_behind_are_read_in_batches_and_each_once() {
+        let home = std::env::temp_dir().join(format!("steery-pi-batches-{}", std::process::id()));
+        let folder = home.join(".pi/agent/sessions/--tmp--");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("2026-10-01T10-00-00-000Z_c3.jsonl");
+        let answer = |id: &str, said: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "message", "id": id, "parentId": "a",
+                    "timestamp": "2026-10-01T10:00:00Z",
+                    "message": {"role": "assistant", "stopReason": "stop",
+                        "content": [{"type": "text", "text": said}],
+                        "usage": {"input": 10, "output": 1}}})
+            )
+        };
+        let mut text = format!(
+            "{}{}",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"c3\",\"timestamp\":\"2026-10-01T10:00:00Z\"}\n",
+            entry("a", None, "user", "ask"),
+        );
+        // Six branches, each leaving 1 MiB behind.
+        for n in 0..6 {
+            text.push_str(&answer(&format!("gone{n}"), &"x".repeat(1 << 20)));
+        }
+        text.push_str(&answer("kept", "the way it went"));
+        std::fs::write(&file, text).unwrap();
+        let store = Store::new(Harness::Pi, &home, home.join(".pi/agent"), None);
+        let mut cursor = None;
+        let mut responses = Vec::new();
+        let mut reads = 0;
+        loop {
+            let read = store
+                .read(Read {
+                    external_id: "c3".into(),
+                    sub_agent: None,
+                    cursor,
+                    tail: None,
+                })
+                .unwrap();
+            reads += 1;
+            assert!(!read.reset);
+            responses.extend(read.events.iter().filter_map(|event| match event {
+                Event::Tokens { response, .. } => response.clone(),
+                _ => None,
+            }));
+            cursor = Some(read.cursor);
+            if !read.more {
+                break;
+            }
+            assert!(reads < 10, "a read that never ends");
+        }
+        assert!(reads > 1, "more than one batch");
+        assert_eq!(
+            responses,
+            ["kept", "gone0", "gone1", "gone2", "gone3", "gone4", "gone5"]
         );
         std::fs::remove_dir_all(&home).unwrap();
     }

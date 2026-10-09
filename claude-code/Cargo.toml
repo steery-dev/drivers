@@ -7,6 +7,7 @@ description = "Steery's official driver for Claude Code: it reads Claude Code's 
 
 [dependencies]
 steery-sdk = { path = "../../server/crates/steery-sdk" }
+steery-driver-common = { path = "../common" }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 serde = { version = "1", features = ["derive"] }

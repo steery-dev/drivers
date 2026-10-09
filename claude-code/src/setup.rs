@@ -4,14 +4,11 @@
 //! person's own hooks on that event.
 
 use std::path::Path;
-use std::time::Duration;
 
 use serde_json::json;
+use steery_driver_common::program::{release_within, version};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
-
-/// How long `claude --version` has to answer before nothing about the build is claimed.
-const PROBE: Duration = Duration::from_secs(5);
 
 /// The plan for this machine.
 pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Error> {
@@ -28,7 +25,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
             install: crate::install(),
         });
     };
-    let release = version(&binary).await.as_deref().and_then(release_within);
+    let release = named(version(&binary).await.as_deref().and_then(release_within));
     let mut notes = Vec::new();
     if release.is_none() {
         notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
@@ -103,41 +100,9 @@ fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
     entries
 }
 
-/// The first line `claude --version` prints, or none where it did not answer in time.
-async fn version(binary: &Path) -> Option<String> {
-    let output = tokio::time::timeout(
-        PROBE,
-        crate::helper(binary)
-            .arg("--version")
-            .stdout(std::process::Stdio::piped())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned)
-}
-
-/// The first `major.minor.patch` a line names: `2.1.0 (Claude Code)` is 2.1.0.
-fn release_within(text: &str) -> Option<String> {
-    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .find_map(|word| {
-            let mut parts = word.trim_matches('.').split('.');
-            let release: (u64, u64, u64) = (
-                parts.next()?.parse().ok()?,
-                parts.next()?.parse().ok()?,
-                parts.next()?.parse().ok()?,
-            );
-            parts.next().is_none().then_some(release)
-        })
-        .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"))
+/// A release as `major.minor.patch`.
+fn named(release: Option<(u64, u64, u64)>) -> Option<String> {
+    release.map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"))
 }
 
 #[cfg(test)]
@@ -159,7 +124,7 @@ mod tests {
     #[test]
     fn a_version_is_the_first_release_the_probe_names() {
         assert_eq!(
-            release_within("2.1.0 (Claude Code)").as_deref(),
+            named(release_within("2.1.0 (Claude Code)")).as_deref(),
             Some("2.1.0")
         );
         assert_eq!(release_within("Claude Code"), None);

@@ -7,6 +7,7 @@ description = "Steery's official driver for Codex: it reads Codex's conversation
 
 [dependencies]
 steery-sdk = { path = "../../server/crates/steery-sdk" }
+steery-driver-common = { path = "../common" }
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
