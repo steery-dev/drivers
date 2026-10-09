@@ -311,3 +311,115 @@ fn release_within(text: &str) -> Option<(u64, u64, u64)> {
             parts.next().is_none().then_some(release)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The variables omp and pi read for their folders, and `PATH`, are the process's: one
+    /// test at a time changes them.
+    static ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const MOVED: [&str; 4] = [
+        "PI_CODING_AGENT_DIR",
+        "PI_CONFIG_DIR",
+        "OMP_PROFILE",
+        "PI_PROFILE",
+    ];
+
+    fn given() -> Setup {
+        Setup {
+            mcp_url: "http://127.0.0.1:7777/mcp".into(),
+            skill: "---\nname: steery\n---\n".into(),
+            hook: "/usr/local/bin/steery hook omp".into(),
+            door: "ws://127.0.0.1:7777/door".into(),
+            release: "1.0.0".into(),
+            timeout: 3630,
+            card_tools: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn each_harness_has_one_root_and_never_an_invented_one() {
+        let _held = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+        let home = Path::new("/home/person");
+        for name in MOVED {
+            // SAFETY: the environment is changed only under `ENVIRONMENT`.
+            unsafe { std::env::remove_var(name) };
+        }
+        for harness in [Harness::Omp, Harness::Pi] {
+            assert_eq!(
+                harness.root(home).unwrap(),
+                harness.default_root(home),
+                "{}",
+                harness.id()
+            );
+        }
+        // omp forked from pi and took its own folder: one harness's conversations are never
+        // read or configured as the other's.
+        assert_eq!(Harness::Pi.root(home).unwrap(), home.join(".pi/agent"));
+        assert_eq!(Harness::Omp.root(home).unwrap(), home.join(".omp/agent"));
+        // SAFETY: as above.
+        unsafe { std::env::set_var("OMP_PROFILE", "work") };
+        assert_eq!(
+            Harness::Omp.root(home).unwrap(),
+            home.join(".omp/profiles/work/agent")
+        );
+        unsafe { std::env::set_var("PI_CODING_AGENT_DIR", "relative/agent") };
+        assert!(
+            Harness::Omp.root(home).is_err(),
+            "a relative folder is no root"
+        );
+        for name in MOVED {
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+
+    /// pi and omp read the same variables, so a machine that moves one moves both, and the
+    /// skill Steery writes is one file that cannot belong to two harnesses. Neither is set
+    /// up on the guess that the folder is really the other's.
+    #[test]
+    fn two_harnesses_in_one_directory_are_both_refused() {
+        let _held = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("pi-family-shared-{}", std::process::id()));
+        let bin = dir.join("bin");
+        let shared = dir.join("agent");
+        std::fs::create_dir_all(&bin).unwrap();
+        for harness in [Harness::Omp, Harness::Pi] {
+            let fake = bin.join(harness.id());
+            std::fs::write(&fake, "#!/bin/sh\necho 99.0.0\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        // SAFETY: the environment is changed only under `ENVIRONMENT`.
+        unsafe {
+            std::env::set_var("PATH", &bin);
+            std::env::set_var("PI_CODING_AGENT_DIR", &shared);
+        }
+        for harness in [Harness::Omp, Harness::Pi] {
+            let planned = runtime
+                .block_on(plan(harness, &dir, &dir.join("config"), given()))
+                .unwrap();
+            let why = planned.refused.expect("refused with a reason");
+            assert!(why.contains(&shared.display().to_string()), "{why}");
+            assert!(planned.entries.is_empty(), "nothing is written for either");
+        }
+        // Only one installed: the folder is that one's alone.
+        std::fs::remove_file(bin.join("pi")).unwrap();
+        let planned = runtime
+            .block_on(plan(Harness::Omp, &dir, &dir.join("config"), given()))
+            .unwrap();
+        assert_eq!(planned.refused, None);
+        assert!(!planned.entries.is_empty());
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::remove_var("PI_CODING_AGENT_DIR");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
