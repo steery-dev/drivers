@@ -14,11 +14,16 @@ Each driver is its own program, built on the `steery-sdk` crate.
 
 `pi`, `codex` and `claude-code` follow.
 
-## Trying one
+## Building
+
+The SDK and the protocol live in Steery's own repository until they are published. Check it
+out beside this one, as `server`:
 
 ```sh
-cd omp && cargo build
-steery driver test omp/target/debug/steery-driver-omp
+git clone https://github.com/steery-dev/server
+git clone https://github.com/steery-dev/drivers
+cd drivers/omp && cargo build
+steery driver test target/debug/steery-driver-omp
 ```
 
 ## License
