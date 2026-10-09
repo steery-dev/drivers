@@ -2,12 +2,15 @@
 
 A driver connects [Steery](https://steery.dev) to one harness: an agent product a person
 runs conversations in. The Steery runtime starts a driver as a child process and speaks the
-program protocol to it, JSON-RPC 2.0 over standard input and output; the driver reads the
-harness's conversations, plans what setting it up writes, and says how to start, read and
-resume a turn. It decides nothing and writes nothing of its own.
+program protocol to it, JSON-RPC 2.0 over standard input and output (`specs/PROTOCOL.md` in
+Steery's repository); the driver reads the harness's conversations, plans what setting it up
+writes, and says how to start, read and resume a turn. It decides nothing and writes nothing
+of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
-Each driver is its own program, built on the `steery-sdk` crate, and answers version 1 of
-the program protocol (`specs/PROTOCOL.md` in Steery's repository).
+Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
+answers version 1 of the program protocol. The official ones below ship in Steery's release
+archive, beside `steery`, each built from this repository at the commit `programs.lock` in
+Steery's repository names, and update with it.
 
 | Driver | Harness | Crate | Levels |
 |---|---|---|---|
@@ -15,6 +18,8 @@ the program protocol (`specs/PROTOCOL.md` in Steery's repository).
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
+
+Each crate is a Cargo workspace of its own, with its own `Cargo.lock`, so it builds alone.
 
 ## Finding and installing the harness
 
@@ -33,21 +38,89 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 ## Building
 
-The SDK and the protocol live in Steery's own repository until they are published. Check it
-out beside this one, as `server`:
+The SDK and the protocol live in Steery's own repository. Every crate names the SDK by path,
+`steery-sdk = { path = "../../server/crates/steery-sdk" }`, so check Steery's repository out
+beside this one as `server`:
 
 ```sh
 git clone https://github.com/steery-dev/server
 git clone https://github.com/steery-dev/drivers
 cd drivers/pi-family && cargo build
-steery driver test target/debug/steery-driver-omp
-steery driver test target/debug/steery-driver-pi
 cargo test
 ```
 
-`steery driver test` starts the driver and checks what it says it is, the methods that read
-and change nothing, an id sent twice, a method it does not have, and its shutdown. `models`
-asks the harness itself, so the harness must be on `PATH` for that check to pass.
+A release builds each official driver the same way, from its own crate, with `--locked` and
+the `ship` profile of Steery's `Cargo.toml` (`deploy/compile-cli.sh` in Steery's
+repository):
+
+```sh
+cargo build --profile ship --locked --config <ship profile> \
+  --manifest-path pi-family/Cargo.toml --bin steery-driver-omp
+```
+
+## Checking a driver
+
+```sh
+steery driver test target/debug/steery-driver-omp
+steery driver test target/debug/steery-driver-pi
+```
+
+`steery driver test <command> [args…] [--setting NAME[=VALUE]]` starts the driver and checks
+what it says it is, the methods that read and change nothing, an id sent twice, a method it
+does not have, and its shutdown, one line per check; it exits 0 only when every one passes.
+A read answered with a refusal word its method lists is an answer. `--setting NAME=VALUE`
+passes a setting to `initialize`, and `--setting NAME` takes its value from the environment,
+keeping a secret off the command line; a method that needs a required setting not given is
+skipped. `models` asks the harness itself, so the harness must be on `PATH` for that check
+to pass. Each crate's own `cargo test` covers what it reads and writes.
+
+## Writing a driver
+
+A driver for a harness Steery does not ship is a program like these. `pi-family/` is the
+worked example; copy it and keep its shape (the layout is below, under omp and pi).
+
+- **Its crate** depends on `steery-sdk` by path as above, with `tokio` for its runtime and
+  `serde_json` for the parameters, and declares an empty `[workspace]` so it builds alone.
+  Its binary is named `steery-driver-<id>`; `src/bin/omp.rs` is one line,
+  `steery_driver_pi_family::serve(Harness::Omp)`, which calls
+  `steery_sdk::serve(|_notifier| Driver::new(harness))`. The SDK reads requests, answers
+  each one, and gives the notifier for what the driver says unasked.
+- **`initialize`** (`Program::initialize` in `src/lib.rs`) refuses a runtime that does not
+  offer `steery_sdk::PROTOCOL`, keeps the `home` and `config` it is given, and answers
+  `wire::Initialized`: `program` (`id`, `kind: Harness`, `release`, `label`, `short`),
+  `harness` (`HarnessInfo` from `src/harness.rs`: its levels, the harness's minimum release,
+  how it signs in, its facts, its hooks and its door; PROTOCOL.md §3.1), no `machine`, and
+  the settings it needs (none here; §3.4).
+- **The methods** (`Program::call`) are one match from each `steery_sdk::method` name to the
+  module that answers it, its parameters read with `steery_sdk::params` and its answer
+  given with `steery_sdk::result`: observe (`setup/plan`, `sessions/list`,
+  `sessions/locate`, `sessions/read`, `hook/read`; §4.1), drive (`held`, `idle`, `models`,
+  `start`, `turn/read`, `reader`, `terminal`; §4.2), and any other answers `Error::Unknown`.
+  A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
+- **Live** (§4.3) is a door. A harness with its own (`picks`, `keeps`) answers `say`,
+  `pick`, `stop` and `recap` in its driver, as `claude-code` and `codex` do. omp and pi have
+  none, so their door is `plugin`: Steery's plugin, which this repository keeps in
+  `pi-family/plugin/` and `setup/plan` installs, speaks the plugin door, version 1 (§4.4),
+  to the runtime itself, and the driver has no live methods.
+
+## Adding a driver to an install
+
+An official driver ships in Steery's archive, beside `steery`. Any other is added by hand: a
+record in Steery's config folder, `$XDG_CONFIG_HOME/steery`, else `~/.config/steery` (on a
+sandbox machine its own folder, `machines/<name>` in it), at `drivers/<id>.json`:
+
+```json
+{"id": "my-harness", "kind": "harness",
+ "command": "/opt/steery/steery-driver-my-harness", "args": [],
+ "source": "https://github.com/me/steery-driver-my-harness", "release": "0.1.0",
+ "digest": "sha256:<64 lowercase hex>"}
+```
+
+`digest` is `sha256:` and the SHA-256 of the file `command` names, in lowercase hex
+(`sha256sum`); it is checked before every start, and a command whose digest changed is not
+started until the record is written again. `args` may be left out; no other field is read.
+An id an official driver has can never be taken: the official one is started and the record
+is ignored. There is no `steery driver add`.
 
 ## omp and pi: `pi-family/`
 
