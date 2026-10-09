@@ -7,20 +7,21 @@
 // it is stopped, and the next takes the session up where it stood ([`Carried`]).
 //
 // Each conversation's copy opens one door: a WebSocket to this machine's runtime on its
-// loopback listener. Over it the copy says what the conversation is doing as it changes
-// (`state`) and the harness's moments as they happen (`moment`), which the runtime reads
-// as it reads every other harness's hooks; at each turn the person starts it hands back
-// the one paragraph Steery has for its agent, and at a turn's end the words Steery's
-// reminder says. Over the same door the runtime hands the person's words to the
-// conversation (`say`), switches its model (`pick`) and stops a turn (`stop`). In both
-// harnesses the copy draws the conversation's open requests where its person is, and
-// `/steery` hands an answer to this machine's signer through the runtime's `/answer`
-// door. pi's copy also carries Steery's MCP entry, registering it for each conversation
-// with headers naming it; omp lets no extension register one, so its copy carries none
-// and omp reaches Steery through the entry `steery setup` writes into its own `mcp.json`.
-// Each place the two harnesses' APIs differ is a branch on `HARNESS`, here and nowhere
-// else. Nothing here decides anything or stands in a call's way: every handler
-// observes, the only waits are short and bounded — the paragraph, the reminder, and a
+// loopback listener, speaking the plugin door, version 1 (PROTOCOL.md §4.4). Over it the
+// copy says what the conversation is doing as it changes (`state`, a LiveState) and the
+// harness's moments as they happen (`moment`, the hook document the driver's `hook/read`
+// reads); at each turn the person starts the runtime answers the one paragraph Steery has
+// for its agent (`say`), and at a turn's end (`settle`) the words that keep it going. Over
+// the same door the runtime asks the copy to hand words to the conversation (`say`),
+// switch its model (`pick`), stop a turn (`stop`) and recap it (`recap`). In both
+// harnesses the copy draws the conversation's open requests where its person is
+// (`cards`), and `/steery` hands an answer to this machine's signer through the runtime's
+// `/answer` door. pi's copy also carries Steery's MCP entry, registering it for each
+// conversation with headers naming it; omp lets no extension register one, so its copy
+// carries none and omp reaches Steery through the entry `steery setup` writes into its own
+// `mcp.json`. Each place the two harnesses' APIs differ is a branch on `HARNESS`, here and
+// nowhere else. Nothing here decides anything or stands in a call's way: every handler
+// observes, the only waits are short and bounded — a moment's answer, a settle's, and a
 // conversation's last moments as it closes — a failure is swallowed, and a Steery that
 // is gone leaves the harness exactly as it would be without this file.
 
@@ -33,8 +34,8 @@ const O_CLOEXEC = process.platform === "darwin" ? 0x1000000 : 0o2000000;
 /** `pi` or `omp`: the harness this copy was written for. */
 const HARNESS: string = "__STEERY_HARNESS__";
 
-/** The release that wrote this copy: the only one the runtime's door accepts. */
-const RELEASE: string = "__STEERY_RELEASE__";
+/** The plugin door version this copy speaks (PROTOCOL.md §4.4). */
+const DOOR_VERSION = 1;
 
 /** The runtime's loopback address, where the card hands a person's answer (`/answer`). */
 const RUNTIME: string = "__STEERY_RUNTIME__";
@@ -94,19 +95,13 @@ const RECAP_ASKED =
 const REMEMBERED = 256;
 
 /** How long a turn the person starts waits for Steery's paragraph before going on without it. */
-const PARAGRAPH_MS = 1500;
+const PROMPT_MS = 1500;
 
-/** How long a sub-agent's call coming back waits for what Steery tells it before going on. */
-const TOLD_MS = 500;
+/** How long a call waits for what Steery has to say beside it before going on without it. */
+const CALL_MS = 500;
 
-/** How long a turn's end waits for Steery's reminder before ending without one. */
+/** How long a turn's end waits for Steery's words to keep it going before ending without them. */
 const SETTLE_MS = 1000;
-
-/**
- * How long an omp call that runs a shell command waits for Steery's line about the
- * resource the command acts on before running without it.
- */
-const CALL_LINE_MS = 400;
 
 /** How long a conversation's end waits for its moments to reach the runtime. */
 const FLUSH_MS = 500;
@@ -121,17 +116,20 @@ const CONTEXT_FULL = "steery-context-full";
 const REDIAL_MIN_MS = 250;
 const REDIAL_MAX_MS = 2000;
 
-/**
- * The wait after the runtime refused this copy's release (close code 4409): by then the
- * loader has moved the session onto the copy the runtime names (`EVERY_MS` there).
- */
-const STALE_RELEASE_MS = 5000;
+/** The wait after the runtime refused this copy's door version: by then a newer copy may be loaded. */
+const OTHER_DOOR_MS = 5000;
 
-/** The close code of a runtime speaking another release. */
-const OTHER_RELEASE = 4409;
+/** The close code of a hello the runtime could not read, or that names no plugin driver: never dialed again. */
+const UNHEARD = 4400;
+
+/** The close code of a runtime that does not speak this copy's door version. */
+const OTHER_DOOR = 4409;
 
 /** The close code of a door a newer one of the same process and conversation replaced. */
 const REPLACED = 4410;
+
+/** The close code this copy closes its door with: its conversation ended here or moved. */
+const LET_GO = 1000;
 
 /** At most one `state` per this many milliseconds; changes in between go in the next. */
 const STATE_EVERY_MS = 100;
@@ -142,6 +140,12 @@ const STATE_EVERY_MS = 100;
  * when each really ended here.
  */
 const ENDED_KEPT = 64;
+
+/**
+ * How many of Steery's turns that ended the door's `state` names, newest kept: how each
+ * ended is the run its say's aim reports, and a runtime that was away reads it here.
+ */
+const SETTLED_KEPT = 16;
 
 /**
  * How often what nothing announces — somebody typing, words queued — is looked at
@@ -360,18 +364,16 @@ type Api = {
 };
 
 /**
- * An answer to an ask of the runtime's: `ok` with what the op says, or `refused` with a
- * word from Steery's refusal table (`refusal.rs`) — `no-answer` (words handed to the
- * harness and not seen taken, so they may yet be in), `refused` (the harness threw),
- * `model-missing`, `selection-unsupported` (an op or a harness call this copy lacks, or a
- * copy that takes no words), `harness-busy`, `other-turn` when a stop names a say whose
- * turn is not the one running, or `ending` when the conversation stopped here, or this
- * copy moved to another, before anything was handed over.
+ * What a copy answers an ask of the runtime's (§4.4): `ok` with what the op says, or
+ * `refused` with one of the op's refusal words — `no-answer` (words handed to the harness
+ * and not seen taken, so they may yet be in; a turn still running after a stop),
+ * `refused` (the harness threw, or the copy takes no such ask), `model-missing`,
+ * `selection-unsupported` (a harness call this copy lacks), `harness-busy`, `other-turn`
+ * when a stop names a say whose turn is not the one running, or `ending` when the
+ * conversation stopped here, or this copy moved to another, before anything was handed
+ * over — and the harness's own line (`error`).
  */
-type Reply = { id: string; ok: true; [field: string]: unknown } | { id: string; refused: string; error?: string };
-
-/** A reply before it is addressed. */
-type Said = { ok: true; [field: string]: unknown } | { refused: string; error?: string };
+type Said = { ok: Record<string, unknown> } | { refused: string; error?: string };
 
 /** One frame of the door, either way: a JSON object with its kind in `t`. */
 type Frame = { t: string; [field: string]: unknown };
@@ -538,16 +540,16 @@ function leadOf(ctx: Context): Named | undefined {
 }
 
 /**
- * The hook document the runtime reads for a moment, in the fields every harness's
- * document shares, stamped with when it happened (`at`): a moment kept while no door was
- * open reaches the runtime late, and is placed when it happened. It also names the
- * conversation's file, `transcript_path` as Claude Code names it, for any session that is
- * not a sub-agent, pi's or omp's: both keep their conversations wherever a flag, a project
- * setting or a variable of their person's shell says, and the runtime sees none of those.
- * A sub-agent's does not: its document names its lead, and its own file would be another
- * conversation's. The runtime reads neither this process's environment nor its lead
- * marker, so both are said here: the lead the marker names (`lead`), and the bb thread a
- * run inside one belongs to (`bb_thread`).
+ * The hook document the driver's `hook/read` reads for a moment, in the fields every
+ * harness's document shares, stamped with when it happened (`at`, milliseconds since 1970):
+ * a moment kept while no door was open reaches the runtime late, and is placed when it
+ * happened. It also names the conversation's file, `transcript_path` as Claude Code names
+ * it, for any session that is not a sub-agent, pi's or omp's: both keep their
+ * conversations wherever a flag, a project setting or a variable of their person's shell
+ * says, and the runtime sees none of those. A sub-agent's does not: its document names its
+ * lead, and its own file would be another conversation's. The runtime reads neither this
+ * process's environment nor its lead marker, so the lead the marker names is said here
+ * (`lead`).
  */
 function document(ctx: Context, extra: Record<string, unknown> = {}): Record<string, unknown> {
   // Naming the sub-agent is how the runtime knows the conversation is its lead's.
@@ -555,15 +557,13 @@ function document(ctx: Context, extra: Record<string, unknown> = {}): Record<str
   const context_left = left(ctx);
   const transcript_path = who.agent_id === undefined ? ctx.sessionManager.getSessionFile?.() : undefined;
   const lead = marked(ctx);
-  const bb_thread = process.env.BB_THREAD_ID?.trim();
   return {
     ...who,
     cwd: ctx.cwd,
     ...(context_left === undefined ? {} : { context_left }),
     ...(typeof transcript_path === "string" && transcript_path ? { transcript_path } : {}),
     ...(lead ? { lead } : {}),
-    ...(bb_thread ? { bb_thread } : {}),
-    at: new Date().toISOString(),
+    at: Date.now(),
     ...extra,
   };
 }
@@ -673,9 +673,8 @@ function closing(event: Event, ctx: Context): unknown {
 /**
  * One moment for the runtime, by an id unique on this machine (`<pid>.<nonce>.<n>`, the
  * nonce drawn once per process, so a recycled pid resuming the same conversation never
- * repeats an id its note kept): what its answer comes back under, and its document's
- * `moment_id`, the same however often it is sent, so the runtime takes a moment sent
- * again once.
+ * repeats an id): what its answer comes back under, the same however often it is sent, so
+ * the runtime reads a moment sent again once. `event` is the hook event it is.
  */
 type Moment = { id: string; event: string; document: Record<string, unknown> };
 
@@ -772,14 +771,24 @@ function spoken(message: unknown): string | undefined {
  */
 type Say = { id: string; throw?: string; also: string[]; words: string; mode: "steer" | "queue"; seen: boolean };
 
-/** A call the conversation's agent is inside, with the calls made from inside it that are still running. */
-type Call = { id: string; name: string; since: string; children: { id: string; name: string }[] };
+/** A call the conversation's agent is inside, with the calls made from inside it that are still running: LiveState's. */
+type Call = { id: string; tool: string; since: number; children: { id: string; tool: string }[] };
 
 /** A call the conversation's agent was inside that ended, and when, by this process's clock. */
-type Ended = { id: string; at: string };
+type Ended = { id: string; at: number };
+
+/** The kinds of dialog LiveState names; any other of the harness's is `custom`. */
+const DIALOG_KINDS = ["select", "confirm", "input", "editor", "custom"] as const;
 
 /** A dialog of the harness's own waiting on its person. */
-type Dialog = { kind: string; title: string; since: string };
+type Dialog = { kind: (typeof DIALOG_KINDS)[number]; title: string; since: number };
+
+/**
+ * A turn Steery's words began that ended, by this process's clock: the says it took as
+ * Steery's, and whether its last answer stopped on an error it did not get past, with the
+ * harness's line for it, where it gave one.
+ */
+type Settled = { began_at: number; at: number; says: string[]; failed: boolean; error?: string };
 
 /**
  * Where a session stands in its turn, as one copy hands it to the copy that takes the
@@ -793,11 +802,16 @@ type Kept = {
   waiting: boolean;
   reminded: boolean;
   turning: boolean;
-  began: string | undefined;
+  began: number | undefined;
   retrying: boolean;
   continued: string | undefined;
   says: Say[];
   ours: string[];
+  /** The says the turn running now took as Steery's, whatever came into it since. */
+  turnSays: string[];
+  /** The harness's line for the error the turn running now last stopped on, while it is not past it. */
+  failure: string | undefined;
+  settled: Settled[];
   calls: Call[];
   ended: Ended[];
   dialog: Dialog | null;
@@ -833,6 +847,9 @@ function restored(kept: unknown): Kept {
     kept && typeof kept === "object" && name in kept ? (kept as Record<string, unknown>)[name] : undefined;
   const says = field("says");
   const ours = field("ours");
+  const turnSays = field("turnSays");
+  const failure = field("failure");
+  const settled = field("settled");
   const continued = field("continued");
   const calls = field("calls");
   const ended = field("ended");
@@ -846,11 +863,14 @@ function restored(kept: unknown): Kept {
     waiting: field("waiting") === true,
     reminded: field("reminded") === true,
     turning,
-    began: typeof began === "string" ? began : undefined,
+    began: typeof began === "number" ? began : undefined,
     retrying: field("retrying") === true,
     continued: typeof continued === "string" ? continued : undefined,
     says: Array.isArray(says) ? says.filter(isSay) : [],
     ours: Array.isArray(ours) ? ours.filter((one): one is string => typeof one === "string") : [],
+    turnSays: Array.isArray(turnSays) ? turnSays.filter((one): one is string => typeof one === "string") : [],
+    failure: typeof failure === "string" ? failure : undefined,
+    settled: Array.isArray(settled) ? settled.filter(isSettled).slice(-SETTLED_KEPT) : [],
     calls: Array.isArray(calls) ? calls.filter(isCall) : [],
     ended: Array.isArray(ended) ? ended.filter(isEnded).slice(-ENDED_KEPT) : [],
     dialog: isDialog(dialog) ? dialog : null,
@@ -882,8 +902,8 @@ function isCall(one: unknown): one is Call {
   const call = one as Record<string, unknown>;
   return (
     typeof call.id === "string" &&
-    typeof call.name === "string" &&
-    typeof call.since === "string" &&
+    typeof call.tool === "string" &&
+    typeof call.since === "number" &&
     Array.isArray(call.children) &&
     call.children.every(
       (child: unknown) =>
@@ -891,8 +911,8 @@ function isCall(one: unknown): one is Call {
         typeof child === "object" &&
         "id" in child &&
         typeof child.id === "string" &&
-        "name" in child &&
-        typeof child.name === "string",
+        "tool" in child &&
+        typeof child.tool === "string",
     )
   );
 }
@@ -900,13 +920,30 @@ function isCall(one: unknown): one is Call {
 function isEnded(one: unknown): one is Ended {
   if (!one || typeof one !== "object") return false;
   const ended = one as Record<string, unknown>;
-  return typeof ended.id === "string" && typeof ended.at === "string";
+  return typeof ended.id === "string" && typeof ended.at === "number";
+}
+
+function isSettled(one: unknown): one is Settled {
+  if (!one || typeof one !== "object") return false;
+  const settled = one as Record<string, unknown>;
+  return (
+    typeof settled.began_at === "number" &&
+    typeof settled.at === "number" &&
+    Array.isArray(settled.says) &&
+    settled.says.every((say) => typeof say === "string") &&
+    typeof settled.failed === "boolean" &&
+    (settled.error === undefined || typeof settled.error === "string")
+  );
 }
 
 function isDialog(one: unknown): one is Dialog {
   if (!one || typeof one !== "object") return false;
   const dialog = one as Record<string, unknown>;
-  return typeof dialog.kind === "string" && typeof dialog.title === "string" && typeof dialog.since === "string";
+  return (
+    DIALOG_KINDS.some((kind) => kind === dialog.kind) &&
+    typeof dialog.title === "string" &&
+    typeof dialog.since === "number"
+  );
 }
 
 /**
@@ -2020,7 +2057,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const taken = (text: unknown) => {
     if (typeof text !== "string") return;
     const words = text.trim();
-    for (const one of pending.filter((one) => one.handed && one.words === words)) one.answer({ ok: true });
+    for (const one of pending.filter((one) => one.handed && one.words === words)) one.answer({ ok: {} });
   };
 
   /**
@@ -2034,7 +2071,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (HARNESS !== "omp" || typeof said !== "string") return;
     const batch = `\n\n${said.trim()}\n\n`;
     for (const one of pending.filter((one) => one.handed && batch.includes(`\n\n${one.words}\n\n`))) {
-      one.answer({ ok: true });
+      one.answer({ ok: {} });
     }
   };
 
@@ -2050,6 +2087,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * stretch of the say it names.
    */
   let ours = new Set<string>(kept.ours);
+  /**
+   * The says the turn running now took as Steery's — that began it, or went on with it
+   * while it was Steery's — whatever came into it since: the turn each of them began, as
+   * the door's `state` names it, and the run its aim reports.
+   */
+  let turnSays = new Set<string>(kept.turnSays);
   /** A turn began, and the input it began with is still to be read. */
   let opening = false;
   /** The reminder this conversation's stop hook last asked omp to go on with. */
@@ -2076,6 +2119,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (theirs) ours = new Set();
     else if (began || mine.some((one) => one.mode === "queue")) ours = new Set(mine.flatMap(idsOf));
     else if (ours.size > 0) for (const id of mine.flatMap(idsOf)) ours.add(id);
+    for (const id of ours) turnSays.add(id);
   };
 
   // Inside a turn from `before_agent_start` until its run is over (`agent_settled`, or an
@@ -2084,6 +2128,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let turning = kept.turning;
   /** When the turn running now began. */
   let began = kept.began;
+  /**
+   * The harness's line for the error the turn running now last stopped on, `""` where it
+   * gave none, until an answer gets past it: the turn failed where it ends so.
+   */
+  let failure: string | undefined = kept.failure;
+  /** How the turn's last answer stopped, as the harness said it: what its `Stop` document carries. */
+  let stopped: { stop_reason?: string; error_message?: string } | undefined;
+  /** Steery's turns that ended lately, oldest first, at most [`SETTLED_KEPT`]. */
+  const settled: Settled[] = kept.settled;
   // omp waits between its own retries after `agent_end` and reads as idle meanwhile; it
   // goes on by itself (`auto_retry_start` to `auto_retry_end`). pi's run is not over
   // until `agent_settled`, retries included.
@@ -2149,7 +2202,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    */
   const quiet = (ctx: Context): boolean => idle(ctx) === true && typing(ctx) === false && !starting && !compacting;
 
-  /** The session's model as Steery names it, `<provider>/<id>`, and how hard it thinks. */
+  /**
+   * The session's model as Steery names it, `<provider>/<id>`, and how hard it thinks: a
+   * pick's answer as read back. A field the harness does not say is absent.
+   */
   const current = (ctx: Context): { model?: string; thinking?: string } => {
     const model = ctx.models?.current?.() ?? ctx.model;
     let thinking: string | undefined;
@@ -2158,35 +2214,29 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     } catch {
       // A harness not yet running its actions says nothing of it.
     }
-    return { model: model ? `${model.provider}/${model.id}` : undefined, thinking };
+    return {
+      ...(model ? { model: `${model.provider}/${model.id}` } : {}),
+      ...(thinking === undefined ? {} : { thinking }),
+    };
   };
 
-  /** What the conversation is doing now, as a `pick` or a `stop` answers it. */
-  const status = (ctx: Context) => ({
-    session_id: ctx.sessionManager.getSessionId(),
-    idle: idle(ctx),
-    pending: ctx.hasPendingMessages?.(),
-    turning,
-    typing: typing(ctx),
-    ...current(ctx),
-  });
-
-  /** What the conversation is doing now, as the door's `state` says it. */
-  const stateNow = (ctx: Context) => {
-    const { model, thinking } = current(ctx);
+  /** What the conversation is doing now: a LiveState (§4.3), its unknowns absent. */
+  const stateNow = (ctx: Context): Record<string, unknown> => {
+    const known = (field: string, value: boolean | number | undefined) =>
+      value === undefined ? {} : { [field]: value };
     return {
-      turn: turning && began ? { began_at: began } : null,
-      idle: idle(ctx) ?? null,
-      pending: ctx.hasPendingMessages?.() ?? null,
-      typing: typing(ctx) ?? null,
+      ...(turning && began !== undefined ? { turn: { began_at: began, says: [...turnSays] } } : {}),
+      ...known("idle", idle(ctx)),
+      ...known("pending", ctx.hasPendingMessages?.()),
+      ...known("typing", typing(ctx)),
       compacting: compacting !== undefined,
       retrying,
-      model: model ?? null,
-      thinking: thinking ?? null,
-      context_left: left(ctx) ?? null,
+      ...current(ctx),
+      ...known("context_left", left(ctx)),
       calls: [...calls.values()],
       ended,
-      dialog,
+      ...(dialog ? { dialog } : {}),
+      settled,
     };
   };
 
@@ -2198,6 +2248,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let wanted = false;
   /** This copy is letting go: the runtime's asks are refused `ending`. */
   let ending = false;
+  /** The runtime could not read this copy's hello (4400): it dials no more until the harness starts it again. */
+  let unheard = false;
   let redial: NodeJS.Timeout | undefined;
   let backoff = REDIAL_MIN_MS;
   /** A dial failed before the runtime welcomed one: pi's own connection to Steery's tools may have failed too. */
@@ -2257,14 +2309,18 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
   };
 
-  /**
-   * Say one moment happened; its id is what its answer comes back under, and the
-   * document's `moment_id`, by which the runtime takes it once however often it goes.
-   */
+  /** Say one moment happened, its hook document as the harness gave it: its id is what its answer comes back under. */
   const moment = (event: string, doc: Record<string, unknown>): string => {
     const id = nextId();
-    post({ id, event, document: { ...doc, moment_id: id } });
+    post({ id, event, document: doc });
     return id;
+  };
+
+  /** The words a moment's or a settle's answer has for the agent: `ok.say`, where it says any. */
+  const sayOf = (answered: Frame | undefined): string | undefined => {
+    const ok = answered?.ok;
+    const say = ok && typeof ok === "object" && "say" in ok ? ok.say : undefined;
+    return typeof say === "string" && say.trim() ? say : undefined;
   };
 
   /** Send what the conversation is doing, where it changed since it was last sent. */
@@ -2385,11 +2441,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }, 0);
   };
 
-  /** The runtime accepted this copy: what was kept goes, then what the conversation is doing. */
+  /** The runtime accepted this copy: what was kept goes, then what the conversation is doing, again. */
   const welcome = () => {
     welcomed = true;
     backoff = REDIAL_MIN_MS;
     for (const one of moments().queue.splice(0)) post(one);
+    stateSent = "";
     sendState();
     clearInterval(looking);
     // Each look also opens a request's form once its person is free for it ([`walkNext`]).
@@ -2420,26 +2477,29 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     settling.clear();
   };
 
-  /** One frame from the runtime. */
+  /** One frame from the runtime; one unreadable, or of a kind or a door this copy does not know, is dropped. */
   const arrived = (data: unknown) => {
     const frame = parsed(typeof data === "string" ? data : String(data));
     if (!frame || typeof frame !== "object" || !("t" in frame)) return;
     const said = frame as Frame;
     switch (said.t) {
       case "welcome":
-        welcome();
+        if (said.door === DOOR_VERSION && !welcomed) welcome();
         return;
       case "answer": {
-        const id = str(said.id);
-        inflight.delete(id);
-        moments().waiting.get(id)?.(said);
+        if (typeof said.id !== "string" || !said.ok || typeof said.ok !== "object") return;
+        inflight.delete(said.id);
+        moments().waiting.get(said.id)?.(said);
         return;
       }
-      case "ask":
-        void addressed(said).then((reply) => send({ t: "answer", ...reply }));
+      case "ask": {
+        const id = said.id;
+        if (typeof id !== "string" || !id || typeof said.op !== "string") return;
+        void addressed(id, said).then((reply) => send({ t: "answer", id, ...reply }));
         return;
+      }
       case "cards":
-        drawCards(said);
+        if (Array.isArray(said.open) && Array.isArray(said.settled)) drawCards(said);
         return;
       default:
         return;
@@ -2451,7 +2511,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     clearTimeout(redial);
     redial = undefined;
     const ctx = live;
-    if (!wanted || door || !ctx || typeof WebSocket === "undefined") return;
+    if (!wanted || unheard || door || !ctx || typeof WebSocket === "undefined") return;
     let socket: WebSocket;
     try {
       socket = new WebSocket(DOOR);
@@ -2481,45 +2541,58 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     };
   };
 
-  /** The door dropped: dial again, sooner after a door that was welcomed, later after a refusal. */
+  /**
+   * The door dropped: dial again after [`REDIAL_MIN_MS`], doubling to [`REDIAL_MAX_MS`],
+   * from the least again once a door was welcomed; after [`OTHER_DOOR_MS`] where the runtime
+   * speaks another door version; never where a newer door replaced this one, or the
+   * runtime could not read this copy's hello.
+   */
   const dropped = (code: number | undefined) => {
     const was = welcomed;
     detached();
     if (!was) missed = true;
-    if (!wanted || code === REPLACED) return;
+    if (code === UNHEARD) unheard = true;
+    if (!wanted || unheard || code === REPLACED) return;
     if (was) backoff = REDIAL_MIN_MS;
-    const wait = code === OTHER_RELEASE ? STALE_RELEASE_MS : backoff;
+    const wait = code === OTHER_DOOR ? OTHER_DOOR_MS : backoff;
     backoff = Math.min(backoff * 2, REDIAL_MAX_MS);
     redial = setTimeout(dial, wait);
     redial.unref?.();
   };
 
-  /** Close the door open now, keeping what it had not answered for the next. */
+  /** Close the door open now, its conversation ended here or moved, keeping what it had not answered for the next. */
   const cut = () => {
     const was = door;
     detached();
     try {
-      was?.close(1000);
+      was?.close(LET_GO);
     } catch {
       // Already closed.
     }
   };
 
+  /** Who is at the harness, as the hello says it: `tui` or `rpc` where a person is, `json` or `print` for a one-shot run. */
+  const modeOf = (ctx: Context): string =>
+    ctx.mode === "tui" || ctx.mode === "rpc" || ctx.mode === "json" || ctx.mode === "print"
+      ? ctx.mode
+      : ctx.hasUI === false
+        ? "print"
+        : "tui";
+
   /** The first frame on every door: who this copy is and what its conversation is doing now. */
   const hello = (ctx: Context): Frame => {
-    const own = ctx.sessionManager.getSessionId();
     const lead = led(ctx) ? leadOf(ctx) : undefined;
     const state = stateNow(ctx);
     stateSent = JSON.stringify(state);
     stateAt = Date.now();
     return {
       t: "hello",
-      release: RELEASE,
+      door: DOOR_VERSION,
       harness: HARNESS,
       pid: process.pid,
-      session_id: own,
+      session_id: ctx.sessionManager.getSessionId(),
+      mode: modeOf(ctx),
       ...(lead ? { lead } : {}),
-      mode: ctx.mode ?? (ctx.hasUI === false ? "print" : "tui"),
       state,
     };
   };
@@ -2599,7 +2672,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       else if (waiting) {
         if (!waiting.also.includes(id) && waiting.id !== id) waiting.also.push(id);
         if (idsOf(waiting).some((one) => ours.has(one))) ours.add(id);
-        if (!oneShot(ctx)) return Promise.resolve({ ok: true });
+        if (!oneShot(ctx)) return Promise.resolve({ ok: {} });
         handedBefore = waiting.words;
       }
     }
@@ -2704,7 +2777,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       if (HARNESS === "omp" && running && !queued && !oneShot(ctx)) {
         watching = setInterval(() => {
           if (!here()) one.answer({ refused: "no-answer", error: "the session moved to another conversation" });
-          else if (ctx.hasPendingMessages?.()) one.answer({ ok: true });
+          else if (ctx.hasPendingMessages?.()) one.answer({ ok: {} });
         }, 10);
       }
     };
@@ -2815,7 +2888,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         error: still(`holds ${now.model ?? "its model"} at ${now.thinking ?? "no"} thinking, not ${thinking}`),
       };
     }
-    return { ok: true, ...now };
+    return { ok: now };
   };
 
   /**
@@ -2867,7 +2940,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (answered?.stopReason === "error" || answered?.stopReason === "aborted" || !text) {
       return { refused: "refused", error: answered?.errorMessage ?? "the model wrote no recap" };
     }
-    return { ok: true, text };
+    return { ok: { text } };
   };
 
   /**
@@ -2902,7 +2975,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const running = () => turning || ctx.isIdle?.() === false;
     // Its person's own stop holds the conversation parked whether or not a turn runs.
     if (say === undefined) parked = true;
-    if (!running()) return { ok: true, stopped: false, running: background(ctx), ...status(ctx) };
+    if (!running()) return { ok: { stopped: false, running: background(ctx) } };
     if (say !== undefined && !ours.has(say)) {
       const waiting = says.some((one) => idsOf(one).includes(say) && !one.seen);
       return {
@@ -2924,26 +2997,36 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteState();
     return running()
       ? { refused: "no-answer", error: "a turn still runs" }
-      : { ok: true, stopped: true, running: background(ctx), ...status(ctx) };
+      : { ok: { stopped: true, running: background(ctx) } };
   };
 
   /**
-   * What one ask of the runtime's asks, answered. Only a conversation's own copy takes
-   * words — never a sub-agent's, whose conversation is its lead's — and a one-shot run's
-   * only while its own turn runs: words before it would start a turn of their own ahead
-   * of the run's own words.
+   * The refusal of an ask the copy takes nothing for because it is letting the
+   * conversation go: `ending` where the op has that word (`say`, `pick`), else `refused`.
+   */
+  const endingFor = (op: unknown): Said =>
+    op === "say" || op === "pick" ? { refused: "ending" } : { refused: "refused", error: "the conversation is ending here" };
+
+  /**
+   * What one ask of the runtime's asks, answered. A sub-agent's copy — whose conversation
+   * is its lead's — takes no words, no pick and no stop. A conversation's own copy takes
+   * words and picks where a person is at it (`tui`, `rpc`) or a turn runs: a one-shot run's
+   * words before its own turn would start a turn of their own ahead of the run's words.
    */
   const answer = (request: Frame): Promise<Said> | Said => {
     const ctx = live;
-    if (ending || !wanted || !ctx) return { refused: "ending" };
-    if (led(ctx) || (oneShot(ctx) && !turning)) {
-      return { refused: "selection-unsupported", error: "this conversation takes no words here" };
+    const op = request.op;
+    if (ending || !wanted || !ctx) return endingFor(op);
+    if (led(ctx) && op !== "recap") return { refused: "refused", error: "a sub-agent's conversation takes this at its lead" };
+    if ((op === "say" || op === "pick") && oneShot(ctx) && !turning) {
+      return { refused: "refused", error: "this one-shot run takes nothing before its own turn" };
     }
-    switch (request.op) {
+    switch (op) {
       case "say": {
         const { words, mode } = request;
         if (typeof words !== "string" || !words.trim()) return { refused: "refused", error: "no words" };
         if (mode !== "steer" && mode !== "queue") return { refused: "refused", error: "mode is steer or queue" };
+        if (typeof request.idle !== "boolean") return { refused: "refused", error: "a say says idle" };
         // The throw whose words they are, where an aim's: one throw's go in once ([`deliver`]).
         const thrown = request.throw === undefined ? undefined : typeof request.throw === "string" ? request.throw : "";
         if (thrown === "") return { refused: "refused", error: "a say's throw is the throw's id" };
@@ -2951,10 +3034,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         // reviewed answer — go in only while nothing else would: no turn, nothing queued,
         // nobody typing at the input line, read as they arrive and again as they are
         // handed over ([`deliver`]).
-        if (request.idle === true && !quiet(ctx)) {
+        if (request.idle && !quiet(ctx)) {
           return { refused: "harness-busy", error: "the conversation is working, has words waiting, or somebody is typing" };
         }
-        return deliver(ctx, String(request.id), words, mode, thrown, request.idle === true);
+        return deliver(ctx, String(request.id), words, mode, thrown, request.idle);
       }
       case "pick":
         return pick(ctx, request.model, request.thinking);
@@ -2963,28 +3046,25 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       case "recap":
         return recap(ctx);
       default:
-        return { refused: "selection-unsupported", error: `no op ${String(request.op)}` };
+        return { refused: "refused", error: `no op ${String(op)}` };
     }
   };
 
   /**
    * Asks by id: one sent again is answered from the first, and what it did is never done
-   * twice. One that did nothing — refused before anything reached the harness — is
-   * forgotten once answered, so the same id asked again later acts afresh.
+   * twice, for the last [`REMEMBERED`]. One refused other than `no-answer` did nothing —
+   * refused before anything reached the harness — and is forgotten once answered, so the
+   * same id asked again later acts afresh.
    */
-  const addressed = (request: Frame): Promise<Reply> => {
-    const id = request.id;
+  const addressed = (id: string, request: Frame): Promise<Said> => {
     const ctx = live;
     const session = sessionId;
-    if (typeof id !== "string" || !id) {
-      return Promise.resolve({ id: "", refused: "refused", error: "an ask is {t, id, op}" });
-    }
-    if (!ctx || session === undefined || !inSession(session)) return Promise.resolve({ id, refused: "ending" });
+    if (!ctx || session === undefined || !inSession(session)) return Promise.resolve(endingFor(request.op));
     const answered = answeredIn(session);
     let said = answered.get(id);
     if (!said) {
       const asked = Promise.resolve()
-        .then((): Promise<Said> | Said => (inSession(session) ? answer(request) : { refused: "ending" }))
+        .then((): Promise<Said> | Said => (inSession(session) ? answer(request) : endingFor(request.op)))
         .catch((error: unknown): Said => ({ refused: "refused", error: String(error) }));
       said = asked;
       answered.set(id, asked);
@@ -2993,7 +3073,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         if ("refused" in one && one.refused !== "no-answer" && answered.get(id) === asked) answered.delete(id);
       });
     }
-    return said.then((one) => ({ id, ...one }));
+    return said;
   };
 
   /**
@@ -3026,9 +3106,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     cut();
   };
 
-  /** Whether the widget is drawn here: a session whose person sees it, in pi or omp. */
+  /** Whether the cards are drawn here: a conversation's own copy whose person sees it (`tui`, `rpc`), in pi or omp. */
   const draws = (ctx: Context | undefined): ctx is Context =>
-    !!ctx && ctx.hasUI !== false && (ctx.mode === "tui" || ctx.mode === "rpc");
+    !!ctx && ctx.hasUI !== false && (ctx.mode === "tui" || ctx.mode === "rpc") && !led(ctx);
 
   /** Where a request raised here is answered from: the card here, or elsewhere. */
   const reach = (ctx: Context): Reach => (ctx.mode === "tui" && ctx.ui?.custom && toolkit ? "here" : "elsewhere");
@@ -3224,7 +3304,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         cwd: ctx.cwd,
         mode: ctx.mode,
         reason: "new",
-        at: new Date().toISOString(),
+        at: Date.now(),
       });
     }
   };
@@ -3243,6 +3323,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       refuseWaiting();
       says.splice(0, says.length);
       ours = new Set();
+      turnSays = new Set();
+      settled.splice(0, settled.length);
       continued = undefined;
       const { promise, resolve } = Promise.withResolvers<void>();
       setTimeout(resolve, 0);
@@ -3269,9 +3351,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const input = typeof event.prompt === "string" ? event.prompt.trim() : "";
     if (!turning) {
       opening = true;
-      began = new Date().toISOString();
+      began = Date.now();
+      turnSays = new Set();
+      failure = undefined;
+      stopped = undefined;
     }
-    began ??= new Date().toISOString();
+    began ??= Date.now();
     const going = continued !== undefined && input === continued.trim();
     const said = whose(input);
     if (going) opening = false;
@@ -3287,9 +3372,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // going on, or a background job waking the conversation leave it parked.
     if (!going && said.theirs) parked = false;
     reminded = false;
-    const answered = await awaited(moment("UserPromptSubmit", document(ctx)), PARAGRAPH_MS);
-    const line = answered?.paragraph;
-    if (typeof line !== "string" || !line.trim()) return undefined;
+    const prompt = typeof event.prompt === "string" ? { prompt: event.prompt } : {};
+    const line = sayOf(await awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS));
+    if (!line) return undefined;
     return {
       message: {
         customType: "steery",
@@ -3302,7 +3387,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     live = ctx;
     begun();
     turning = true;
-    began ??= new Date().toISOString();
+    began ??= Date.now();
     noteState();
   });
   // omp's own retries between runs: it goes on by itself, so the conversation is not idle.
@@ -3330,10 +3415,22 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteState();
   });
   // Both harnesses write the person's message into the transcript as its `message_end`
-  // handlers return: words not heard sooner ([`deliver`]) are heard here.
+  // handlers return: words not heard sooner ([`deliver`]) are heard here. An answer of the
+  // model's says whether the turn stands on an error: one that stopped on an error until
+  // a later one gets past it, a stopped request saying nothing either way; and how the
+  // turn's last answer stopped, as the turn's `Stop` says it.
   pi.on("message_end", (event, ctx) => {
     live = ctx;
     taken(spoken(event.message));
+    const answer = event.message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | null | undefined;
+    if (answer && typeof answer === "object" && answer.role === "assistant") {
+      if (answer.stopReason === "error") failure = typeof answer.errorMessage === "string" ? answer.errorMessage : "";
+      else if (answer.stopReason !== "aborted") failure = undefined;
+      stopped = {
+        ...(typeof answer.stopReason === "string" ? { stop_reason: answer.stopReason } : {}),
+        ...(typeof answer.errorMessage === "string" ? { error_message: answer.errorMessage } : {}),
+      };
+    }
     noteState();
     return undefined;
   });
@@ -3355,10 +3452,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     live = ctx;
     const id = str(event.toolCallId);
     if (!id) return;
-    const name = str(event.toolName);
+    const tool = str(event.toolName);
     const parent = str(event.parentToolCallId);
-    if (!parent) calls.set(id, { id, name, since: new Date().toISOString(), children: [] });
-    else outer(parent)?.children.push({ id, name });
+    if (!parent) calls.set(id, { id, tool, since: Date.now(), children: [] });
+    else outer(parent)?.children.push({ id, tool });
     noteState();
   });
   pi.on("tool_execution_end", (event, ctx) => {
@@ -3367,7 +3464,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const parent = str(event.parentToolCallId);
     if (!parent) {
       if (calls.delete(id)) {
-        ended.push({ id, at: new Date().toISOString() });
+        ended.push({ id, at: Date.now() });
         ended.splice(0, ended.length - ENDED_KEPT);
       }
     } else {
@@ -3381,7 +3478,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   pi.on("ui_prompt_start", (event, ctx) => {
     live = ctx;
     if (walking) return;
-    dialog = { kind: str(event.kind) || "custom", title: str(event.title), since: new Date().toISOString() };
+    const kind = DIALOG_KINDS.find((one) => one === event.kind) ?? "custom";
+    dialog = { kind, title: str(event.title), since: Date.now() };
     noteState();
   });
   pi.on("ui_prompt_end", (_event, ctx) => {
@@ -3451,20 +3549,21 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
   }
   /**
-   * Steery's words for a turn about to end, from the runtime: none where the turn asked
-   * its person, its agent parked the conversation, or the door is not open. The runtime
-   * holds the rule and the words; this copy says what it saw.
+   * Steery's words to keep a turn about to end going, from the runtime (`settle`'s
+   * answer, `ok.say`): none where the turn asked its person, its agent parked the
+   * conversation, it waits on a Steery request, it was already kept going once
+   * (`continued`), or the door is not open. The runtime holds the rule and the words; this
+   * copy says what it saw.
    */
-  const settle = async (active: boolean): Promise<string | undefined> => {
+  const settle = async (continued: boolean): Promise<string | undefined> => {
     if (!welcomed) return undefined;
     const id = nextId();
     const said = awaited(id, SETTLE_MS);
     settling.add(id);
-    if (!send({ t: "settle", id, asked, parked, waiting, stop_hook_active: active })) moments().waiting.get(id)?.(undefined);
+    if (!send({ t: "settle", id, asked, parked, waiting, continued })) moments().waiting.get(id)?.(undefined);
     const answered = await said;
     settling.delete(id);
-    const reminder = answered?.reminder;
-    return typeof reminder === "string" && reminder.trim() ? reminder : undefined;
+    return sayOf(answered);
   };
   // The turn is about to end. A turn that asked its person nothing is reminded once, and
   // the agent decides. A sub-agent is never reminded: its lead asks.
@@ -3478,8 +3577,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     pi.on("session_stop", async (event, ctx) => {
       live = ctx;
       const last = event.last_assistant_message;
-      const stopped = last && typeof last === "object" && "stopReason" in last ? last.stopReason : undefined;
-      if (stopped === "error" || stopped === "aborted" || led(ctx)) return undefined;
+      const how = last && typeof last === "object" && "stopReason" in last ? last.stopReason : undefined;
+      if (how === "error" || how === "aborted" || led(ctx)) return undefined;
       const reminder = await settle(event.stop_hook_active === true);
       if (!reminder) return undefined;
       continued = reminder;
@@ -3505,9 +3604,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   }
   // A call the agent makes: raising or waiting on a request is asking, whoever makes it —
   // the agent, or a codemode script the agent wrote. Only the agent's own calls are
-  // moments: a call made from inside another is said by the door's `calls`. omp names the
-  // caller by what a call to Steery carries, so its moment carries the call's input; pi's
-  // calls carry headers that name the conversation.
+  // moments: a call made from inside another is said by the door's `calls`. The moment
+  // carries the call as the harness gave it — its tool, its id and its input — and the
+  // driver's `hook/read` reads what call it is.
   pi.on("tool_call", async (event, ctx) => {
     live = ctx;
     const { tool } = called(event);
@@ -3515,20 +3614,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (typeof event.parentToolCallId === "string" && event.parentToolCallId) return undefined;
     const id = moment(
       "PreToolUse",
-      document(ctx, {
-        tool_name: event.toolName,
-        tool_use_id: event.toolCallId,
-        ...(HARNESS === "omp" ? { tool_input: event.input } : {}),
-      }),
+      document(ctx, { tool_name: event.toolName, tool_use_id: event.toolCallId, tool_input: event.input ?? null }),
     );
     // A shell command a resource's cue names is told, with the call's result, which
     // resource it acts on and who holds it: omp hands a `tool_call` handler's
     // `additionalContext` to the model beside the result. Only a shell command waits, and
     // never longer than the bound; anything else goes on at once.
     if (HARNESS !== "omp" || !commandOf(event.input)) return undefined;
-    const answered = await awaited(id, CALL_LINE_MS);
-    const line = answered?.paragraph;
-    if (typeof line !== "string" || !line.trim()) return undefined;
+    const line = sayOf(await awaited(id, CALL_MS));
+    if (!line) return undefined;
     return { additionalContext: `<system-reminder reason="steery">\n${line}\n</system-reminder>` };
   });
   pi.on("tool_result", async (event, ctx) => {
@@ -3550,17 +3644,19 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       parked = true;
     }
     if (typeof event.parentToolCallId === "string" && event.parentToolCallId) return undefined;
-    // The call that came back, by the id the transcript writes it under.
-    const id = moment("PostToolUse", document(ctx, { tool_use_id: event.toolCallId }));
+    // The call that came back, by the id the transcript writes it under, and whether it failed.
+    const id = moment(
+      "PostToolUse",
+      document(ctx, { tool_name: event.toolName, tool_use_id: event.toolCallId, is_error: event.isError === true }),
+    );
     // A sub-agent works as one long turn: omp hands a `tool_result` handler every call of
     // every sub-agent session and delivers its `additionalContext` outside the tool's
     // output (omp 18.4.4), so a led copy hears there, now and then, that its lines are owed
     // (`Harness::tells_working`). The runtime decides whether there is anything to say; a
     // lead's own copy is told at its person's next instruction instead.
     if (HARNESS !== "omp" || !led(ctx)) return undefined;
-    const answered = await awaited(id, TOLD_MS);
-    const line = answered?.paragraph;
-    if (typeof line !== "string" || !line.trim()) return undefined;
+    const line = sayOf(await awaited(id, CALL_MS));
+    if (!line) return undefined;
     return { additionalContext: `<system-reminder reason="steery">\n${line}\n</system-reminder>` };
   });
   // The turn is over. pi's `agent_end` can be followed by a retry, a compaction or queued
@@ -3599,12 +3695,27 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     begun();
     compacted();
+    // A turn Steery's words began says how it ended, for the run its say's aim reports.
+    if (began !== undefined && turnSays.size > 0) {
+      settled.push({
+        began_at: began,
+        at: Date.now(),
+        says: [...turnSays],
+        failed: failure !== undefined,
+        ...(failure ? { error: failure } : {}),
+      });
+      settled.splice(0, settled.length - SETTLED_KEPT);
+    }
+    const how = stopped ?? {};
+    turnSays = new Set();
+    failure = undefined;
+    stopped = undefined;
     turning = false;
     began = undefined;
     calls.clear();
     if (oneShot(ctx)) refuseWaiting(true);
     noteState();
-    moment("Stop", document(ctx));
+    moment("Stop", document(ctx, how));
   });
   /** Let go of all this session holds here: its door and the lead. */
   const letGo = async () => {
@@ -3646,6 +3757,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         continued,
         says: [...says],
         ours: [...ours],
+        turnSays: [...turnSays],
+        failure,
+        settled: [...settled],
         calls: [...calls.values()],
         ended: [...ended],
         dialog,

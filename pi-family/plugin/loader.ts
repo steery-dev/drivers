@@ -144,7 +144,7 @@ function queued(step: () => Promise<void>): Promise<void> {
 async function within<T>(promise: Promise<T> | T, ms: number): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<undefined>((resolve) => {
-    timer = setTimeout(resolve, ms);
+    timer = setTimeout(() => resolve(undefined), ms);
   });
   try {
     return await Promise.race([Promise.resolve(promise), late]);
