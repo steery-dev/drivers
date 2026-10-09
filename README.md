@@ -105,22 +105,49 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
 
 ## Adding a driver to an install
 
-An official driver ships in Steery's archive, beside `steery`. Any other is added by hand: a
-record in Steery's config folder, `$XDG_CONFIG_HOME/steery`, else `~/.config/steery` (on a
-sandbox machine its own folder, `machines/<name>` in it), at `drivers/<id>.json`:
+An official driver ships in Steery's archive, beside `steery`. Any other is added with
+`steery driver add`:
+
+```sh
+steery driver add <source> [--crate <dir>] [--wait-secs <n>]
+steery driver add https://github.com/steery-dev/drivers#<rev> --crate pi-family
+```
+
+`<source>` is an executable's path; a folder with a `Cargo.toml`, built there with
+`cargo build --release --locked` (refused without a `Cargo.lock` at its workspace root, which
+every crate here has); or a git repository's URL (one with `://`, or `git@host:`), with an
+optional `#<rev>` (a branch, tag or commit), cloned to `<config>/programs/src/<id>` and built
+the same way. `--crate` names the crate's folder inside the repository. The official ids,
+`omp`, `pi`, `claude-code` and `codex`, are refused, so a fork of a crate here must answer `initialize` with an id of its
+own.
+
+What runs is a copy, `<config>/programs/bin/<id>-<the first 12 hex of its digest>`. Before
+anything is asked, the copy is started and checked as `steery driver test` checks it: an
+official id, a kind other than a driver's, an `initialize` that fails or speaks another
+protocol, or any failed check refuses it, and nothing is written. Then one card on the
+person's phone, "Add the driver <label>", names it, its source, release, digest, what it
+provides and the settings it declares. Only a verified Go writes its record,
+`<config>/drivers/<id>.json`:
 
 ```json
 {"id": "my-harness", "kind": "harness",
- "command": "/opt/steery/steery-driver-my-harness", "args": [],
- "source": "https://github.com/me/steery-driver-my-harness", "release": "0.1.0",
- "digest": "sha256:<64 lowercase hex>"}
+ "command": "<config>/programs/bin/my-harness-<12 hex>", "args": [],
+ "source": "https://github.com/me/my-harness#<commit>",
+ "release": "0.1.0", "digest": "sha256:<64 lowercase hex>"}
 ```
 
-`digest` is `sha256:` and the SHA-256 of the file `command` names, in lowercase hex
-(`sha256sum`); it is checked before every start, and a command whose digest changed is not
-started until the record is written again. `args` may be left out; no other field is read.
-An id an official driver has can never be taken: the official one is started and the record
-is ignored. There is no `steery driver add`.
+`<config>` is this computer's Steery folder, `$XDG_CONFIG_HOME/steery`, else
+`~/.config/steery`; every machine this computer runs reads the records there, a sandbox
+machine's runtime (`steery run --machine`) too. `digest` is `sha256:` and the SHA-256 of the
+file `command` names, in lowercase hex. `source` is the words that add it again: the
+absolute path, the absolute folder, or `<url>#<commit> [--crate <dir>]`, pinned to the
+commit built. The command exits 0 once added, 1 on No or an answer that does not verify,
+and 2 with no answer within `--wait-secs` (by default and at most 3600).
+
+The runtime checks the digest before every start: a driver whose copy changed on disk is
+not started, and reads Missing with "add it again with `steery driver add <source>`".
+`steery driver remove <id>` deletes the record, its copy and its clone; an official id with
+no record is refused.
 
 ## omp and pi: `pi-family/`
 
