@@ -28,9 +28,11 @@ fn files(root: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(folder.path()) else {
             continue;
         };
-        files.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
-            path.extension().is_some_and(|ext| ext == "jsonl") && path.is_file()
-        }));
+        files.extend(
+            entries.flatten().map(|entry| entry.path()).filter(|path| {
+                path.extension().is_some_and(|ext| ext == "jsonl") && path.is_file()
+            }),
+        );
     }
     files
 }
@@ -43,9 +45,7 @@ fn id_of(file: &Path) -> Option<&str> {
 
 /// The transcript of conversation `id`.
 pub fn find(root: &Path, id: &str) -> Option<PathBuf> {
-    files(root)
-        .into_iter()
-        .find(|file| id_of(file) == Some(id))
+    files(root).into_iter().find(|file| id_of(file) == Some(id))
 }
 
 /// What the head of a transcript records about its conversation.
@@ -140,9 +140,8 @@ pub fn read(root: &Path, read: ReadParams) -> Result<Events, Error> {
             .parse()
             .map_err(|_| Error::invalid(format!("`{cursor}` is no byte offset")))?,
     };
-    let unreadable = |e: std::io::Error| {
-        Error::refused(refusal::REFUSED, format!("{}: {e}", file.display()))
-    };
+    let unreadable =
+        |e: std::io::Error| Error::refused(refusal::REFUSED, format!("{}: {e}", file.display()));
     let mut open = File::open(&file).map_err(unreadable)?;
     let length = open.metadata().map_err(unreadable)?.len();
     if from > length {

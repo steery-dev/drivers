@@ -12,8 +12,8 @@
 //! and `agent_end` says how the run ended. `--model` resolves loosely, so a pick goes to
 //! omp only as one of its own catalog's entries.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -37,7 +37,8 @@ const KEPT: Duration = Duration::from_secs(600);
 /// `held`: omp keeps no registry of its own, so the runtime looks for an omp process
 /// holding the transcript open, and asks the plugin door.
 pub fn held(root: &Path, held: Held) -> Result<HeldBy, Error> {
-    let transcript = transcripts::find(root, &held.external_id).ok_or_else(|| missing(&held.external_id))?;
+    let transcript =
+        transcripts::find(root, &held.external_id).ok_or_else(|| missing(&held.external_id))?;
     Ok(HeldBy::Look {
         look: Look {
             transcript,
@@ -104,7 +105,8 @@ impl Catalog {
         let listed: Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("omp models said no JSON: {e}"))?;
         let models = offers(&listed)?;
-        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), models.clone()));
+        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some((Instant::now(), models.clone()));
         Ok(models)
     }
 }
@@ -168,7 +170,10 @@ pub async fn start(root: &Path, catalog: &Catalog, start: Start) -> Result<Launc
             {
                 return Err(Error::refused(
                     refusal::NO_PLACE,
-                    format!("{} is gone, and omp resumes a conversation only there", cwd.display()),
+                    format!(
+                        "{} is gone, and omp resumes a conversation only there",
+                        cwd.display()
+                    ),
                 ));
             }
             argv.extend(["--resume".into(), id.into()]);
@@ -178,7 +183,9 @@ pub async fn start(root: &Path, catalog: &Catalog, start: Start) -> Result<Launc
             argv.extend(["--fork".into(), id.into()]);
         }
         (Act::Continue | Act::Fork, None) => {
-            return Err(Error::invalid("a continue or a fork names its conversation"));
+            return Err(Error::invalid(
+                "a continue or a fork names its conversation",
+            ));
         }
         (Act::New, _) => {}
         (Act::Hand, _) => {
@@ -212,25 +219,61 @@ pub async fn start(root: &Path, catalog: &Catalog, start: Start) -> Result<Launc
     })
 }
 
-/// `turn/read`: what one line of an omp run says. Standard output is pi's JSON lines;
-/// standard error is omp's own words for what it will not run.
-pub fn turn_read(read: TurnRead) -> TurnLine {
-    match read.stream {
-        Stream::Stdout => {
-            let Ok(line) = serde_json::from_str::<Value>(&read.line) else {
-                return TurnLine::default();
-            };
-            TurnLine {
-                named: named(&line),
-                took: taken(&line).then_some(true),
-                ended: end(&line),
-                refused: None,
+/// What each turn's lines said so far, by the turn they belong to: a turn is held from
+/// its first line until `ended` is answered for it.
+#[derive(Default)]
+pub struct Runs {
+    runs: Mutex<HashMap<String, Run>>,
+}
+
+/// One turn's lines so far.
+struct Run {
+    /// omp took the words.
+    took: bool,
+}
+
+impl Runs {
+    /// `turn/read`: what one line of an omp run says. Standard output is pi's JSON lines;
+    /// standard error is omp's own words for what it will not run. A turn's words are
+    /// taken once; past the line that ended it, the lines omp writes as it settles say
+    /// nothing, and a run omp starts again (`agent_start`) is read on.
+    pub fn read(&self, read: TurnRead) -> TurnLine {
+        let line = match read.stream {
+            Stream::Stderr => {
+                return TurnLine {
+                    refused: refused_by(&read.line).map(str::to_owned),
+                    ..TurnLine::default()
+                };
             }
+            Stream::Stdout => match serde_json::from_str::<Value>(&read.line) {
+                Ok(line) => line,
+                Err(_) => return TurnLine::default(),
+            },
+        };
+        let named = named(&line);
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        let run = match runs.get_mut(&read.turn) {
+            Some(run) => run,
+            // A turn not held is a new one, which omp opens with its naming line, or one
+            // whose end was answered: settling lines say nothing, and a run started again
+            // took its words before.
+            None if named.is_none() && after_end(&line) => return TurnLine::default(),
+            None => runs.entry(read.turn.clone()).or_insert(Run {
+                took: named.is_none(),
+            }),
+        };
+        let took = !run.took && taken(&line, read.delivery.as_deref());
+        run.took |= took;
+        let ended = end(&line);
+        if ended.is_some() {
+            runs.remove(&read.turn);
         }
-        Stream::Stderr => TurnLine {
-            refused: refused_by(&read.line).map(str::to_owned),
-            ..TurnLine::default()
-        },
+        TurnLine {
+            named,
+            took: took.then_some(true),
+            ended,
+            refused: None,
+        }
     }
 }
 
@@ -242,15 +285,53 @@ fn named(line: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Steery's marker for the reference it puts in a turn's words.
+const DELIVERED: &str = "steery-delivery:";
+
 /// The receipt of the turn's words: the person's message going into the conversation
-/// (`message_end`, which omp writes to its transcript as it says it).
-fn taken(line: &Value) -> bool {
-    line.get("type").and_then(Value::as_str) == Some("message_end")
-        && line
-            .get("message")
-            .and_then(|message| message.get("role"))
-            .and_then(Value::as_str)
-            == Some("user")
+/// (`message_end`, which omp writes to its transcript as it says it). Words that carry a
+/// `delivery` are taken only by a message naming it whole — `aim.<throw>.1` is not
+/// `aim.<throw>.10` — so nothing else the run takes in is read as them; words without
+/// one by the run's first message of the person's.
+fn taken(line: &Value, delivery: Option<&str>) -> bool {
+    if line.get("type").and_then(Value::as_str) != Some("message_end") {
+        return false;
+    }
+    let Some(message) = line.get("message") else {
+        return false;
+    };
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some(delivery) = delivery else {
+        return true;
+    };
+    let text = match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => return false,
+    };
+    let marker = format!("{DELIVERED}{delivery}");
+    text.match_indices(&marker).any(|(at, _)| {
+        text[at + marker.len()..]
+            .chars()
+            .next()
+            .is_none_or(|next| !(next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_')))
+    })
+}
+
+/// Every line after a run's `agent_end` but one that starts or ends the run again: what
+/// omp writes as it settles.
+fn after_end(line: &Value) -> bool {
+    !matches!(
+        line.get("type").and_then(Value::as_str),
+        Some("agent_start" | "agent_end")
+    )
 }
 
 /// `agent_end`: the run ran to its end when the model's last word stopped of its own
@@ -268,15 +349,14 @@ fn end(line: &Value) -> Option<Ended> {
     {
         return None;
     }
-    let last = line
-        .get("messages")
-        .and_then(Value::as_array)
-        .and_then(|messages| {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
-        });
+    let last =
+        line.get("messages")
+            .and_then(Value::as_array)
+            .and_then(|messages| {
+                messages.iter().rev().find(|message| {
+                    message.get("role").and_then(Value::as_str) == Some("assistant")
+                })
+            });
     match last
         .and_then(|message| message.get("stopReason"))
         .and_then(Value::as_str)
@@ -341,7 +421,10 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
         // Asked for no model, omp runs on none a reader can count on.
         ReaderTools::None => {
             let model = reader.model.ok_or_else(|| {
-                Error::refused(refusal::MODEL_MISSING, "an omp reader runs on the model it is given")
+                Error::refused(
+                    refusal::MODEL_MISSING,
+                    "an omp reader runs on the model it is given",
+                )
             })?;
             argv.extend(["--model".into(), model]);
             argv.extend(["--system-prompt".into(), reader.system]);
@@ -386,8 +469,7 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
         launch: Launch {
             argv,
             env: BTreeMap::new(),
-            // The reader's own empty folder, which the runtime makes and starts it in.
-            cwd: PathBuf::from("."),
+            cwd: reader.cwd,
             stdin: Stdin::None,
         },
         feed: Feed::File,
@@ -437,5 +519,8 @@ fn plain_id(id: &str) -> bool {
 }
 
 fn missing(id: &str) -> Error {
-    Error::refused(refusal::NOT_FOUND, format!("omp has no conversation {id} here"))
+    Error::refused(
+        refusal::NOT_FOUND,
+        format!("omp has no conversation {id} here"),
+    )
 }

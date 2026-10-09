@@ -41,12 +41,13 @@ pub(crate) const MINIMUM: &str = "18.4.12";
 pub(crate) const UPDATE: &str = "omp update";
 
 /// The driver. It keeps the person's home and the runtime's config folder, given in
-/// `initialize`, and the models omp listed last.
+/// `initialize`, the models omp listed last, and what each turn's lines said so far.
 #[derive(Default)]
 struct Omp {
     home: OnceLock<PathBuf>,
     config: OnceLock<PathBuf>,
     catalog: drive::Catalog,
+    runs: drive::Runs,
 }
 
 impl Omp {
@@ -85,7 +86,11 @@ impl Program for Omp {
             },
             door: Some(harness::LiveDoor::Plugin),
             checks_idle: true,
-            acts: vec![harness::Act::Continue, harness::Act::Fork, harness::Act::New],
+            acts: vec![
+                harness::Act::Continue,
+                harness::Act::Fork,
+                harness::Act::New,
+            ],
         };
         Ok(wire::Initialized {
             protocol: PROTOCOL,
@@ -121,12 +126,14 @@ impl Program for Omp {
                     .ok_or_else(|| Error::invalid("`initialize` gave no config folder"))?;
                 result(setup::plan(config, steery_sdk::params(params)?).await?)
             }
-            method::SESSIONS_LIST => {
-                result(transcripts::list(&self.root()?, steery_sdk::params(params)?))
-            }
-            method::SESSIONS_READ => {
-                result(transcripts::read(&self.root()?, steery_sdk::params(params)?)?)
-            }
+            method::SESSIONS_LIST => result(transcripts::list(
+                &self.root()?,
+                steery_sdk::params(params)?,
+            )),
+            method::SESSIONS_READ => result(transcripts::read(
+                &self.root()?,
+                steery_sdk::params(params)?,
+            )?),
             // omp runs no hooks: Steery's plugin says its moments through the door.
             method::HOOK_READ => {
                 let _: harness::HookRead = steery_sdk::params(params)?;
@@ -147,7 +154,7 @@ impl Program for Omp {
             method::START => result(
                 drive::start(&self.root()?, &self.catalog, steery_sdk::params(params)?).await?,
             ),
-            method::TURN_READ => result(drive::turn_read(steery_sdk::params(params)?)),
+            method::TURN_READ => result(self.runs.read(steery_sdk::params(params)?)),
             // The plugin door is omp's graceful step, and the runtime speaks it itself.
             method::STOP => {
                 let _: harness::Stop = steery_sdk::params(params)?;
