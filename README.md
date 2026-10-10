@@ -8,7 +8,7 @@ writes, and says how to start, read and resume a turn. It decides nothing and wr
 of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers version 2 of the program protocol. Steery adds the drivers below the way it adds any
+answers version 3 of the program protocol. Steery adds the drivers below the way it adds any
 program: from this repository's releases, each a prebuilt executable per target
 (`steery programs add https://github.com/steery-dev/drivers`, which Steery's installer
 runs). Everything a person sees of a driver, its label, its short name, its tint and its
@@ -49,7 +49,7 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v2.0.0" }`, and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.0.0" }`, and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
