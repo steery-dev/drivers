@@ -330,7 +330,7 @@ pub(crate) mod tests {
             let mut entry = json!({
                 "pid": pid,
                 "sessionId": session,
-                "cwd": "/Users/aram/src/repo",
+                "cwd": "/Users/person/src/repo",
                 "kind": "interactive",
                 "peerProtocol": 1,
             });

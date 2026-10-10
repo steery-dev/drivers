@@ -1,4 +1,4 @@
-//! Steery's official `pi` driver.
+//! Steery's `pi` driver.
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {

@@ -1,4 +1,4 @@
-//! Steery's official `claude-code` driver, at observe, drive and live. It reads Claude
+//! Steery's `claude-code` driver, at observe, drive and live. It reads Claude
 //! Code's conversations from their transcripts, plans the entries that set Claude Code up
 //! for Steery, answers its hooks, plans and follows its background sessions' turns, and
 //! reaches a live session through the inbox socket Claude Code opens for it.

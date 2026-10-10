@@ -1,4 +1,4 @@
-//! Steery's official `codex` driver, at observe, drive and live. It reads Codex's
+//! Steery's `codex` driver, at observe, drive and live. It reads Codex's
 //! conversations from their rollouts, plans the entries that set Codex up for Steery
 //! (its MCP entry, the skill, the hooks), reads Codex's hook documents and prints what
 //! they answer, and reaches a live thread through Codex's own doors: the app's router for

@@ -1,4 +1,4 @@
-//! Steery's official `omp` driver.
+//! Steery's `omp` driver.
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> std::io::Result<()> {

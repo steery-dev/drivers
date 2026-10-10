@@ -1,4 +1,4 @@
-//! Steery's official drivers for the pi family, `omp` and `pi`, at observe, drive and
+//! Steery's drivers for the pi family, `omp` and `pi`, at observe, drive and
 //! live. They read a harness's conversations from their transcripts, plan the entries that
 //! set it up for Steery, read its moments, and say how to start, read and resume a turn. A
 //! live conversation is reached through Steery's plugin door, which setup writes into the
