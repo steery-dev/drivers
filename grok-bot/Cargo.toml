@@ -10,7 +10,7 @@ name = "steery-driver-grok-bot"
 path = "src/main.rs"
 
 [dependencies]
-steery-sdk = { version = "1.0.0", path = "../../steery-grokbot-cutover/crates/steery-sdk" }
+steery-sdk = { version = "1.0.0", git = "https://github.com/steery-dev/server.git", rev = "2e2b35358595e6928955cedbab957ffe7323eb56" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

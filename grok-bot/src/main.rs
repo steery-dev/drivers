@@ -91,10 +91,14 @@ impl Program for Driver {
     fn initialize(&self, input: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         if !input.protocol.contains(&PROTOCOL) { return Err(Error::invalid("this driver speaks protocol 1 only")); }
         for key in input.settings.keys() {
-            if key != "cli" { return Err(Error::invalid(format!("unknown setting {key}"))); }
+            if !matches!(key.as_str(), "cli" | "GROK_ACCESS_TOKEN" | "GROK_CLIENT_VERSION") { return Err(Error::invalid(format!("unknown setting {key}"))); }
         }
         let cli = input.settings.get("cli").map(PathBuf::from).map(Ok).unwrap_or_else(default_cli)?;
-        self.native.set(Native { cli, cache: input.config.join("grok-bot/transcripts") })
+        let mut env = BTreeMap::new();
+        for key in ["GROK_ACCESS_TOKEN", "GROK_CLIENT_VERSION"] {
+            if let Some(value) = input.settings.get(key) { env.insert(key.into(), value.clone()); }
+        }
+        self.native.set(Native { cli, cache: input.config.join("grok-bot/transcripts"), env })
             .map_err(|_| Error::invalid("driver already initialized"))?;
         let native = self.native()?.clone();
         let notifier = self.notifier.clone();
@@ -150,7 +154,11 @@ impl Program for Driver {
             })),
             machine: None,
             settings: vec![wire::Setting { name: "cli".into(), secret: false, required: false,
-                about: "Authenticated gateway wrapper path; defaults to colocated grokbot-gateway.mjs".into() }],
+                about: "Gateway wrapper path; defaults to colocated grokbot-gateway.mjs".into() },
+                wire::Setting { name: "GROK_ACCESS_TOKEN".into(), secret: true, required: true,
+                    about: "Signed-in Grok Bot account access token".into() },
+                wire::Setting { name: "GROK_CLIENT_VERSION".into(), secret: false, required: true,
+                    about: "Installed Grok Bot client version".into() }],
         })
     }
 
@@ -173,7 +181,7 @@ impl Program for Driver {
                     root: PathBuf::from(std::env::var("HOME").map_err(|_| refused("HOME is required to locate Grok Bot configuration"))?)
                         .join("Library/Application Support/Grok Bot") }),
                     refused: (!connected).then(|| note.clone()),
-                    entries: Vec::new(), notes: vec![note] })
+                    entries: Vec::new(), notes: vec![note], install: None })
             }
             method::SESSIONS_LIST => {
                 let list: h::List = params(input)?;
@@ -237,7 +245,7 @@ impl Program for Driver {
                 let executable = std::env::current_exe().map_err(|error| refused(error.to_string()))?;
                 result(h::Launch { argv: vec![executable.to_string_lossy().into_owned(), "turn".into(),
                     native.cli.to_string_lossy().into_owned(), native.cache.to_string_lossy().into_owned(),
-                    start.external_id.unwrap_or_default()], env: BTreeMap::new(), cwd: start.cwd,
+                    start.external_id.unwrap_or_default()], env: native.env.clone(), cwd: start.cwd,
                     stdin: h::Stdin::Words, inbox: false })
             }
             method::TURN_READ => {
@@ -309,7 +317,9 @@ async fn emit(event: h::TurnLine, input: Option<&str>) -> Result<(), Error> {
 
 async fn turn(args: &[String]) -> Result<(), Error> {
     if args.len() != 3 { return Err(Error::invalid("turn requires CLI path, cache path, and bot ID (empty for new)")); }
-    let native = Native { cli: PathBuf::from(&args[0]), cache: PathBuf::from(&args[1]) };
+    let native = Native { cli: PathBuf::from(&args[0]), cache: PathBuf::from(&args[1]),
+        env: ["GROK_ACCESS_TOKEN", "GROK_CLIENT_VERSION"].into_iter()
+            .filter_map(|key| std::env::var(key).ok().map(|value| (key.into(), value))).collect() };
     let mut words = String::new();
     tokio::io::stdin().read_to_string(&mut words).await.map_err(|error| refused(error.to_string()))?;
     if words.is_empty() { return Err(Error::invalid("turn input is empty")); }

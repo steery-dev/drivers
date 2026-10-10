@@ -18,9 +18,10 @@ the program protocol (`specs/PROTOCOL.md` in Steery's repository).
 `codex` and `claude-code` follow.
 
 Grok Bot uses `grokbot-gateway.mjs` beside its binary, or the `cli` setting.
-The wrapper reads the signed-in macOS app account through Keychain. Unlock Keychain
-before a driver call. Other platforms require `CURSOR_ACCESS_TOKEN` and
-`SAND_CLIENT_VERSION`. Credentials stay in process memory.
+The driver requires `GROK_ACCESS_TOKEN` (secret) and `GROK_CLIENT_VERSION` settings
+from `initialize`. It passes them to gateway calls and launched turns. It does not
+read Keychain or ambient authentication. The wrapper maps them to the vendor CLI's
+`CURSOR_ACCESS_TOKEN` and `SAND_CLIENT_VERSION` only when it invokes `gbot`.
 
 The driver reads gateway conversations, continues or creates bots, and proves accepted
 input from its nonce. It does not select models, fork history, steer a running turn,
@@ -40,19 +41,19 @@ schema and resolver. Supply your own bot ID as `session.external_id` with
 `session.harness=grok-bot`. If the bot cannot see its own ID, it must not describe
 a session or guess from the roster.
 
-Build against SDK `1.0.0` from server commit `54a34e8ed`, checked out beside this
-repository as `steery-grokbot-cutover`: `cargo build --manifest-path grok-bot/Cargo.toml`.
-The cutover runtime passed all 9 driver conformance checks and an isolated,
-digest-pinned added-driver `Host::local` smoke through real gateway list/read calls.
-Cold Keychain access exceeded the runtime's 30-second call bound. Supply
-`CURSOR_ACCESS_TOKEN` and `SAND_CLIENT_VERSION` in the runtime environment to avoid
-that access. Never put credentials in driver registration JSON.
+SDK `1.0.0` is pinned to server main commit `2e2b35358595e6928955cedbab957ffe7323eb56`.
+Build with `cargo build --manifest-path grok-bot/Cargo.toml`; no sibling checkout is required.
+Node and `gbot` must be on `PATH`. Set both credential variables in your shell, then:
 
-Register the binary in `<config>/drivers/grok-bot.json` with `id`, `kind: "harness"`,
-`command`, `args`, `source`, `release` and `digest: "sha256:<binary hash>"`.
-Use file mode `0600`. Put `grokbot-gateway.mjs` beside the binary.
-The phone installation card remains unavailable. The live machine report and
-phone harness selection are not yet verified.
+```sh
+steery driver test grok-bot/target/debug/steery-driver-grok-bot --setting cli="$PWD/grokbot-gateway.mjs" --setting GROK_ACCESS_TOKEN --setting GROK_CLIENT_VERSION
+steery driver add grok-bot/target/debug/steery-driver-grok-bot --setting cli="$PWD/grokbot-gateway.mjs" --setting GROK_ACCESS_TOKEN --setting GROK_CLIENT_VERSION
+```
+
+Approve the installation card on your phone. The runtime keeps the declared settings
+in its driver record. Never pass the token as a literal command-line value.
+Released-main conformance passed all 14 checks after gateway warm-up. The first
+`setup/plan` exceeded its deadline. Live installation and phone throws remain unverified.
 
 
 ## Building
