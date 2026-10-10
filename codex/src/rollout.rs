@@ -40,7 +40,25 @@ const TASK: usize = 200;
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
-    heads: Mutex<HashMap<PathBuf, (u64, u64, Head)>>,
+    heads: Mutex<HashMap<PathBuf, Kept>>,
+}
+
+/// A rollout's opening as last read: the file it was read from, by its device and inode,
+/// how long that file was then, and whether the opening is whole (`Opening::whole`).
+struct Kept {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    opening: Opening,
+}
+
+/// What a rollout's opening says, and whether more of the file could change it: an
+/// opening is whole once it found the first thing a person asked, or read every record
+/// of the opening ([`OPENING`]) without reaching the end of the file.
+#[derive(Clone)]
+struct Opening {
+    head: Head,
+    whole: bool,
 }
 
 /// What a rollout's opening says.
@@ -273,9 +291,14 @@ impl Store {
         let mut files = Vec::new();
         let sessions = self.root.join("sessions");
         walk(&sessions, 3, &mut files, &mut complete);
-        let own: BTreeSet<PathBuf> = files.iter().filter_map(|f| f.canonicalize().ok()).collect();
+        // A rollout named outside the walk joins it unless the walk found it too; the walk's
+        // own paths are resolved only then, which costs a lookup of every rollout here.
         let named = self.named.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        files.extend(named.into_iter().filter(|file| !own.contains(file)));
+        if !named.is_empty() {
+            let own: BTreeSet<PathBuf> =
+                files.iter().filter_map(|f| f.canonicalize().ok()).collect();
+            files.extend(named.into_iter().filter(|file| !own.contains(file)));
+        }
         let mut by_id: BTreeMap<String, Vec<Filed>> = BTreeMap::new();
         let mut kept = HashMap::new();
         for file in files {
@@ -289,14 +312,23 @@ impl Store {
             let Some(named) = named_id(&file) else {
                 continue;
             };
-            let head = self.opening(&file, &meta);
+            let opening = self.opening(&file, &meta);
+            let head = opening.head.clone();
             let id = head.id.clone().unwrap_or(named);
             let modified = meta
                 .modified()
                 .ok()
                 .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
                 .map_or(0, |at| at.as_millis() as u64);
-            kept.insert(file.clone(), (meta.dev(), meta.ino(), head.clone()));
+            kept.insert(
+                file.clone(),
+                Kept {
+                    dev: meta.dev(),
+                    ino: meta.ino(),
+                    len: meta.len(),
+                    opening,
+                },
+            );
             by_id.entry(id).or_default().push(Filed {
                 file,
                 modified,
@@ -307,21 +339,24 @@ impl Store {
         Threads { by_id, complete }
     }
 
-    /// A rollout's opening, read once per file: Codex appends below it and never
-    /// rewrites it.
-    fn opening(&self, file: &Path, meta: &std::fs::Metadata) -> Head {
-        if let Some((dev, ino, head)) = self
+    /// A rollout's opening, read again only where the file could say more of it: Codex
+    /// appends below the opening and never rewrites it, so a whole opening holds for the
+    /// file it was read from, and one that is not whole holds while the file has not grown.
+    /// Measured 2026-10-10: 767 sub-agent rollouts that never name what a person asked were
+    /// read again on every call, 0.3–1 s each, and a machine's every sweep waited minutes.
+    fn opening(&self, file: &Path, meta: &std::fs::Metadata) -> Opening {
+        if let Some(kept) = self
             .heads
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(file)
-            && *dev == meta.dev()
-            && *ino == meta.ino()
-            && head.asked.is_some()
+            && kept.dev == meta.dev()
+            && kept.ino == meta.ino()
+            && (kept.opening.whole || kept.len == meta.len())
         {
-            return head.clone();
+            return kept.opening.clone();
         }
-        head(file)
+        opening(file)
     }
 }
 
@@ -435,19 +470,27 @@ fn sub_agent(id: &str, conversation: &str, filed: &[Filed]) -> SubAgent {
     }
 }
 
-/// What a rollout's opening says.
-pub fn head(file: &Path) -> Head {
+/// What a rollout's opening says, and whether it is whole: it found what a person asked,
+/// or read all [`OPENING`] records before the file ended.
+fn opening(file: &Path) -> Opening {
     let mut found = Head::default();
     let Ok(open) = File::open(file) else {
-        return found;
+        return Opening {
+            head: found,
+            whole: false,
+        };
     };
     let mut reader = BufReader::new(open);
     let mut line = Vec::new();
+    let mut whole = true;
     for n in 0..OPENING {
         match capped(&mut reader, &mut line, RECORD) {
             Ok(Line::Whole) => {}
             Ok(Line::Long) => continue,
-            Ok(Line::Partial) | Err(_) => break,
+            Ok(Line::Partial) | Err(_) => {
+                whole = false;
+                break;
+            }
         }
         let Ok(record) = serde_json::from_slice::<Value>(&line) else {
             continue;
@@ -479,7 +522,7 @@ pub fn head(file: &Path) -> Head {
             _ => {}
         }
     }
-    found
+    Opening { head: found, whole }
 }
 
 fn meta(payload: &Value, found: &mut Head) {
@@ -981,25 +1024,32 @@ mod tests {
     }
 
     /// A conversation nobody named is titled by what its person first asked, past the
-    /// harness's own preamble.
+    /// harness's own preamble: by the same driver that listed it before they asked, once
+    /// they have, though it keeps what it read of every rollout's opening between calls.
     #[test]
     fn a_conversation_nobody_named_says_what_was_asked_for() {
         let home = home();
         let id = "44444444-4444-4444-8444-444444444444";
+        let file = home.join(format!(
+            "sessions/2026/09/28/rollout-2026-09-28T10-00-00-{id}.jsonl"
+        ));
+        let opened = [
+            meta(id, id, "2026-09-28T10:00:00Z", json!({})),
+            json!({"timestamp": "2026-09-28T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "<environment_context>\n<cwd>/w</cwd>\n</environment_context>"}]}}),
+        ];
+        write(&file, &opened, ago(120));
+        let store = Store::new(home.clone());
+        let listed = store.list(List::default());
+        assert_eq!(listed.sessions[0].title, None, "nothing asked yet");
+        let asked = json!({"timestamp": "2026-09-28T10:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "Fix the flaky login test"}]}});
         write(
-            &home.join(format!(
-                "sessions/2026/09/28/rollout-2026-09-28T10-00-00-{id}.jsonl"
-            )),
-            &[
-                meta(id, id, "2026-09-28T10:00:00Z", json!({})),
-                json!({"timestamp": "2026-09-28T10:00:01Z", "type": "response_item", "payload": {"type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": "<environment_context>\n<cwd>/w</cwd>\n</environment_context>"}]}}),
-                json!({"timestamp": "2026-09-28T10:00:02Z", "type": "response_item", "payload": {"type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": "Fix the flaky login test"}]}}),
-            ],
+            &file,
+            &[opened[0].clone(), opened[1].clone(), asked],
             ago(60),
         );
-        let listed = Store::new(home.clone()).list(List::default());
+        let listed = store.list(List::default());
         assert_eq!(
             listed.sessions[0].title.as_deref(),
             Some("Fix the flaky login test")
