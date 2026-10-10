@@ -3,14 +3,14 @@ name = "steery-driver-codex"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Steery's official driver for Codex: it reads Codex's conversations, plans its setup, and starts, steers and stops Codex turns through Codex's own app server."
+description = "Steery's driver for Codex: it reads Codex's conversations, plans its setup, and starts, steers and stops Codex turns through Codex's own app server."
 
 [dependencies]
-steery-sdk = { path = "../../server/crates/steery-sdk" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v2.0.0" }
 steery-driver-common = { path = "../common" }
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 quick-xml = { version = "0.38", features = ["serialize"] }

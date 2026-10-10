@@ -3,7 +3,7 @@ name = "steery-driver-common"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "What Steery's official drivers share: finding and asking a harness's executable, reading a transcript's records within bounds, following a file only appended to, a transcript that is a tree of records, and a delivery's receipt in a transcript."
+description = "What Steery's drivers share: finding and asking a harness's executable, reading a transcript's records within bounds, following a file only appended to, a transcript that is a tree of records, and a delivery's receipt in a transcript."
 
 [dependencies]
 serde_json = "1"

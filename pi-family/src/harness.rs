@@ -26,6 +26,24 @@ impl Harness {
         }
     }
 
+    /// Its name as a person reads it.
+    pub fn label(self) -> &'static str {
+        self.id()
+    }
+
+    /// Its name on a tile.
+    pub fn short(self) -> &'static str {
+        self.id()
+    }
+
+    /// Its colour on a tile.
+    pub fn tint(self) -> &'static str {
+        match self {
+            Self::Omp => "#6e62a8",
+            Self::Pi => "#2e8c80",
+        }
+    }
+
     /// The package its processes run from, as a path component of a JavaScript runtime's
     /// argument.
     fn package(self) -> &'static str {

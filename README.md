@@ -2,15 +2,17 @@
 
 A driver connects [Steery](https://steery.dev) to one harness: an agent product a person
 runs conversations in. The Steery runtime starts a driver as a child process and speaks the
-program protocol to it, JSON-RPC 2.0 over standard input and output (`specs/PROTOCOL.md` in
-Steery's repository); the driver reads the harness's conversations, plans what setting it up
+program protocol to it, JSON-RPC 2.0 over standard input and output (`PROTOCOL.md` in
+[steery-dev/sdk](https://github.com/steery-dev/sdk)); the driver reads the harness's conversations, plans what setting it up
 writes, and says how to start, read and resume a turn. It decides nothing and writes nothing
 of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers version 1 of the program protocol. The official ones below ship in Steery's release
-archive, beside `steery`, each built from this repository at the commit `programs.lock` in
-Steery's repository names, and update with it.
+answers version 2 of the program protocol. Steery adds the drivers below the way it adds any
+program: from this repository's releases, each a prebuilt executable per target
+(`steery programs add https://github.com/steery-dev/drivers`, which Steery's installer
+runs). Everything a person sees of a driver, its label, its short name, its tint and its
+mark, is what its `initialize` says.
 
 | Driver | Harness | Crate | Levels |
 |---|---|---|---|
@@ -45,48 +47,49 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 ## Building
 
-The SDK and the protocol live in Steery's own repository. Every crate names the SDK by path,
-`steery-sdk = { path = "../../server/crates/steery-sdk" }`, so check Steery's repository out
-beside this one as `server`:
+The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
+Every crate names the SDK by git, at a tag,
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v2.0.0" }`, and pins its
+toolchain in `rust-toolchain.toml`:
 
 ```sh
-git clone https://github.com/steery-dev/server
 git clone https://github.com/steery-dev/drivers
 cd drivers/pi-family && cargo build
 cargo test
 ```
 
-A release builds each official driver the same way, from its own crate, with `--locked` and
-the `ship` profile of Steery's `Cargo.toml` (`deploy/compile-cli.sh` in Steery's
-repository):
-
-```sh
-cargo build --profile ship --locked --config <ship profile> \
-  --manifest-path pi-family/Cargo.toml --bin steery-driver-omp
-```
+`./release.sh <tag>` builds every driver with `--release --locked` for each target Steery
+runs on, `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu` (the Linux builds linking glibc 2.30 at most), with
+`cargo zigbuild`, into `dist/<target>/`. It then packs them into `dist/release/` with
+`steery programs pack --release <tag> --out dist/release <target>=dist/<target>…`: one
+archive per driver and target and the manifest, `steery-programs.json` (PROTOCOL.md §7.1).
+With `--publish` it makes the GitHub release `<tag>` of those files (`gh release create`);
+with `--no-pack` it stops after building. It needs `cargo-zigbuild`, `zig`, the four targets
+(`rustup target add`), and `steery` on `PATH` or named by `STEERY`.
 
 ## Checking a driver
 
 ```sh
-steery driver test target/debug/steery-driver-omp
-steery driver test target/debug/steery-driver-pi
+steery programs test target/debug/steery-driver-omp
+steery programs test target/debug/steery-driver-pi
 ```
 
-`steery driver test <command> [args…] [--setting NAME[=VALUE]]` starts the driver and checks
-what it says it is, the methods that read and change nothing, an id sent twice, a method it
-does not have, and its shutdown, one line per check; it exits 0 only when every one passes.
-A read answered with a refusal word its method lists is an answer. `--setting NAME=VALUE`
-passes a setting to `initialize`, and `--setting NAME` takes its value from the environment,
-keeping a secret off the command line; a method that needs a required setting not given is
-skipped. `models` asks the harness itself, so the harness must be on `PATH` for that check
-to pass. Each crate's own `cargo test` covers what it reads and writes.
+`steery programs test [--setting NAME[=VALUE]]… <command> [args…]` starts the driver and
+checks what it says it is, the methods that read and change nothing, an id sent twice, a
+method it does not have, and its shutdown, one line per check; it exits 0 only when every
+one passes. A read answered with a refusal word its method lists is an answer.
+`--setting NAME=VALUE` passes a setting to `initialize`, and `--setting NAME` takes its value
+from the environment, keeping a secret off the command line; a method that needs a required
+setting not given is skipped. `models` asks the harness itself, so the harness must be on
+`PATH` for that check to pass. Each crate's own `cargo test` covers what it reads and writes.
 
 ## Writing a driver
 
 A driver for a harness Steery does not ship is a program like these. `pi-family/` is the
 worked example; copy it and keep its shape (the layout is below, under omp and pi).
 
-- **Its crate** depends on `steery-sdk` by path as above, and on `steery-driver-common` by
+- **Its crate** depends on `steery-sdk` by git as above, and on `steery-driver-common` by
   path where it keeps a tree, follows a file or reads a receipt (in this repository
   `../common`; copied elsewhere, beside it), with `tokio` for its runtime and `serde_json`
   for the parameters, and declares an empty `[workspace]` so it builds alone.
@@ -96,7 +99,8 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
   each one, and gives the notifier for what the driver says unasked.
 - **`initialize`** (`Program::initialize` in `src/lib.rs`) refuses a runtime that does not
   offer `steery_sdk::PROTOCOL`, keeps the `home` and `config` it is given, and answers
-  `wire::Initialized`: `program` (`id`, `kind: Harness`, `release`, `label`, `short`),
+  `wire::Initialized`: `program` (`id`, `kind: Harness`, `release`, `label`, `short`, and
+  optionally `tint` and `mark`, what a person sees of it),
   `harness` (`HarnessInfo` from `src/harness.rs`: its levels, the harness's minimum release,
   how it signs in, its facts, its hooks and its door; PROTOCOL.md §3.1), no `machine`, and
   the settings it needs (none here; §3.4).
@@ -113,63 +117,33 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
   `pi-family/plugin/` and `setup/plan` installs, speaks the plugin door, version 1 (§4.4),
   to the runtime itself, and the driver has no live methods.
 
-## Adding a driver to an install
+## Adding a driver
 
-An official driver ships in Steery's archive, beside `steery`. Any other is added with
-`steery driver add`:
+A driver is added as every program is, Steery's own included (PROTOCOL.md §7.2):
 
 ```sh
-steery driver add <source> [--crate <dir>] [--setting NAME[=VALUE]]… [--wait-secs <n>]
-steery driver add https://github.com/steery-dev/drivers#<rev> --crate pi-family
+steery programs add https://github.com/steery-dev/drivers
+steery programs add https://github.com/me/my-harness@v0.1.0 --setting MY_HARNESS_TOKEN
 ```
 
-`<source>` is an executable's path; a folder with a `Cargo.toml`, built there with
-`cargo build --release --locked` (refused without a `Cargo.lock` at its workspace root, which
-every crate here has); or a git repository's URL (one with `://`, or `git@host:`), with an
-optional `#<rev>` (a branch, tag or commit), cloned to `<config>/programs/src/<id>` and built
-the same way. `--crate` names the crate's folder inside the repository. The official ids,
-`omp`, `pi`, `claude-code` and `codex`, are refused, so a fork of a crate here must answer `initialize` with an id of its
-own.
+`<source>` is a GitHub repository (its latest release, followed by `steery programs
+update`, or `@<tag>` for that one), a release's manifest, `steery-programs.json`, by URL or
+path, one program's archive, or a built `steery-driver-<id>` itself. Publish your own
+driver the way this repository does: build it for each target, pack it with
+`steery programs pack`, and make the release of those files. Nothing is built on the
+computer it is added to.
 
-What runs is a copy, `<config>/programs/bin/<id>-<the first 12 hex of its digest>`. A
-driver's settings (PROTOCOL.md §3.4), an API key or the account it acts as, are given here
-once: `--setting NAME=VALUE`, or `--setting NAME` to take the value from the environment of
-the `steery driver add` you run; a secret one not given is typed at that terminal,
-unechoed, and any other not given is asked on the card. Before anything is asked, the copy
-is started and checked as `steery driver test` checks it, with those settings: an official
-id, a kind other than a driver's, an `initialize` that fails or speaks another protocol, a
-setting it does not declare, or any failed check refuses it, and nothing is written. Then
-one card on the person's phone, "Add the driver <label>", names it, its source, release,
-digest, what it provides and each setting it declares, with whether it was given (never a
-secret's value). Only a verified Go writes its record, `<config>/drivers/<id>.json`, which
-only the person's user can read:
+Each program's build for this computer is fetched, checked against its sha256, copied into
+Steery's programs folder, started and checked as `steery programs test` checks it, with the
+settings given. A driver's settings (PROTOCOL.md §3.4), an API key or the account it acts
+as, are given here once: `--setting NAME=VALUE`, or `--setting NAME` to take the value from
+the environment; a secret one not given is typed at the terminal, unechoed. Steery prints
+what it will add and asks once at the terminal; `--yes` is that answer anywhere else. The
+runtime sends the settings in each `initialize` it sends the driver: it runs as a service
+(launchd, systemd) whose environment holds none of the person's shell variables, so a
+driver reads nothing it needs from its environment.
 
-```json
-{"id": "my-harness", "kind": "harness",
- "command": "<config>/programs/bin/my-harness-<12 hex>", "args": [],
- "source": "https://github.com/me/my-harness#<commit>",
- "release": "0.1.0", "digest": "sha256:<64 lowercase hex>",
- "settings": {"MY_HARNESS_TOKEN": "…"}}
-```
-
-The runtime sends `settings` in each `initialize` it sends the driver. That is how a driver
-gets what its harness needs: the runtime runs as a service (launchd, systemd) whose
-environment holds none of the person's shell variables, so a driver reads nothing it needs
-from its environment.
-
-`<config>` is this computer's Steery folder, `$XDG_CONFIG_HOME/steery`, else
-`~/.config/steery`; every machine this computer runs reads the records there, a sandbox
-machine's runtime (`steery run --machine`) too. `digest` is `sha256:` and the SHA-256 of the
-file `command` names, in lowercase hex. `source` is the words that add it again: the
-absolute path, the absolute folder, or `<url>#<commit> [--crate <dir>]`, pinned to the
-commit built. The command exits 0 once added, 1 on No or an answer that does not verify,
-and 2 with no answer within `--wait-secs` (by default and at most 3600).
-
-The runtime checks the digest before every start: a driver whose copy changed on disk is
-not started, and reads Missing with "add it again with `steery driver add <source>`".
-Adding it again keeps each setting given before that is not given again.
-`steery driver remove <id>` deletes the record, its copy and its clone; an official id with
-no record is refused.
+`steery programs remove <id>` removes it.
 
 ## omp and pi: `pi-family/`
 
@@ -303,7 +277,7 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
 
 ```sh
 cd claude-code && cargo build
-steery driver test target/debug/steery-driver-claude-code
+steery programs test target/debug/steery-driver-claude-code
 cargo test
 ```
 
@@ -373,7 +347,7 @@ Build and check it, with Codex on `PATH`:
 
 ```sh
 cd codex && cargo build
-steery driver test target/debug/steery-driver-codex
+steery programs test target/debug/steery-driver-codex
 cargo test
 ```
 ## License
