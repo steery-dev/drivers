@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use steery_driver_common::follow::Followed;
@@ -52,6 +52,7 @@ pub struct Store {
     trees: Trees<Entries>,
     titles: Titles,
     starts: Starts,
+    listings: Listings,
 }
 
 /// Every transcript filed as a conversation, by the id it is filed under.
@@ -72,6 +73,7 @@ impl Store {
             trees: Trees::default(),
             titles: Titles::default(),
             starts: Starts::default(),
+            listings: Listings::default(),
         }
     }
 
@@ -228,10 +230,9 @@ impl Store {
             Err(_) => complete = false,
         }
         let own = sessions.canonicalize().ok();
-        let mut seen: BTreeSet<PathBuf> = folders
-            .iter()
-            .filter_map(|folder| folder.canonicalize().ok())
-            .collect();
+        // Resolved only once a folder outside the harness's own is to be told apart from
+        // them: a `realpath` of each of its folders cost every read 1 ms on a Mac with 104.
+        let mut seen: Option<BTreeSet<PathBuf>> = None;
         let chosen = self
             .chosen
             .clone()
@@ -242,7 +243,16 @@ impl Store {
         let named = self.named.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for folder in chosen.chain(named) {
             let filed_by_harness = own.is_some() && folder.parent() == own.as_deref();
-            if filed_by_harness || companion(&folder).is_file() || !seen.insert(folder.clone()) {
+            if filed_by_harness || companion(&folder).is_file() {
+                continue;
+            }
+            let seen = seen.get_or_insert_with(|| {
+                folders
+                    .iter()
+                    .filter_map(|folder| folder.canonicalize().ok())
+                    .collect()
+            });
+            if !seen.insert(folder.clone()) {
                 continue;
             }
             folders.push(folder);
@@ -254,24 +264,14 @@ impl Store {
         let (folders, mut complete) = self.folders();
         let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for folder in folders {
-            let Ok(entries) = std::fs::read_dir(&folder) else {
+            let Some((files, whole)) = self.listings.files(&folder) else {
                 complete = false;
                 continue;
             };
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    complete = false;
-                    continue;
-                };
-                let path = entry.path();
-                // A link is never read: it could name a file anywhere.
-                if !entry.file_type().is_ok_and(|kind| kind.is_file())
-                    || path.extension().is_none_or(|ext| ext != "jsonl")
-                {
-                    continue;
-                }
-                if let Some(id) = id_of(&path) {
-                    by_id.entry(id.to_owned()).or_default().push(path);
+            complete &= whole;
+            for path in files.iter() {
+                if let Some(id) = id_of(path) {
+                    by_id.entry(id.to_owned()).or_default().push(path.clone());
                 }
             }
         }
@@ -480,21 +480,15 @@ impl Store {
     /// The sub-agents `starter` started, filed in the folder named for its transcript, and
     /// those they started in turn, `lead` being the sub-agent `starter` is.
     fn visit(&self, starter: &Path, lead: Option<&str>, depth: usize, out: &mut Vec<SubAgent>) {
-        let Ok(entries) = std::fs::read_dir(starter.with_extension("")) else {
+        let folder = starter.with_extension("");
+        let Some((files, _)) = self.listings.files(&folder) else {
             return;
         };
-        let filed: Vec<(PathBuf, String, Head)> = entries
-            .flatten()
-            .filter_map(|entry| {
-                let path = entry.path();
-                if !entry.file_type().is_ok_and(|kind| kind.is_file())
-                    || path.extension().is_none_or(|ext| ext != "jsonl")
-                {
-                    return None;
-                }
+        let filed: Vec<(&PathBuf, String, Arc<SubHead>)> = files
+            .iter()
+            .filter_map(|path| {
                 let job = path.file_stem()?.to_str()?.to_owned();
-                let head = head(&path);
-                head.parent.is_some().then_some((path, job, head))
+                Some((path, job, self.listings.head(&folder, path)?))
             })
             .collect();
         if filed.is_empty() {
@@ -504,7 +498,7 @@ impl Store {
             .starts
             .jobs(starter, filed.iter().map(|(_, job, _)| job.as_str()));
         for ((path, job, head), started) in filed.into_iter().zip(jobs) {
-            let external_id = head.id.unwrap_or_else(|| job.clone());
+            let external_id = head.id.clone().unwrap_or_else(|| job.clone());
             let (started_by, task) =
                 started.map_or((None, None), |started| (Some(started.call), started.task));
             out.push(SubAgent {
@@ -517,9 +511,108 @@ impl Store {
                 transcripts: vec![path.clone()],
             });
             if depth < SUB_AGENT_DEPTH {
-                self.visit(&path, Some(&external_id), depth + 1, out);
+                self.visit(path, Some(&external_id), depth + 1, out);
             }
         }
+    }
+}
+
+/// How old a folder's change stamp must be before what was read of it is kept: a stamp
+/// as coarse as a whole second (HFS+, some network folders) could hide a file added in
+/// the tick it was listed in.
+const SETTLED: Duration = Duration::from_secs(2);
+
+/// The transcripts in each folder read, as they stood when it last changed, and the heads
+/// of its sub-agents' transcripts: a folder is listed again, and its heads read again, only
+/// once its own change stamp moved - a transcript added, removed, renamed or made anew in
+/// it - and never while that stamp is younger than [`SETTLED`]. A transcript's `session`
+/// record is written once, where it starts. Every `sessions/read` finds its conversation
+/// among all of them, and a sub-agent's among its siblings: measured 2026-10-10 on a Mac
+/// with 104 omp folders, 2,798 transcripts and 755 sub-agents read every sweep, that
+/// listing and those heads made each read 12 ms and the runtime's sweep wait 8-16 s.
+#[derive(Default)]
+struct Listings {
+    kept: Mutex<HashMap<PathBuf, Listing>>,
+}
+
+struct Listing {
+    changed: SystemTime,
+    files: Arc<[PathBuf]>,
+    /// Each sub-agent's head read from its file, by the file.
+    heads: HashMap<PathBuf, Arc<SubHead>>,
+}
+
+/// What a sub-agent's `session` record says of it.
+struct SubHead {
+    id: Option<String>,
+    created_at: Option<u64>,
+}
+
+impl Listings {
+    /// The `.jsonl` files in `folder`, never a link, and whether every entry was read;
+    /// `None` where it cannot be read.
+    fn files(&self, folder: &Path) -> Option<(Arc<[PathBuf]>, bool)> {
+        // Stamped before it is read: a change while it is read moves the stamp past this.
+        let changed = std::fs::metadata(folder).and_then(|m| m.modified()).ok()?;
+        if let Some(listing) = self.lock().get(folder)
+            && listing.changed == changed
+        {
+            return Some((listing.files.clone(), true));
+        }
+        let mut whole = true;
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(folder).ok()? {
+            let Ok(entry) = entry else {
+                whole = false;
+                continue;
+            };
+            let path = entry.path();
+            // A link is never read: it could name a file anywhere.
+            if entry.file_type().is_ok_and(|kind| kind.is_file())
+                && path.extension().is_some_and(|ext| ext == "jsonl")
+            {
+                files.push(path);
+            }
+        }
+        let files: Arc<[PathBuf]> = files.into();
+        let mut kept = self.lock();
+        if whole && changed.elapsed().is_ok_and(|age| age >= SETTLED) {
+            let listing = Listing {
+                changed,
+                files: files.clone(),
+                heads: HashMap::new(),
+            };
+            kept.insert(folder.to_owned(), listing);
+        } else {
+            kept.remove(folder);
+        }
+        Some((files, whole))
+    }
+
+    /// The head of `file` in `folder`, where it is a sub-agent's: its header names who
+    /// started it (`parentSession`).
+    fn head(&self, folder: &Path, file: &Path) -> Option<Arc<SubHead>> {
+        if let Some(head) = self
+            .lock()
+            .get(folder)
+            .and_then(|listing| listing.heads.get(file))
+        {
+            return Some(head.clone());
+        }
+        let read = head(file);
+        read.parent.as_ref()?;
+        let found = Arc::new(SubHead {
+            id: read.id,
+            created_at: read.created_at,
+        });
+        if let Some(listing) = self.lock().get_mut(folder) {
+            listing.heads.insert(file.to_owned(), found.clone());
+        }
+        Some(found)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Listing>> {
+        self.kept.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
