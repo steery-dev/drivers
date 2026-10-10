@@ -1,10 +1,11 @@
 //! What Steery's official drivers share, each keeping only what its own harness writes:
 //! finding and asking the harness's executable ([`program`]), reading a transcript's
 //! lines within bounds ([`lines`]), following a file the harness only appends to
-//! ([`follow`]), and a transcript that is a tree of records, read along its path in
-//! batches ([`tree`]).
+//! ([`follow`]), a transcript that is a tree of records, read along its path in batches
+//! ([`tree`]), and a delivery's receipt in a transcript ([`receipt`]).
 
 pub mod follow;
 pub mod lines;
 pub mod program;
+pub mod receipt;
 pub mod tree;

@@ -87,9 +87,9 @@ A driver for a harness Steery does not ship is a program like these. `pi-family/
 worked example; copy it and keep its shape (the layout is below, under omp and pi).
 
 - **Its crate** depends on `steery-sdk` by path as above, and on `steery-driver-common` by
-  path where it keeps a tree or follows a file (in this repository `../common`; copied
-  elsewhere, beside it), with `tokio` for its runtime and `serde_json` for the parameters,
-  and declares an empty `[workspace]` so it builds alone.
+  path where it keeps a tree, follows a file or reads a receipt (in this repository
+  `../common`; copied elsewhere, beside it), with `tokio` for its runtime and `serde_json`
+  for the parameters, and declares an empty `[workspace]` so it builds alone.
   Its binary is named `steery-driver-<id>`; `src/bin/omp.rs` is one line,
   `steery_driver_pi_family::serve(Harness::Omp)`, which calls
   `steery_sdk::serve(|_notifier| Driver::new(harness))`. The SDK reads requests, answers
@@ -104,8 +104,9 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
   module that answers it, its parameters read with `steery_sdk::params` and its answer
   given with `steery_sdk::result`: observe (`setup/plan`, `sessions/list`,
   `sessions/locate`, `sessions/read`, `hook/read`; §4.1), drive (`held`, `idle`, `models`,
-  `start`, `turn/read`, `reader`, `terminal`; §4.2), and any other answers `Error::Unknown`.
-  A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
+  `start`, `turn/read`, `receipt/*`, `reader`, `terminal`; §4.2), and any other answers
+  `Error::Unknown`. A refusal is `Error::refused` with one of the protocol's words
+  (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own (`picks`, `keeps`) answers `say`,
   `pick`, `stop` and `recap` in its driver, as `claude-code` and `codex` do. omp and pi have
   none, so their door is `plugin`: Steery's plugin, which this repository keeps in
@@ -200,7 +201,8 @@ What each driver does:
   Where omp and pi are both installed and share one folder, neither is set up.
 - **Moments** (`hook/read`). The plugin forwards each moment the harness gives it over the
   door, and the driver reads it as a Moment.
-- **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `reader`, `terminal`).
+- **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
+  `terminal`).
   - `held`: no registry, so the runtime looks for processes. In pi it also looks for a
     stray process, since a pi without the plugin holds no file open.
   - `models`: omp's comes from `omp models --json`, with its default from `config.yml`.
@@ -210,11 +212,13 @@ What each driver does:
     passes a model to the plugin as well (`--steery-model`), which refuses one pi does not
     run exactly.
   - `turn/read`: reads the run's JSON lines and the harness's own refusals.
+  - `receipt/mark`, `receipt/find`: the person's message carrying the delivery marker, in
+    the transcript past a mark; words the door hands over mid-turn go in at the next tool.
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
-The live methods (`say`, `pick`, `stop`, `recap`, `receipt/*`) are the plugin door's
-(PROTOCOL.md §4.4), which the runtime speaks itself, so the drivers have none.
+The live methods (`say`, `pick`, `stop`, `recap`) are the plugin door's (PROTOCOL.md
+§4.4), which the runtime speaks itself, so the drivers have none.
 
 ### Layout: a template for a harness Steery does not ship
 
@@ -231,7 +235,7 @@ To connect another harness, copy `pi-family/` and keep its shape:
 | `src/calls.rs` | A tool call → `Call`: its group, MCP server, Steery's own tool, the questions it asks. |
 | `src/hooks.rs` | `hook/read`: a hook's document → `Moment`. |
 | `src/models.rs` | `models`: what the harness lists and the files whose change changes it. |
-| `src/drive.rs` | `held`, `idle`, `start`, `turn/read`, `reader`, `terminal`. |
+| `src/drive.rs` | `held`, `idle`, `start`, `turn/read`, `receipt/*`, `reader`, `terminal`. |
 | `src/setup.rs` | `setup/plan`: the entries, each with what it carries. |
 | `plugin/` | Steery's plugin for harnesses whose door is `plugin`: the extension, its loader and the form rule, embedded in the binary at build time. |
 

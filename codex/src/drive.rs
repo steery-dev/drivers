@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
     Act, Beyond, Door, Ended, Event, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look,
     Looked, Marked, Model, Models, Pick, Picked, Read, ReadAs, Reader, ReaderPlan, ReaderRead,
@@ -404,7 +405,7 @@ impl Drive {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let queue = mark.get("queue").and_then(Value::as_bool) == Some(true);
-        let marker = format!("steery-delivery:{}", find.delivery);
+        let marker = format!("{DELIVERED}{}", find.delivery);
         let codex = binary()?;
         let found = tokio::time::timeout(std::time::Duration::from_secs(18), async {
             // The owner may have gone after the words went: a read of the same home proves
@@ -845,7 +846,7 @@ pub fn turn_line(read: TurnRead) -> TurnLine {
 /// Whether a line is the person input carrying the delivery marker, as the app server
 /// says it took it (`item/started` of a `userMessage`).
 fn took(line: &Value, delivery: &str) -> bool {
-    let marker = format!("steery-delivery:{delivery}");
+    let marker = format!("{DELIVERED}{delivery}");
     matches!(
         line.get("method").and_then(Value::as_str),
         Some("item/started" | "item/completed")
@@ -856,7 +857,7 @@ fn took(line: &Value, delivery: &str) -> bool {
             .into_iter()
             .flatten()
             .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .any(|text| native::marked(text, &marker))
+            .any(|text| marked(text, &marker))
 }
 
 /// `turn/completed` is how each turn ends: `completed`, `failed` with the error the app

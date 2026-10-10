@@ -17,11 +17,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steery_driver_common::receipt::{self, DELIVERED, End, marked};
 use steery_sdk::wire::harness::{
-    Act, Ended, Execution, Held, HeldBy, Holder, Launch, Look, Looked, ReadAs, Reader, ReaderFile,
-    ReaderPlan, ReaderTools, Sample, Sampled, Start, Stdin, Stream, Terminal, TerminalCommand,
-    TurnLine, TurnRead, TurnState,
+    Act, Ended, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Marked, ReadAs, Reader,
+    ReaderFile, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample, Sampled, Start,
+    Stdin, Stream, Terminal, TerminalCommand, TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
@@ -254,9 +256,6 @@ fn named(line: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Steery's marker for the reference it puts in a turn's words.
-const DELIVERED: &str = "steery-delivery:";
-
 /// The receipt of the turn's words: the person's message going into the conversation
 /// (`message_end`, which the harness writes to its transcript as it says it). Words that
 /// carry a `delivery` are taken only by a message naming it whole — `aim.<throw>.1` is not
@@ -269,29 +268,86 @@ fn taken(line: &Value, delivery: Option<&str>) -> bool {
     let Some(message) = line.get("message") else {
         return false;
     };
+    match delivery {
+        None => message.get("role").and_then(Value::as_str) == Some("user"),
+        Some(delivery) => says(message, &format!("{DELIVERED}{delivery}")),
+    }
+}
+
+/// Whether `message` is the person's and its words carry `marker` whole: its text, or one
+/// of its text parts.
+fn says(message: &Value, marker: &str) -> bool {
     if message.get("role").and_then(Value::as_str) != Some("user") {
         return false;
     }
-    let Some(delivery) = delivery else {
-        return true;
-    };
-    let text = match message.get("content") {
-        Some(Value::String(text)) => text.clone(),
+    match message.get("content") {
+        Some(Value::String(text)) => marked(text, marker),
         Some(Value::Array(parts)) => parts
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
             .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => return false,
+            .any(|text| marked(text, marker)),
+        _ => false,
+    }
+}
+
+/// A point in a conversation's one transcript: the file, its identity and the end of its
+/// last whole record.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Mark {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    bytes: u64,
+}
+
+/// `receipt/mark`: where the conversation's one transcript ends now, at its last whole
+/// record. Words the plugin door hands over while a turn runs go in at the harness's next
+/// tool boundary, often after the door stopped waiting; the transcript says whether they
+/// did. No owner apart from the conversation takes them.
+pub fn mark(store: &Store, mark: ReceiptMark) -> Result<Marked, Error> {
+    let unsupported = |line: String| Error::refused(refusal::SELECTION_UNSUPPORTED, line);
+    let path = store.find(&mark.external_id).map_err(|e| match e {
+        Error::Refused { line, .. } => unsupported(line.unwrap_or_default()),
+        other => other,
+    })?;
+    let end = receipt::end(&path).map_err(|e| unsupported(format!("{}: {e}", path.display())))?;
+    let mark = Mark {
+        dev: end.dev,
+        ino: end.ino,
+        bytes: end.bytes,
+        path,
     };
-    let marker = format!("{DELIVERED}{delivery}");
-    text.match_indices(&marker).any(|(at, _)| {
-        text[at + marker.len()..]
-            .chars()
-            .next()
-            .is_none_or(|next| !(next.is_ascii_alphanumeric() || matches!(next, '.' | '-' | '_')))
+    Ok(Marked {
+        mark: serde_json::to_string(&mark).map_err(|e| Error::invalid(e.to_string()))?,
     })
+}
+
+/// `receipt/find`: the person's message carrying the delivery marker, among the whole
+/// records the transcript gained past the mark. Two carrying it is refused.
+pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
+    let mark: Mark = serde_json::from_str(&find.mark)
+        .map_err(|_| Error::invalid("the mark is no mark of this driver's"))?;
+    let end = End {
+        dev: mark.dev,
+        ino: mark.ino,
+        bytes: mark.bytes,
+    };
+    let found = receipt::found(&mark.path, &end, &find.delivery, input_carries)
+        .map_err(|line| Error::refused(refusal::REFUSED, line))?;
+    Ok(Receipt { found, owner: None })
+}
+
+/// Whether a transcript record is the person's message whose words carry `marker` whole:
+/// `{"type":"message","message":{"role":"user",…}}`, as both harnesses write the words
+/// the plugin door or a turn's standard input hands them. Nothing else they write is the
+/// person's: custom messages, tool results, compactions.
+fn input_carries(record: &Value, marker: &str) -> bool {
+    record.get("type").and_then(Value::as_str) == Some("message")
+        && record
+            .get("message")
+            .is_some_and(|message| says(message, marker))
 }
 
 /// Every line after a run's `agent_end` but one that starts or ends the run again: what

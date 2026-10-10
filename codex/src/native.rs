@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use steery_driver_common::receipt::marked;
 
 use crate::appserver::{AppServer, Failed};
 
@@ -300,32 +301,9 @@ fn carries(turn: &Value, marker: &str) -> Result<bool, String> {
     }))
 }
 
-/// Whether `text` holds the delivery marker whole: the character after it is no letter,
-/// digit, `.`, `-` or `_` (PROTOCOL.md §3.3).
-pub fn marked(text: &str, marker: &str) -> bool {
-    text.match_indices(marker).any(|(at, _)| {
-        text[at + marker.len()..]
-            .chars()
-            .next()
-            .is_none_or(|next| !(next.is_alphanumeric() || matches!(next, '.' | '-' | '_')))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_delivery_marker_matches_only_whole() {
-        assert!(marked("words steery-delivery:abc", "steery-delivery:abc"));
-        assert!(marked("steery-delivery:abc) more", "steery-delivery:abc"));
-        assert!(!marked("steery-delivery:abcd", "steery-delivery:abc"));
-        assert!(!marked("steery-delivery:abc.1", "steery-delivery:abc"));
-        assert!(marked(
-            "steery-delivery:abc-x steery-delivery:abc",
-            "steery-delivery:abc"
-        ));
-    }
 
     #[test]
     fn an_owner_token_says_itself_back() {

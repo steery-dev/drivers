@@ -139,6 +139,10 @@ impl Program for Driver {
                 drive::start(self.store()?, &self.catalog, steery_sdk::params(params)?).await?,
             ),
             method::TURN_READ => result(self.runs.read(harness, steery_sdk::params(params)?)),
+            method::RECEIPT_MARK => {
+                result(drive::mark(self.store()?, steery_sdk::params(params)?)?)
+            }
+            method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
             method::READER => result(drive::reader(harness, steery_sdk::params(params)?)?),
             method::TERMINAL => result(drive::terminal(
                 &self.place()?.home,
@@ -146,8 +150,8 @@ impl Program for Driver {
                 steery_sdk::params(params)?,
             )?),
             // The moments come over the plugin door, so no hook is a command to answer;
-            // `stop`, `receipt/*`, `say`, `pick` and `recap` are the door's, which the
-            // runtime speaks itself; a reader's output is its answer whole.
+            // `stop`, `say`, `pick` and `recap` are the door's, which the runtime speaks
+            // itself; a reader's output is its answer whole.
             _ => Err(Error::Unknown),
         }
     }

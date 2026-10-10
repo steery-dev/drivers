@@ -3,13 +3,12 @@
 //! the models it runs, and its one-shot reader.
 
 use std::collections::{BTreeMap, HashSet};
-use std::io::{Read as _, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use steery_driver_common::receipt::{self, End};
 use steery_sdk::wire::harness::{
     Act, Beyond, Door, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked,
     Model, Models, ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark,
@@ -43,12 +42,6 @@ const LISTING_KEPT: Duration = Duration::from_secs(2);
 /// The longest `stop` waits for a background session to be gone after `claude stop`,
 /// inside the runtime's bound for it.
 const STOP_WITHIN: Duration = Duration::from_millis(2_500);
-
-/// The most a receipt reads past its mark.
-const RECEIPT_MOST: u64 = 64 * 1024 * 1024;
-
-/// The most of a transcript's end read back for its last whole record.
-const BOUNDARY_MOST: u64 = 1024 * 1024;
 
 /// The Claude app takes a Claude Code conversation in at this address and opens it: the
 /// one Claude Code's own `/desktop` opens.
@@ -336,20 +329,17 @@ pub fn mark(root: &Path, store: &Store, mark: ReceiptMark) -> Result<Marked, Err
         session.transcripts.last().cloned().ok_or_else(|| {
             Error::refused(refusal::SELECTION_UNSUPPORTED, "it has no transcript")
         })?;
-    let unsupported = |e: std::io::Error| {
+    let end = receipt::end(&path).map_err(|e| {
         Error::refused(
             refusal::SELECTION_UNSUPPORTED,
             format!("{}: {e}", path.display()),
         )
-    };
-    let mut file = std::fs::File::open(&path).map_err(unsupported)?;
-    let meta = file.metadata().map_err(unsupported)?;
-    let bytes = boundary(&mut file, meta.len()).map_err(unsupported)?;
+    })?;
     let owner = registry::job(&registry::dir(root), &mark.external_id).and_then(|job| job.token());
     let mark = Mark {
-        dev: meta.dev(),
-        ino: meta.ino(),
-        bytes,
+        dev: end.dev,
+        ino: end.ino,
+        bytes: end.bytes,
         owner,
         path,
     };
@@ -358,82 +348,22 @@ pub fn mark(root: &Path, store: &Store, mark: ReceiptMark) -> Result<Marked, Err
     })
 }
 
-/// The end of the last whole record of the first `len` bytes of `file`.
-fn boundary(file: &mut std::fs::File, len: u64) -> std::io::Result<u64> {
-    let mut end = len;
-    while end > 0 {
-        if len - end >= BOUNDARY_MOST {
-            return Err(std::io::Error::other(
-                "the transcript ends in an oversized unfinished record",
-            ));
-        }
-        let take = end.min(8192);
-        let start = end - take;
-        file.seek(SeekFrom::Start(start))?;
-        let mut block = vec![0u8; usize::try_from(take).map_err(std::io::Error::other)?];
-        file.read_exact(&mut block)?;
-        if let Some(last) = block.iter().rposition(|byte| *byte == b'\n') {
-            return Ok(start + last as u64 + 1);
-        }
-        end = start;
-    }
-    Ok(0)
-}
-
 /// `receipt/find`: the person's input carrying the delivery marker, among the whole
 /// records the transcript gained past the mark. Two carrying it is refused.
 pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
     let mark: Mark = serde_json::from_str(&find.mark)
         .map_err(|_| Error::invalid("the mark is no mark of this driver's"))?;
-    let refused = |line: String| Error::refused(refusal::REFUSED, line);
-    let mut file = std::fs::File::open(&mark.path)
-        .map_err(|e| refused(format!("{}: {e}", mark.path.display())))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| refused(format!("{}: {e}", mark.path.display())))?;
-    if meta.dev() != mark.dev || meta.ino() != mark.ino || meta.len() < mark.bytes {
-        return Err(refused("the transcript was replaced since the mark".into()));
-    }
-    let gained = meta.len() - mark.bytes;
-    if gained > RECEIPT_MOST {
-        return Err(refused(
-            "the transcript grew past what a receipt reads".into(),
-        ));
-    }
-    let mut delta = Vec::new();
-    file.seek(SeekFrom::Start(mark.bytes))
-        .and_then(|_| file.take(gained).read_to_end(&mut delta))
-        .map_err(|e| refused(format!("{}: {e}", mark.path.display())))?;
-    let found = carried(&delta, &find.delivery).map_err(refused)?;
+    let end = End {
+        dev: mark.dev,
+        ino: mark.ino,
+        bytes: mark.bytes,
+    };
+    let found = receipt::found(&mark.path, &end, &find.delivery, input_carries)
+        .map_err(|line| Error::refused(refusal::REFUSED, line))?;
     Ok(Receipt {
         found,
         owner: found.then_some(mark.owner).flatten(),
     })
-}
-
-/// Whether exactly one whole record of `delta` is a person's input carrying the marker
-/// `steery-delivery:<delivery>`; two are an error.
-fn carried(delta: &[u8], delivery: &str) -> Result<bool, String> {
-    let whole = delta
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(&[][..], |last| &delta[..=last]);
-    let marker = format!("steery-delivery:{delivery}");
-    let mut matches = 0;
-    for line in whole
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let record: Value = serde_json::from_slice(line)
-            .map_err(|_| "the transcript has a malformed record".to_owned())?;
-        if input_carries(&record, &marker) {
-            matches += 1;
-        }
-    }
-    match matches {
-        0 | 1 => Ok(matches == 1),
-        _ => Err("two inputs carry the delivery marker".into()),
-    }
 }
 
 /// Whether a record is a person's input whose text carries `marker` whole. Words sent
@@ -452,27 +382,16 @@ fn input_carries(record: &Value, marker: &str) -> bool {
         return false;
     }
     match message.get("content") {
-        Some(Value::String(text)) => whole(text, marker),
+        Some(Value::String(text)) => receipt::marked(text, marker),
         Some(Value::Array(parts)) => parts.iter().any(|part| {
             part.get("type").and_then(Value::as_str) == Some("text")
                 && part
                     .get("text")
                     .and_then(Value::as_str)
-                    .is_some_and(|text| whole(text, marker))
+                    .is_some_and(|text| receipt::marked(text, marker))
         }),
         _ => false,
     }
-}
-
-/// Whether `marker` is in `text` whole: the character after it is no letter, digit, `.`,
-/// `-` or `_`.
-fn whole(text: &str, marker: &str) -> bool {
-    text.match_indices(marker).any(|(at, _)| {
-        text[at + marker.len()..]
-            .chars()
-            .next()
-            .is_none_or(|next| !(next.is_alphanumeric() || matches!(next, '.' | '-' | '_')))
-    })
 }
 
 /// `models`: Claude Code names no models on its command line, and keeps the one this
@@ -813,6 +732,8 @@ mod tests {
             json!({"type": "user", "message": {"role": "user", "content": content}}).to_string()
         };
         let delta = |records: &[String]| format!("{}\n", records.join("\n"));
+        let carried =
+            |delta: &[u8], delivery: &str| receipt::carried(delta, delivery, input_carries);
         assert_eq!(
             carried(
                 delta(&[user(json!("go steery-delivery:d1"))]).as_bytes(),
@@ -859,17 +780,6 @@ mod tests {
             Ok(false),
             "a record not yet ended is left for the next look"
         );
-    }
-
-    #[test]
-    fn a_mark_ends_at_the_last_whole_record() {
-        let dir = crate::registry::tests::Scratch::new("mark");
-        let file = dir.path().join("t.jsonl");
-        std::fs::write(&file, "{\"a\":1}\n{\"b\":2}\n{\"c\":").unwrap();
-        let mut open = std::fs::File::open(&file).unwrap();
-        let len = open.metadata().unwrap().len();
-        assert_eq!(boundary(&mut open, len).unwrap(), 16);
-        assert_eq!(boundary(&mut open, 0).unwrap(), 0);
     }
 
     /// Every switch the reader claims is passed, and nothing that writes or skips a
