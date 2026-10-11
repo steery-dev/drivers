@@ -366,7 +366,7 @@ type Api = {
 /**
  * What a copy answers an ask of the runtime's (§4.4): `ok` with what the op says, or
  * `refused` with one of the op's refusal words — `no-answer` (words handed to the harness
- * and not seen taken, so they may yet be in; a turn still running after a stop),
+ * and not yet seen written into the conversation, so on their way in; a turn still running after a stop),
  * `refused` (the harness threw, or the copy takes no such ask), `model-missing`,
  * `selection-unsupported` (a harness call this copy lacks), `harness-busy`, `other-turn`
  * when a stop names a say whose turn is not the one running, or `ending` when the
@@ -2046,28 +2046,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * The harness took these words as the person's next input, or queued them into the turn
-   * running now: the ones handed over are heard.
+   * The harness wrote these words into the conversation as the person's message: the ones
+   * handed over are in. The only proof a say is answered `ok` on ([`deliver`]).
    */
   const taken = (text: unknown) => {
     if (typeof text !== "string") return;
     const words = text.trim();
     for (const one of pending.filter((one) => one.handed && one.words === words)) one.answer({ ok: {} });
-  };
-
-  /**
-   * omp took a batch off its queue to run — its messages' text joined by blank lines, as
-   * `before_agent_start` says it — so the handed words among them are heard. omp's first
-   * turn in a process can wait seconds for its MCP tools before its words reach the
-   * transcript; this is said before that wait. pi's words are heard at its `input`
-   * ([`deliver`]).
-   */
-  const dequeued = (said: unknown) => {
-    if (HARNESS !== "omp" || typeof said !== "string") return;
-    const batch = `\n\n${said.trim()}\n\n`;
-    for (const one of pending.filter((one) => one.handed && batch.includes(`\n\n${one.words}\n\n`))) {
-      one.answer({ ok: {} });
-    }
   };
 
   /**
@@ -2600,7 +2585,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    *
    * Neither harness says so through `sendUserMessage`: pi's returns nothing and reports a
    * refusal to its own error handlers, omp's settles only once a turn the words started
-   * has run to its end. So the words are heard when the harness is seen taking them.
+   * has run to its end. So the words are in only once the harness writes them into the
+   * conversation as the person's message (`message_end`, [`taken`]); being queued, taken
+   * off a queue (omp's `before_agent_start`) or passed through pi's `input` proves
+   * nothing, since what lies after can still drop them. Kept by `id` until they go in
+   * ([`says`]), so the turn they start is known as Steery's.
    *
    * Idle, both harnesses ask for a model and its credentials before they start a turn, and
    * drop the words where either is missing: pi out of sight, omp by throwing before it
@@ -2608,30 +2597,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * would drop are refused `model-missing` with nothing handed over; omp throwing anyway
    * before it took them is refused the same.
    *
-   * pi: at its `input` event for words of an extension's, idle or while a turn runs (pi
-   * 1.0.0 `AgentSession.prompt`). While a turn runs, pi queues them past that event with
-   * nothing left to check. Idle, pi checks the model and its credentials right after it,
-   * and this door hands idle words only once it asked pi the same questions
-   * ([`unstartable`]); what lies between `input` and the transcript can be long — pi's MCP
-   * startup waits up to 10 s for its servers on a runtime's first prompt, Steery's own
-   * paragraph waits, pi may compact first — and says nothing more of the words. What is
-   * left: a credential refresh that fails after `input`, or a compaction before the prompt
-   * that fails, drops words already heard. pi takes words steered into a turn only once
-   * every tool call running now has ended, one message at a step, and words queued for
-   * after it only once it ends: heard while a long call runs, they go in at its end,
-   * however long that is. omp: taken off its queue to run (`before_agent_start`), going into its
-   * transcript, or — while a turn runs — its queue going from empty to holding them. Kept
-   * by `id` until they go in ([`says`]), so the turn they start is known as Steery's.
-   *
-   * A one-shot run is the exception to both queues: its process ends with its run, and
-   * what its queue still holds then dies with it — an omp run whose request failed under
-   * a person's steered Retry exited with that Retry still queued, and it never went in
-   * (2026-10-05). So a one-shot copy says words are in only once they are: taken off the
-   * queue to run (`before_agent_start`, omp) or written as the person's message
-   * (`message_end`); pi's `input` and omp's queue holding them are not heard there. Handed
-   * and not taken within the bound, they are `no-answer`: they may yet go in. Still
-   * waiting as the run ends, they never will, and are `ending`, so the runtime puts them in
-   * afresh ([`refuseWaiting`]).
+   * Handed and not written within [`HEARD_WITHIN_MS`] — steered words wait for every tool
+   * call running to end — they are `no-answer`: on their way in, still tracked. A one-shot
+   * run's words still waiting as the run ends never will go in, and are `ending`, so the
+   * runtime puts them in afresh ([`refuseWaiting`]).
    *
    * One throw's words go into a conversation once. A say of a `thrown` throw whose words
    * this door already handed and that are still on their way in — handed and not yet
@@ -2650,7 +2619,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     thrown: string | undefined,
     alone: boolean,
   ): Promise<Said> => {
-    // A one-shot run's words already handed and not yet in: this say waits on them, and is
+    // Words of this throw already handed and not yet in: this say waits on them, and is
     // answered as they are, with nothing handed again.
     let handedBefore: string | undefined;
     if (thrown !== undefined) {
@@ -2669,12 +2638,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       else if (waiting) {
         if (!waiting.also.includes(id) && waiting.id !== id) waiting.also.push(id);
         if (idsOf(waiting).some((one) => ours.has(one))) ours.add(id);
-        if (!oneShot(ctx)) return Promise.resolve({ ok: {} });
         handedBefore = waiting.words;
       }
     }
     const { promise, resolve } = Promise.withResolvers<Said>();
-    let watching: NodeJS.Timeout | undefined;
     // omp moves a session to another conversation in place: words are only ever handed
     // to, or heard in, the conversation they were asked for.
     const session = sessionId;
@@ -2689,7 +2656,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         if (at < 0) return;
         pending.splice(at, 1);
         clearTimeout(timer);
-        clearInterval(watching);
         resolve(said);
       },
     };
@@ -2707,7 +2673,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         return;
       }
       let running = !(ctx.isIdle?.() ?? true);
-      const queued = ctx.hasPendingMessages?.() ?? true;
       const deliverAs = mode === "queue" ? "followUp" : "steer";
       // Idle, the harness starts a turn from the words only with a model and credentials
       // for it: asked first, the way it asks, so words it would drop are refused here with
@@ -2767,15 +2732,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         if (says.includes(say)) says.splice(says.indexOf(say), 1);
         one.answer({ refused: "refused", error: String(error) });
         return;
-      }
-      // omp says nothing as it queues words. Its queue holding something where it held
-      // nothing is these words; one that held something already says nothing of them. A
-      // one-shot run's queue is no receipt: its words are heard only once taken.
-      if (HARNESS === "omp" && running && !queued && !oneShot(ctx)) {
-        watching = setInterval(() => {
-          if (!here()) one.answer({ refused: "no-answer", error: "the session moved to another conversation" });
-          else if (ctx.hasPendingMessages?.()) one.answer({ ok: {} });
-        }, 10);
       }
     };
     void (async () => {
@@ -3335,9 +3291,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // text is read as nothing much at all.
   pi.on("before_agent_start", async (event, ctx) => {
     live = ctx;
-    dequeued(event.prompt);
-    // Whose the stretch is now, read before any say heard above is answered. omp going on
-    // with the reminder its stop hook asked for carries on whoever's turn that was.
+    // omp taking a batch off its queue is no proof the words are in: only `message_end` is.
+    // Whose the stretch is now. omp going on with the reminder its stop hook asked for
+    // carries on whoever's turn that was.
     const input = typeof event.prompt === "string" ? event.prompt.trim() : "";
     if (!turning) {
       opening = true;
@@ -3493,12 +3449,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // A pick not met is refused in one line the runtime reads (`steery-refused: <word>:`),
     // and pi drops the words without a turn. Only the run's own words are checked: words
     // the door hands in later come as an extension's, after a `pick` may have moved it.
-    // Those words are heard here, idle or while a turn runs ([`deliver`]); a one-shot run's
-    // only once pi writes them as the person's message (`message_end`).
     pi.on("input", (event, ctx) => {
       live = ctx;
       if (event.source === "extension") {
-        if (!oneShot(ctx)) taken(event.text);
+        // Passing `input` is no proof: what follows can still drop them ([`deliver`]).
         return undefined;
       }
       const model = pi.getFlag?.("steery-model");
