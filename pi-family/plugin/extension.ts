@@ -2047,13 +2047,21 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
 
   /**
    * The harness wrote these words into the conversation as the person's message: the ones
-   * handed over are in. The only proof a say is answered `ok` on ([`deliver`]).
+   * handed over are in. The only proof a say is answered `ok` on ([`deliver`]); a say
+   * already answered `no-answer` is remembered `ok` from now ([`addressed`]).
    */
   const taken = (text: unknown) => {
     if (typeof text !== "string") return;
     const words = text.trim();
     for (const one of pending.filter((one) => one.handed && one.words === words)) one.answer({ ok: {} });
+    if (writing?.words === words && sessionId !== undefined) {
+      const answered = answeredIn(sessionId);
+      for (const id of idsOf(writing)) if (answered.has(id)) answered.set(id, Promise.resolve({ ok: {} }));
+    }
+    writing = undefined;
   };
+  /** The say whose words the harness is writing now, from `message_start` to `message_end`. */
+  let writing: Say | undefined;
 
   /**
    * Steery's own words, put in through `say` and kept by the say's id until the harness is
@@ -3000,26 +3008,37 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * Asks by id: one sent again is answered from the first, and what it did is never done
    * twice, for the last [`REMEMBERED`]. One refused other than `no-answer` did nothing —
    * refused before anything reached the harness — and is forgotten once answered, so the
-   * same id asked again later acts afresh.
+   * same id asked again later acts afresh. A say answered `no-answer` is answered `ok` once
+   * its words are written ([`message_start`]); asked again while they are still unwritten
+   * and nothing holds them — no turn, nothing queued — they went nowhere, and are handed afresh.
    */
   const addressed = (id: string, request: Frame): Promise<Said> => {
     const ctx = live;
     const session = sessionId;
     if (!ctx || session === undefined || !inSession(session)) return Promise.resolve({ refused: "ending" });
     const answered = answeredIn(session);
-    let said = answered.get(id);
-    if (!said) {
+    const ask = (): Promise<Said> => {
       const asked = Promise.resolve()
         .then((): Promise<Said> | Said => (inSession(session) ? answer(request) : { refused: "ending" }))
         .catch((error: unknown): Said => ({ refused: "refused", error: String(error) }));
-      said = asked;
       answered.set(id, asked);
       if (answered.size > REMEMBERED) answered.delete(answered.keys().next().value as string);
       void asked.then((one) => {
         if ("refused" in one && one.refused !== "no-answer" && answered.get(id) === asked) answered.delete(id);
       });
-    }
-    return said;
+      return asked;
+    };
+    const first = answered.get(id);
+    if (!first) return ask();
+    return first.then((one) => {
+      const now = answered.get(id);
+      if (now !== undefined && now !== first) return now;
+      if (!("refused" in one) || one.refused !== "no-answer" || now === undefined) return one;
+      const unwritten = says.filter((one) => idsOf(one).includes(id));
+      if (unwritten.length === 0 || !live || !inSession(session) || idle(live) !== true || compacting) return one;
+      for (const gone of unwritten) says.splice(says.indexOf(gone), 1);
+      return ask();
+    });
   };
 
   /**
@@ -3357,6 +3376,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (text !== undefined) {
       const one = says.find((one) => one.words === text.trim());
       if (one) says.splice(says.indexOf(one), 1);
+      writing = one;
       if (!one?.seen) heard({ mine: one ? [one] : [], theirs: !one });
     }
     noteState();
