@@ -40,6 +40,10 @@ pub struct State {
     /// A failure the turn running has not got past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failing: Option<Value>,
+    /// When the newest quota snapshot's spent windows all reset, in milliseconds: Codex
+    /// writes the refusing quota's snapshot (`token_count` `rate_limits`) before its error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spent_until: Option<u64>,
     /// Calls on sub-agents not yet answered: their tool and the agent they name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     agents: BTreeMap<String, (String, Option<String>)>,
@@ -157,7 +161,7 @@ impl State {
                 let turn = text(payload, "turn_id")
                     .map(str::to_owned)
                     .or_else(|| self.turn.clone());
-                let failure = error.as_ref().map(|error| self.failure(error));
+                let failure = error.as_ref().map(|error| self.failure(error, at));
                 out.push(Event::TurnEnded {
                     at,
                     turn,
@@ -204,6 +208,9 @@ impl State {
                 self.settings(text(settings, "model"), effort, at, out);
             }
             Some("token_count") => {
+                if let Some(limits) = payload.get("rate_limits").filter(|l| l.is_object()) {
+                    self.spent_until = spent_until(limits);
+                }
                 let Some(info) = payload.get("info").filter(|info| info.is_object()) else {
                     return Ok(());
                 };
@@ -490,14 +497,43 @@ impl State {
 
     /// A failure as Codex wrote it: the rollout's snake_case (`codex_error_info`,
     /// `http_status_code`) or the app server's camelCase (`codexErrorInfo`,
-    /// `httpStatusCode`), with what the turn ran on.
-    fn failure(&self, error: &Value) -> Failure {
+    /// `httpStatusCode`), with what the turn ran on; a limit retries once its spent
+    /// quota resets, if that is still ahead.
+    fn failure(&self, error: &Value, at: u64) -> Failure {
         let mut failure = failure_of(error);
         failure.provider = self.provider.clone();
         failure.model = self.model.clone();
         failure.thinking = self.effort.clone();
+        if failure.kind == FailureKind::RateLimit {
+            failure.retry_at = self.spent_until.filter(|reset| *reset > at);
+        }
         failure
     }
+}
+
+/// When every window of a quota snapshot that is spent (`used_percent` at 100) resets,
+/// in milliseconds: none spent, or one spent with no reset, says nothing.
+fn spent_until(limits: &Value) -> Option<u64> {
+    let mut until = None;
+    for window in ["primary", "secondary"] {
+        let Some(window) = limits.get(window).filter(|w| w.is_object()) else {
+            continue;
+        };
+        if window
+            .get("used_percent")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            < 100.0
+        {
+            continue;
+        }
+        let reset = window
+            .get("resets_at")
+            .and_then(Value::as_u64)?
+            .checked_mul(1000)?;
+        until = until.max(Some(reset));
+    }
+    until
 }
 
 /// A failure from one error object, without what the turn ran on. Never read from
@@ -762,6 +798,33 @@ mod tests {
         assert_eq!(failure.provider.as_deref(), Some("cpa-gui"));
         assert_eq!(failure.model.as_deref(), Some("gpt-6-astra"));
         assert_eq!(failure.thinking.as_deref(), Some("low"));
+        // Trimmed of its quota snapshot, the reset is said only in words: never read.
+        assert_eq!(failure.retry_at, None);
+
+        // Codex 0.160 writes the refusing quota's snapshot before its error: the limit
+        // retries once every spent window resets, a window not spent never holds it back,
+        // and a reset already past, or the snapshot of another turn's success, says none.
+        let quota = |primary: f64, primary_reset: u64, secondary: f64| {
+            json!({"timestamp":"2026-09-29T19:12:58Z","type":"event_msg","payload":{"type":"token_count","info":null,
+            "rate_limits":{"limit_id":"codex","primary":{"used_percent":primary,"window_minutes":300,"resets_at":primary_reset},
+            "secondary":{"used_percent":secondary,"window_minutes":10080,"resets_at":1_791_500_000}}}})
+        };
+        let ending = records.last().unwrap().clone();
+        let limited = |snapshot: Value| {
+            let mut records = records[..2].to_vec();
+            records.extend([snapshot, ending.clone()]);
+            self::failure(&read(&records)).unwrap().retry_at
+        };
+        assert_eq!(
+            limited(quota(100.0, 1_791_000_000, 40.0)),
+            Some(1_791_000_000_000)
+        );
+        assert_eq!(
+            limited(quota(100.0, 1_791_000_000, 100.0)),
+            Some(1_791_500_000_000)
+        );
+        assert_eq!(limited(quota(100.0, 1_000_000_000, 40.0)), None);
+        assert_eq!(limited(quota(64.0, 1_791_000_000, 10.0)), None);
     }
 
     /// A rollout nests the status snake_case too (`01a0d273…`, 2026-09-29 10:24:14).
