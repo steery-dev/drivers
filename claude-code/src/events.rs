@@ -478,7 +478,9 @@ const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
 /// Why a turn failed, as Claude Code recorded it: the API's status (`apiErrorStatus`) and
 /// its own code (`error`), its words in the message. Never read from wording: a 401 or
 /// its `authentication_failed` is a sign-in it could not make; a 429, 503 or 529 or its
-/// `rate_limit` a limit. Every such failure is the model service's.
+/// `rate_limit` a limit. Every such failure is the model service's. A limit's end is the
+/// quota Claude Code says refused it (`quotaLimits`, `status` `rejected`): its `resetsAt`,
+/// in seconds.
 fn failure(record: &Value, message: &Value) -> Failure {
     let http_status = record
         .get("apiErrorStatus")
@@ -506,13 +508,20 @@ fn failure(record: &Value, message: &Value) -> Failure {
         .find_map(|block| text(block, "text"))
         .map(one_line)
         .unwrap_or_default();
+    let retry_at = limited
+        .then(|| record.get("quotaLimits"))
+        .flatten()
+        .filter(|quota| text(quota, "status") == Some("rejected"))
+        .and_then(|quota| quota.get("resetsAt"))
+        .and_then(Value::as_u64)
+        .and_then(|seconds| seconds.checked_mul(1000));
     Failure {
         kind,
         line,
         service: true,
         http_status,
         code,
-        retry_at: None,
+        retry_at,
         provider: None,
         model: text(message, "model")
             .filter(|model| *model != SYNTHETIC && !model.is_empty())
@@ -962,6 +971,32 @@ mod tests {
             "a service that answered other than 401 took the sign-in"
         );
         assert_eq!(failed(None, "invalid_request").kind, FailureKind::Other);
+
+        // Claude Code 2.1.296's weekly limit, as it wrote it: the quota that refused names
+        // when it resets; a quota it took names nothing to wait for.
+        let quota = |status: &str| {
+            json!({"status": status, "resetsAt": 1_791_849_600_u64, "rateLimitType": "seven_day"})
+        };
+        let limit = |code: &str, quota: Value| {
+            let mut read = events(&[
+                json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
+                json!({"type":"assistant","timestamp":"2026-10-12T12:07:15.374Z","isApiErrorMessage":true,
+                    "error":code,"apiErrorStatus":429,"quotaLimits":quota,
+                    "message":{"model":"<synthetic>","content":[{"type":"text","text":"You've hit your weekly limit · resets 2am (Europe/Oslo)"}]}}),
+            ]);
+            match read.pop() {
+                Some(Event::TurnEnded {
+                    failure: Some(failure),
+                    ..
+                }) => failure,
+                other => panic!("{other:?}"),
+            }
+        };
+        let weekly = limit("rate_limit", quota("rejected"));
+        assert_eq!(weekly.kind, FailureKind::RateLimit);
+        assert_eq!(weekly.retry_at, Some(1_791_849_600_000));
+        assert_eq!(limit("rate_limit", quota("allowed")).retry_at, None);
+        assert_eq!(limit("rate_limit", Value::Null).retry_at, None);
     }
 
     /// Claude Code names the model on every assistant record and the effort beside it,
