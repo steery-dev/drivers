@@ -1050,6 +1050,73 @@ function titleOf(card: Card): string {
   return str(card.request.title).trim() || "A request";
 }
 
+/** One step of a request's series as its read carries it (`Request.steps`): a raised one with `id` and `status`, an expected one with only `title`. */
+type Step = { id?: string; title: string; status?: string };
+
+/** A request's steps, where it is one of a series of two or more. */
+function stepsOf(request: Record<string, unknown>): Step[] {
+  const steps = (Array.isArray(request.steps) ? request.steps : []).flatMap((one: unknown): Step[] => {
+    if (!one || typeof one !== "object") return [];
+    const step = one as Record<string, unknown>;
+    if (typeof step.title !== "string") return [];
+    return [
+      {
+        title: step.title.trim(),
+        ...(typeof step.id === "string" ? { id: step.id } : {}),
+        ...(typeof step.status === "string" ? { status: step.status } : {}),
+      },
+    ];
+  });
+  return steps.length >= 2 ? steps : [];
+}
+
+/** Widths where the harness handed no toolkit: a cell for each character. */
+const PLAIN: Pick<Toolkit, "visibleWidth" | "truncateToWidth"> = {
+  visibleWidth: (text) => [...text].length,
+  truncateToWidth: (text, width) => {
+    const chars = [...text];
+    if (chars.length <= width) return text;
+    return width > 0 ? `${chars.slice(0, width - 1).join("")}…` : "";
+  },
+};
+
+/**
+ * The line drawn above a request's title where it is one of a series: which step it is,
+ * then every step's title, settled `✓`, this one `●`, the rest `○`, each cut so the line
+ * fits `width` and the short ones give their room to the long. The terminal opens no other
+ * request, so no step here leads anywhere.
+ */
+function stepLine(
+  request: Record<string, unknown>,
+  width: number,
+  kit: Pick<Toolkit, "visibleWidth" | "truncateToWidth">,
+  shade: { here(text: string): string; expected(text: string): string } = { here: (text) => text, expected: (text) => text },
+): string | undefined {
+  const steps = stepsOf(request);
+  const at = steps.findIndex((step) => step.id !== undefined && step.id === str(request.id));
+  if (at < 0) return undefined;
+  const lead = `Step ${at + 1}/${steps.length}  `;
+  // Each step takes its mark and a space, and " · " parts two.
+  let room = width - kit.visibleWidth(lead) - 2 * steps.length - 3 * (steps.length - 1);
+  const fits: number[] = [];
+  const shortest = steps
+    .map((step, index) => ({ index, wide: kit.visibleWidth(step.title) }))
+    .sort((a, b) => a.wide - b.wide);
+  for (const [taken, { index, wide }] of shortest.entries()) {
+    const fit = Math.max(0, Math.min(wide, Math.floor(room / (steps.length - taken))));
+    fits[index] = fit;
+    room -= fit;
+  }
+  const parts = steps.map((step, index) => {
+    const fit = fits[index] ?? 0;
+    const mark = index === at ? "●" : step.status !== undefined && step.status !== "open" ? "✓" : "○";
+    const part = fit > 0 ? `${mark} ${kit.truncateToWidth(step.title, fit)}` : mark;
+    if (index === at) return shade.here(part);
+    return step.id === undefined ? shade.expected(part) : part;
+  });
+  return kit.truncateToWidth(`${lead}${parts.join(" · ")}`, width);
+}
+
 /**
  * A card's text, without the rows the text form lists last (`command.rs` `rows_form`):
  * each opens with "▸ " and its choice's label. The card draws each row, detail and all,
@@ -1090,12 +1157,17 @@ function underTitle(card: Card): string[] {
 }
 
 /**
- * The lines the widget draws for the conversation's open requests: the first with the
- * opening of its text and where to answer it, then one line for each other. Where this
- * Mac can sign, it is answered in the card here; otherwise on the request's page or the
- * person's phone.
+ * The lines the widget draws for the conversation's open requests: the first with its
+ * step line where it is one of a series, the opening of its text and where to answer it,
+ * then one line for each other. Where this Mac can sign, it is answered in the card here;
+ * otherwise on the request's page or the person's phone. `width` is the terminal's.
  */
-function widget(open: Card[], reach: Reach): string[] {
+function widget(
+  open: Card[],
+  reach: Reach,
+  kit: Pick<Toolkit, "visibleWidth" | "truncateToWidth">,
+  width: number,
+): string[] {
   const [first, ...rest] = open;
   if (!first) return [];
   const heading = "◆ Steery — ";
@@ -1108,13 +1180,21 @@ function widget(open: Card[], reach: Reach): string[] {
       : page
         ? `Answer: ${page.url}  · or on your phone`
         : "Answer on your phone";
+  const steps = stepLine(first.request, width, kit);
+  const fixed = steps === undefined ? 2 : 3;
   let others = rest.map((card) => `${heading}${titleOf(card)}`);
-  if (others.length > WIDGET_LINES - 2) {
-    const shown = WIDGET_LINES - 3;
+  if (others.length > WIDGET_LINES - fixed) {
+    const shown = WIDGET_LINES - fixed - 1;
     others = [...others.slice(0, shown), `… and ${others.length - shown} more`];
   }
-  const room = Math.max(0, Math.min(CARD_TEXT_LINES, WIDGET_LINES - 2 - others.length));
-  return [`${heading}${titleOf(first)}`, ...underTitle(first).slice(0, room), where, ...others];
+  const room = Math.max(0, Math.min(CARD_TEXT_LINES, WIDGET_LINES - fixed - others.length));
+  return [
+    ...(steps === undefined ? [] : [steps]),
+    `${heading}${titleOf(first)}`,
+    ...underTitle(first).slice(0, room),
+    where,
+    ...others,
+  ];
 }
 
 /** What a settled request's notice says. */
@@ -1604,6 +1684,10 @@ function requestCard(input: CardInput): View {
 
   const render = (width: number): string[] => {
     if (width < 16) return [kit.truncateToWidth(`Steery: ${title}`, width)];
+    const steps = stepLine(request, width, kit, {
+      here: (text) => bold(paint.fg("accent", text)),
+      expected: (text) => paint.fg("dim", text),
+    });
     const inner = width - 4;
     const content: string[] = [];
     let top = 0;
@@ -1633,7 +1717,10 @@ function requestCard(input: CardInput): View {
     } else put(reviewBlock(inner), true);
 
     const rows = screen.terminal?.rows ?? 24;
-    const view = Math.min(content.length, Math.max(1, Math.max(8, Math.floor(rows * CARD_SHARE)) - 2 - (error ? 1 : 0)));
+    const view = Math.min(
+      content.length,
+      Math.max(1, Math.max(8, Math.floor(rows * CARD_SHARE)) - 2 - (error ? 1 : 0) - (steps === undefined ? 0 : 1)),
+    );
     page = Math.max(1, view);
     if (follow) {
       if (bottom - top + 1 <= view) {
@@ -1657,6 +1744,7 @@ function requestCard(input: CardInput): View {
     const foot = kit.truncateToWidth(` ${hints()}${below > 0 ? ` · ↓ ${below} more` : ""} `, Math.max(4, width - 4));
     const tail = `${edge("╰─")}${paint.fg("dim", foot)}${edge("─".repeat(Math.max(0, width - 4 - kit.visibleWidth(foot))))}${edge("─╯")}`;
     return [
+      ...(steps === undefined ? [] : [steps]),
       head,
       ...content.slice(scroll, scroll + view).map(boxed),
       ...(error ? [boxed(paint.fg("error", error))] : []),
@@ -3087,7 +3175,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const ctx = live;
     if (!draws(ctx)) return;
     try {
-      const lines = widget(open, reach(ctx));
+      // The widget's lines are plain strings the harness draws whole: cut to the terminal, 80 where none says.
+      const lines = widget(open, reach(ctx), toolkit ?? PLAIN, process.stdout.columns || 80);
       ctx.ui?.setWidget?.("steery", lines.length ? lines : undefined, { placement: "aboveEditor" });
       ctx.ui?.setStatus?.("steery", open.length ? `${open.length} open` : undefined);
       for (const one of Array.isArray(frame.settled) ? frame.settled : []) {
