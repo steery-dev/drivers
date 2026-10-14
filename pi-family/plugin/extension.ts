@@ -266,7 +266,10 @@ type Context = {
    * results still wait to be handed to it (`delivery`).
    */
   getAsyncJobSnapshot?():
-    | { running?: { id?: string; type?: string; label?: string }[]; delivery?: { queued?: number } }
+    | {
+        running?: { id?: string; type?: string; label?: string }[];
+        delivery?: { queued?: number; delivering?: boolean };
+      }
     | undefined;
   /** The session's model now: a getter in both harnesses. */
   model?: Model;
@@ -2414,10 +2417,34 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     };
   };
 
+  /** What the harness runs past a turn now; nothing from one that cannot say. */
+  const snapshot = (ctx: Context) => {
+    try {
+      return ctx.getAsyncJobSnapshot?.();
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * How much background work runs in this process past its turns: the jobs running, and
+   * their results waiting to be told or being told. Ended with the process, so a process
+   * with any is never ended for being idle (LiveState `jobs`).
+   */
+  const jobs = (ctx: Context): number => {
+    const now = snapshot(ctx);
+    return (
+      (Array.isArray(now?.running) ? now.running.length : 0) +
+      (now?.delivery?.queued ?? 0) +
+      (now?.delivery?.delivering ? 1 : 0)
+    );
+  };
+
   /** What the conversation is doing now: a LiveState (§4.3), its unknowns absent. */
   const stateNow = (ctx: Context): Record<string, unknown> => {
     const known = (field: string, value: boolean | number | undefined) =>
       value === undefined ? {} : { [field]: value };
+    const running = jobs(ctx);
     return {
       ...(turning && began !== undefined ? { turn: { began_at: began, says: [...turnSays] } } : {}),
       ...known("idle", idle(ctx)),
@@ -2425,6 +2452,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       ...known("typing", typing(ctx)),
       compacting: compacting !== undefined,
       retrying,
+      ...(running > 0 ? { jobs: running } : {}),
       ...current(ctx),
       ...known("context_left", left(ctx)),
       calls: [...calls.values()],
@@ -3113,12 +3141,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * leaves these going ([`Context.getAsyncJobSnapshot`]). None from a harness that has none.
    */
   const background = (ctx: Context): string[] => {
-    try {
-      const jobs = ctx.getAsyncJobSnapshot?.()?.running;
-      return Array.isArray(jobs) ? jobs.map((job) => job?.label || job?.type || job?.id || "a job") : [];
-    } catch {
-      return [];
-    }
+    const running = snapshot(ctx)?.running;
+    return Array.isArray(running)
+      ? running.map((job) => job?.label || job?.type || job?.id || "a job")
+      : [];
   };
 
   /**
@@ -3986,14 +4012,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       }
     }
     if (event.willContinue === true) {
-      let awaiting = false;
-      try {
-        const jobs = ctx.getAsyncJobSnapshot?.();
-        awaiting = (jobs?.running?.length ?? 0) > 0 || (jobs?.delivery?.queued ?? 0) > 0;
-      } catch {
-        // A harness that cannot say has nothing running past the turn.
-      }
-      if (!awaiting) {
+      if (jobs(ctx) === 0) {
         noteState();
         return;
       }
