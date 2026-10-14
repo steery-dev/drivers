@@ -1,16 +1,20 @@
 //! The harness's own way in, from its command line.
 //!
-//! `<harness> -p --mode json` runs one turn and exits, reading the words on standard input
-//! when it is not a terminal. omp continues a conversation by id, `--resume <id>`, and
-//! forks one with `--fork <id>`; pi by its transcript, `--session <file>` and
-//! `--fork <file>`. A fork starts in the folder the turn starts in. A conversation whose
-//! folder is gone neither resumes, and says so. Neither makes a worktree of its own.
+//! omp runs kept: `omp --mode rpc --no-ui` stays up between turns with a standard input
+//! that never ends (`Stdin::Held`), and takes every turn's words, its first included,
+//! through Steery's plugin door; its standard output is never read. pi runs one turn and
+//! exits: `pi -p --mode json`, reading the words on standard input. omp continues a
+//! conversation by id, `--resume <id>`, and forks one with `--fork <id>`; pi by its
+//! transcript, `--session <file>` and `--fork <file>`. A fork starts in the folder the turn
+//! starts in. A conversation whose folder is gone neither resumes, and says so. Neither
+//! makes a worktree of its own.
 //!
-//! A run says itself in pi's JSON lines: the `session` line names the conversation before
+//! A pi run says itself in pi's JSON lines: the `session` line names the conversation before
 //! anything is asked of a model, the person's `message_end` is the receipt of the words,
-//! and `agent_end` says how the run ended. omp's `--model` resolves loosely, so a pick goes
-//! to omp only as one of its own catalog's entries; pi's goes to Steery's plugin
-//! (`--steery-model`), which refuses one pi does not run exactly.
+//! and `agent_end` says how the run ended. Either harness's standard error says what it
+//! refuses to start. omp's `--model` resolves loosely, so a pick goes to omp only as one of
+//! its own catalog's entries; pi's goes to Steery's plugin (`--steery-model`), which refuses
+//! one pi does not run exactly.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -77,7 +81,8 @@ pub fn idle(store: &Store, held: Held) -> Sampled {
 const STEERY_MODEL: &str = "steery-model";
 const STEERY_THINKING: &str = "steery-thinking";
 
-/// `start`: the launch plan of a turn. The words go on standard input.
+/// `start`: the launch plan of a turn: omp kept with its stdin held, pi one-shot with the
+/// words on standard input.
 pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Launch, Error> {
     let harness = store.harness();
     if start.worktree {
@@ -158,20 +163,27 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
         argv,
         env: BTreeMap::new(),
         cwd: start.cwd,
-        stdin: Stdin::Words,
+        stdin: match harness {
+            Harness::Omp => Stdin::Held,
+            Harness::Pi => Stdin::Words,
+        },
         inbox: false,
     })
 }
 
-/// A turn's arguments after the binary: one run in JSON lines, the conversation it opens
-/// as the harness names it, and the pick — to pi also as Steery's plugin's own flags.
+/// A turn's arguments after the binary: omp's kept RPC host with no client UI to wait on,
+/// pi's one run in JSON lines; the conversation it opens as the harness names it, and the
+/// pick — to pi also as Steery's plugin's own flags. omp's RPC takes no prompt argument.
 fn args(
     harness: Harness,
     opened: Option<[String; 2]>,
     model: Option<&str>,
     thinking: Option<&str>,
 ) -> Vec<String> {
-    let mut args: Vec<String> = ["-p", "--mode", "json"].map(String::from).into();
+    let mut args: Vec<String> = match harness {
+        Harness::Omp => ["--mode", "rpc", "--no-ui"].map(String::from).into(),
+        Harness::Pi => ["-p", "--mode", "json"].map(String::from).into(),
+    };
     args.extend(opened.into_iter().flatten());
     if let Some(model) = model {
         args.extend(["--model".into(), model.to_owned()]);
@@ -760,9 +772,9 @@ mod tests {
         assert_eq!(
             args(Harness::Omp, resume(), Some("provider/model"), Some("high")),
             [
-                "-p",
                 "--mode",
-                "json",
+                "rpc",
+                "--no-ui",
                 "--resume",
                 "source",
                 "--model",
@@ -792,7 +804,7 @@ mod tests {
                 None,
                 None
             ),
-            ["-p", "--mode", "json", "--fork", "01a0cd6f"]
+            ["--mode", "rpc", "--no-ui", "--fork", "01a0cd6f"]
         );
     }
 
