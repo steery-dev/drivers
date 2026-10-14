@@ -58,6 +58,11 @@ cd drivers/pi-family && cargo build
 cargo test
 ```
 
+Every build goes through [Kache](https://github.com/kunobi-ninja/kache), the compiler cache
+`.cargo/config.toml` names. Install it once per machine:
+`brew install kunobi-ninja/kunobi/kache && kache daemon install` on a Mac, its
+[APT package](https://kunobi.ninja/docs/kache/getting-started/installation) on Linux.
+
 `./release.sh <tag>` builds every driver with `--release --locked` for each target Steery
 runs on, `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` (the Linux builds linking glibc 2.30 at most), with
