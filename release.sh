@@ -31,10 +31,14 @@ crates=(pi-family:steery-driver-omp,steery-driver-pi claude-code:steery-driver-c
 rm -rf dist
 for zig_target in "${targets[@]}"; do
   target=${zig_target%.2.30}
+  # zig 0.16 refuses the `-oso_prefix` rustc passes for Apple targets; a Mac links its own
+  # targets with Apple's linker.
+  build=(cargo zigbuild)
+  [[ $target == *-apple-darwin && $(uname -s) == Darwin ]] && build=(cargo build)
   mkdir -p "dist/$target"
   for entry in "${crates[@]}"; do
     crate=${entry%%:*}
-    (cd "$crate" && cargo zigbuild --release --locked --target "$zig_target")
+    (cd "$crate" && "${build[@]}" --release --locked --target "$zig_target")
     IFS=, read -ra bins <<<"${entry#*:}"
     for bin in "${bins[@]}"; do
       cp "$crate/target/$target/release/$bin" "dist/$target/"
