@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 use steery_driver_common::program::helper;
@@ -21,10 +21,9 @@ use crate::harness::Harness;
 /// How long the harness has to answer `models`: omp took over 20 s on a Mac that had just
 /// started and was swapping.
 const LISTED_WITHIN: Duration = Duration::from_secs(25);
-/// How long a `start` waits to learn whether omp lists the model it was told to run.
+/// How long a `start` waits to learn whether omp lists the model it was told to run, where
+/// no catalog it listed before names it.
 const A_TURN_WAITS: Duration = Duration::from_secs(8);
-/// How long a list answers a `start` without asking omp again.
-const KEPT: Duration = Duration::from_secs(600);
 /// pi's thinking levels, lowest first.
 const PI_THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 /// The settings pi's catalog and reader run with, in their private folder: none of pi's
@@ -32,10 +31,10 @@ const PI_THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhig
 pub const PI_SETTINGS: &str =
     r#"{"extensions":["-builtin:mcp","-builtin:codemode","-builtin:tool-search"]}"#;
 
-/// The catalog as the harness listed it last, and when.
+/// The catalog as the harness listed it last.
 #[derive(Default)]
 pub struct Catalog {
-    kept: Mutex<Option<(Instant, Vec<Model>)>>,
+    kept: Mutex<Option<Vec<Model>>>,
 }
 
 impl Catalog {
@@ -58,14 +57,20 @@ impl Catalog {
     /// Whether omp runs `model` as itself: one of its catalog's entries, which its
     /// `--model` finds exactly. omp resolves anything else loosely and runs what it found
     /// without a word, so a pick it does not list is never handed to it.
+    ///
+    /// A catalog omp listed before that names `model` answers, however old: an entry goes
+    /// only when omp's configuration or sign-ins change, which the runtime watches and
+    /// answers by asking `models` again, which lists afresh here. Only a model no catalog
+    /// here names is asked about, within what a `start` may wait. A start once threw away
+    /// a catalog naming the conversation's own model the moment it was ten minutes old —
+    /// as long as the runtime keeps a list before asking again — and `omp models` then
+    /// took over 8 s on a busy Mac, so a resume and each of its Retries failed "omp did not
+    /// list its models within 8 s" (2026-10-13 and 10-14, on two members' Macs).
     pub async fn lists(&self, root: &Path, model: &str) -> Result<bool, String> {
         let named = |models: &[Model]| models.iter().any(|offer| offer.model == model);
         {
             let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, models)) = kept.as_ref()
-                && at.elapsed() < KEPT
-                && named(models)
-            {
+            if kept.as_deref().is_some_and(named) {
                 return Ok(true);
             }
         }
@@ -103,8 +108,7 @@ impl Catalog {
                 pi_joined(rows?, defined?)?
             }
         };
-        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) =
-            Some((Instant::now(), models.clone()));
+        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) = Some(models.clone());
         Ok(models)
     }
 }
