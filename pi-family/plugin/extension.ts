@@ -72,6 +72,29 @@ const HEARD_WITHIN_MS = 8000;
 const STOPPED_WITHIN_MS = 2500;
 
 /**
+ * How long a `compact` ask may take the harness ([`compact`]): under the thirty seconds the
+ * runtime waits for its answer.
+ */
+const COMPACTED_WITHIN_MS = 25_000;
+
+/** What Steery's own compaction carries as the harness's `customInstructions`, before the ask's id. */
+const COMPACT_MARK = "steery-compact:";
+
+/** What pi counts an image as, in characters, for its four-to-a-token estimate. */
+const IMAGE_CHARS = 4800;
+
+/** The fields of a message and its parts whose characters a model reads. */
+const READ_FIELDS: Record<string, true> = {
+  content: true,
+  text: true,
+  thinking: true,
+  name: true,
+  command: true,
+  output: true,
+  summary: true,
+};
+
+/**
  * How long a pick waits for the harness to read its model files again ([`reread`]): with
  * the rest of the pick, under the ten seconds the runtime waits for its answer.
  */
@@ -228,6 +251,16 @@ type Context = {
   hasPendingMessages?(): boolean;
   abort?(): void;
   /**
+   * Compact the conversation now; a string is omp's `customInstructions`. omp 18.10 settles
+   * once it compacted and rejects where it would not; pi 1.0 returns at once and says so
+   * through `onComplete` or `onError`.
+   */
+  compact?(
+    options?:
+      | string
+      | { customInstructions?: string; onComplete?: (result: unknown) => void; onError?: (error: Error) => void },
+  ): Promise<void> | void;
+  /**
    * omp: what it runs past a turn — background jobs, async sub-agents — which an abort
    * leaves running, and which wake the conversation when they end; and how many of their
    * results still wait to be handed to it (`delivery`).
@@ -340,6 +373,12 @@ type Event = {
   /** pi's `ui_prompt_start`: which dialog waits on its person, and its title. */
   kind?: unknown;
   title?: unknown;
+  /** `session_before_compact`: what the harness would compact, the branch, and who asked with what. */
+  preparation?: unknown;
+  branchEntries?: unknown;
+  customInstructions?: unknown;
+  /** `session_compact`: the entry it wrote. */
+  compactionEntry?: unknown;
 };
 
 type Api = {
@@ -463,6 +502,69 @@ function counted(ctx: Context): number | undefined {
     if (total > 0) return total;
   }
   return undefined;
+}
+
+/** A branch entry as both harnesses write one, its fields as far as they are read here. */
+type Entry = {
+  id?: unknown;
+  type?: unknown;
+  timestamp?: unknown;
+  message?: unknown;
+  firstKeptEntryId?: unknown;
+  summary?: unknown;
+  /** A compaction's: what its writer kept beside it, Steery's ask id for its own. */
+  details?: unknown;
+};
+
+function entriesOf(list: unknown): Entry[] {
+  return Array.isArray(list) ? list.filter((one): one is Entry => !!one && typeof one === "object") : [];
+}
+
+/** When an entry was written, in milliseconds: both harnesses stamp it in ISO 8601. */
+function writtenAt(entry: Entry | undefined): number | undefined {
+  const at = typeof entry?.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+  return Number.isFinite(at) ? at : undefined;
+}
+
+/** The characters of what a model reads of an entry, as pi counts them for its estimate. */
+function chars(value: unknown): number {
+  if (typeof value === "string") return value.length;
+  if (Array.isArray(value)) return value.reduce((sum: number, one) => sum + chars(one), 0);
+  if (!value || typeof value !== "object") return 0;
+  let sum = 0;
+  for (const [key, field] of Object.entries(value)) {
+    if (key === "type" && field === "image") return IMAGE_CHARS;
+    if (key === "arguments") sum += JSON.stringify(field)?.length ?? 0;
+    else if (READ_FIELDS[key]) sum += chars(field);
+  }
+  return sum;
+}
+
+/**
+ * Where Steery's compaction of a branch would cut ([`compact`]). The context starts at the
+ * first entry the latest compaction kept, else at the first entry (`from`). The cut is the
+ * last message of the person's or the assistant's — never a tool result — written at or
+ * before `before`, after the latest compaction and the context's start; what it forgets is
+ * every entry from the start to the cut but that compaction, four characters to a token.
+ */
+function cutOf(branch: Entry[], before: number): { from: number; cut?: Entry; forgot: number } {
+  const latest = branch.findLastIndex((entry) => entry.type === "compaction");
+  const kept = latest < 0 ? 0 : branch.findIndex((entry) => entry.id === branch[latest]?.firstKeptEntryId);
+  const start = kept < 0 ? latest : kept;
+  const from = writtenAt(branch[start]) ?? Date.now();
+  for (let at = branch.length - 1; at > Math.max(latest, start); at--) {
+    const entry = branch[at];
+    const message = entry?.message;
+    const role = message && typeof message === "object" && "role" in message ? message.role : undefined;
+    const when = writtenAt(entry);
+    if (entry?.type !== "message" || (role !== "user" && role !== "assistant") || when === undefined || when > before) {
+      continue;
+    }
+    let read = 0;
+    for (const one of branch.slice(start, at)) read += one.type === "compaction" ? 0 : chars(one.message ?? one);
+    return { from, cut: entry, forgot: Math.ceil(read / 4) };
+  }
+  return { from, forgot: 0 };
 }
 
 /**
@@ -2126,12 +2228,19 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
   // pi refuses any words while it compacts — before its `input` event, and through this
   // API silently — so words handed over then would be lost: they wait until it is done,
-  // and are refused `harness-busy` if it is not done in time ([`HEARD_WITHIN_MS`]).
+  // and are refused `harness-busy` if it is not done in time ([`HEARD_WITHIN_MS`]). Words
+  // wait the same while Steery's own compaction runs in either harness ([`compact`]).
   let compacting: PromiseWithResolvers<void> | undefined;
   const compacted = () => {
     compacting?.resolve();
     compacting = undefined;
   };
+  /**
+   * Steery's own compaction while its ask waits on the harness ([`compact`]): the ask, the
+   * marker its `customInstructions` carry, the summary and cut the hook hands the harness,
+   * and whether the harness wrote it.
+   */
+  let ownCompaction: { id: string; marker: string; summary: string; cut: string; seen: boolean } | undefined;
 
   /**
    * The harness wrote these words into the conversation as the person's message: the ones
@@ -3050,8 +3159,69 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
+   * Forget everything before a cut in favour of Steery's `summary`, through the harness's own
+   * compaction with no model run: its `session_before_compact` hook answers this ask alone,
+   * known by its marker ([`ownCompaction`]). Only while the conversation is quiet: either
+   * harness aborts a turn it compacts under. Where the cut ([`cutOf`]) would forget fewer
+   * than `least` tokens, or the harness finds nothing to compact, nothing is done
+   * (`forgot: 0`, `from` where the context starts now). Words asked meanwhile wait
+   * ([`compacting`]). Answered `{from, forgot}`, `from` when the cut entry was written, once
+   * the harness wrote Steery's compaction; whatever else became of it within
+   * [`COMPACTED_WITHIN_MS`] is refused with the harness's own line.
+   */
+  const compact = async (ctx: Context, id: string, before: unknown, summary: unknown, least: unknown): Promise<Said> => {
+    if (typeof before !== "number" || !Number.isSafeInteger(before) || before < 0) {
+      return { refused: "refused", error: "before is milliseconds since 1970" };
+    }
+    if (typeof least !== "number" || !Number.isSafeInteger(least) || least < 0) {
+      return { refused: "refused", error: "least is a count of tokens" };
+    }
+    if (typeof summary !== "string" || !summary.trim()) return { refused: "refused", error: "no summary" };
+    if (!ctx.compact) return { refused: "refused", error: `this ${HARNESS} cannot compact` };
+    // A turn being prepared, or between the runs it goes on with, reads as idle: compacting
+    // then would abort it.
+    if (turning || !quiet(ctx)) {
+      return { refused: "harness-busy", error: "the conversation is working, has words waiting, or somebody is typing" };
+    }
+    const { from, cut, forgot } = cutOf(entriesOf(ctx.sessionManager.getBranch?.()), before);
+    const at = writtenAt(cut);
+    if (!cut || typeof cut.id !== "string" || at === undefined || forgot < least) return { ok: { from, forgot: 0 } };
+    const marker = `${COMPACT_MARK}${id}`;
+    const own = { id, marker, summary, cut: cut.id, seen: false };
+    ownCompaction = own;
+    compacting ??= Promise.withResolvers<void>();
+    noteState();
+    const { promise: done, resolve, reject } = Promise.withResolvers<void>();
+    try {
+      // omp's call settles once it compacted; pi's returns at once and says so after.
+      if (HARNESS === "pi") ctx.compact({ customInstructions: marker, onComplete: () => resolve(), onError: reject });
+      else void Promise.resolve(ctx.compact(marker)).then(() => resolve(), reject);
+    } catch (error) {
+      reject(error);
+    }
+    const late = Promise.withResolvers<never>();
+    const timer = setTimeout(
+      () => late.reject(new Error(`${HARNESS} did not compact within ${COMPACTED_WITHIN_MS / 1000} s`)),
+      COMPACTED_WITHIN_MS,
+    );
+    const failed = await Promise.race([done, late.promise]).then(
+      () => undefined,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    clearTimeout(timer);
+    if (ownCompaction === own) ownCompaction = undefined;
+    // pi's own `session_compact` and `session_compact_failed` end what it compacts.
+    if (HARNESS === "omp") compacted();
+    noteState();
+    if (own.seen) return { ok: { from: at, forgot } };
+    if (failed === undefined) return { refused: "refused", error: `${HARNESS} compacted without Steery's summary` };
+    if (failed.startsWith("Nothing to compact") || failed === "Already compacted") return { ok: { from, forgot: 0 } };
+    return { refused: "refused", error: failed };
+  };
+
+  /**
    * What one ask of the runtime's asks, answered. A sub-agent's copy — whose conversation
-   * is its lead's — takes no words, no pick and no stop. A conversation's own copy takes
+   * is its lead's — takes no words, no pick, no stop and no compaction. A conversation's own copy takes
    * words and picks where a person is at it (`tui`, `rpc`) or a turn runs: a one-shot run's
    * words before its own turn would start a turn of their own ahead of the run's words.
    */
@@ -3087,6 +3257,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         return stop(ctx, request.say);
       case "recap":
         return recap(ctx);
+      case "compact":
+        return compact(ctx, String(request.id), request.before, request.summary, request.least);
       default:
         return { refused: "refused", error: `no op ${String(op)}` };
     }
@@ -3582,28 +3754,53 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       }
       return undefined;
     });
-    // pi compacts after a run as well as when its person asks, and takes no words until
-    // it is done ([`compacting`]).
-    pi.on("session_before_compact", (_event, ctx) => {
+    pi.on("session_compact_failed", (event, ctx) => {
       live = ctx;
-      compacting ??= Promise.withResolvers<void>();
+      compacted();
+      // pi's own overflow recovery could not make the context fit — the model refused the
+      // prompt as over its limit and compacting it failed, or failed again — so the run
+      // ends on that refusal: what it settles on is a context that is full.
+      if (event.reason === "overflow" && event.aborted !== true) overflowed = true;
       noteState();
-      return undefined;
     });
-    for (const done of ["session_compact", "session_compact_failed"]) {
-      pi.on(done, (event, ctx) => {
-        live = ctx;
-        compacted();
-        // pi's own overflow recovery could not make the context fit — the model refused the
-        // prompt as over its limit and compacting it failed, or failed again — so the run
-        // ends on that refusal: what it settles on is a context that is full.
-        if (done === "session_compact_failed" && event.reason === "overflow" && event.aborted !== true) {
-          overflowed = true;
-        }
-        noteState();
-      });
-    }
   }
+  // pi compacts after a run as well as when its person asks, and takes no words until it is
+  // done ([`compacting`]). Steery's own compaction is answered here with its summary and
+  // cut, and no model runs ([`compact`]); every other compaction passes untouched. One
+  // carrying Steery's marker for an ask that already gave up is cancelled: the harness would
+  // summarise it with its model.
+  pi.on("session_before_compact", (event, ctx) => {
+    live = ctx;
+    if (HARNESS === "pi") compacting ??= Promise.withResolvers<void>();
+    noteState();
+    const asked = event.customInstructions;
+    if (typeof asked !== "string" || !asked.startsWith(COMPACT_MARK)) return undefined;
+    const own = ownCompaction;
+    if (own?.marker !== asked) return { cancel: true };
+    const preparation = event.preparation && typeof event.preparation === "object" ? event.preparation : {};
+    const said = "previousSummary" in preparation ? preparation.previousSummary : undefined;
+    const latest = entriesOf(event.branchEntries).findLast((entry) => entry.type === "compaction")?.summary;
+    const previous = typeof said === "string" ? said : typeof latest === "string" ? latest : "";
+    const tokensBefore = "tokensBefore" in preparation ? preparation.tokensBefore : undefined;
+    return {
+      compaction: {
+        summary: previous ? `${previous}\n\n${own.summary}` : own.summary,
+        firstKeptEntryId: own.cut,
+        tokensBefore: typeof tokensBefore === "number" ? tokensBefore : 0,
+        details: { steery: own.id },
+      },
+    };
+  });
+  pi.on("session_compact", (event, ctx) => {
+    live = ctx;
+    const details = entriesOf([event.compactionEntry])[0]?.details;
+    const own = ownCompaction;
+    if (own && details && typeof details === "object" && "steery" in details && details.steery === own.id) {
+      own.seen = true;
+    }
+    if (HARNESS === "pi") compacted();
+    noteState();
+  });
   /**
    * Steery's words to keep a turn about to end going, from the runtime (`settle`'s
    * answer, `ok.say`): none where the turn asked its person, its agent parked the
