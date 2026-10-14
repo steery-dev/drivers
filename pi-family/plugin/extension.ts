@@ -25,8 +25,8 @@
 // conversation's last moments as it closes — a failure is swallowed, and a Steery that
 // is gone leaves the harness exactly as it would be without this file.
 
-import { closeSync, constants, existsSync, openSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { closeSync, constants, existsSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 /** `O_CLOEXEC` from `<fcntl.h>`, which `node:fs` does not export. */
 const O_CLOEXEC = process.platform === "darwin" ? 0x1000000 : 0o2000000;
@@ -593,6 +593,13 @@ function speaker(ctx: Context): { session_id: string; agent_id?: string } {
  * another conversation as that one's sub-agent, and files its Steery calls under it.
  */
 const LEAD = "STEERY_LEAD";
+
+/**
+ * The variable naming a file that holds a `compact` ask, exactly as the door carries one,
+ * for a turn the runtime starts: the door opens only as its prompt runs, and the ask must be
+ * answered before. The answer goes to `compacted.json` beside it (PROTOCOL.md §4.4).
+ */
+const COMPACT_ASK = "STEERY_COMPACT";
 
 /**
  * The lead this process inherited from whatever started it, read before any session here
@@ -3493,6 +3500,45 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     wanted = true;
     dial();
   };
+  /**
+   * Answer a `compact` ask a turn the runtime started carries in a file ([`COMPACT_ASK`]),
+   * as the door answers one ([`compact`]), before the turn's prompt runs: both harnesses
+   * await `session_start` before it, and their prompt waits for the compaction to be over.
+   * The answer frame goes to `compacted.json` beside the ask, readable by its owner only;
+   * an ask that cannot be read is answered nothing. The ask is taken from its file before it
+   * is read: omp's shells copy the process's own environment, which deleting the variable
+   * from `process.env` leaves as it was, so a harness a tool starts finds it too.
+   */
+  const compactAsked = async (ctx: Context, file: string) => {
+    const taken = `${file}.taken`;
+    let ask: unknown;
+    try {
+      renameSync(file, taken);
+      ask = JSON.parse(readFileSync(taken, "utf8"));
+    } catch {
+      return;
+    } finally {
+      rmSync(taken, { force: true });
+    }
+    if (!ask || typeof ask !== "object" || !("t" in ask) || ask.t !== "ask" || !("op" in ask) || ask.op !== "compact") {
+      return;
+    }
+    const id = "id" in ask ? ask.id : undefined;
+    if (typeof id !== "string" || !id) return;
+    const before = "before" in ask ? ask.before : undefined;
+    const summary = "summary" in ask ? ask.summary : undefined;
+    const least = "least" in ask ? ask.least : undefined;
+    const said: Said = led(ctx)
+      ? { refused: "refused", error: "a sub-agent's conversation takes this at its lead" }
+      : await compact(ctx, id, before, summary, least).catch(
+          (error: unknown): Said => ({ refused: "refused", error: String(error) }),
+        );
+    try {
+      writeFileSync(join(dirname(file), "compacted.json"), JSON.stringify({ t: "answer", id, ...said }), { mode: 0o600 });
+    } catch {
+      // The runtime reads no answer, and says the words as it would without one.
+    }
+  };
   pi.on("session_start", (event, ctx) => {
     const id = ctx.sessionManager.getSessionId();
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
@@ -3509,6 +3555,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     begin(ctx);
     moved(event, ctx);
     moment("SessionStart", document(ctx));
+    // Only the process's first start finds the ask: nothing it starts may inherit it.
+    const file = process.env[COMPACT_ASK];
+    delete process.env[COMPACT_ASK];
+    return file ? compactAsked(ctx, file) : undefined;
   });
   // omp moves one session to another in place, without a new start: the door closes and
   // opens again, now for the conversation the session is. Its person's `/new` leaves the
