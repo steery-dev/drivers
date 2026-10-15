@@ -2270,6 +2270,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * for: `/compact`, rpc `compact`, or an extension's `compact`, as pi says `manual` too.
    */
   let autoCompaction: { reason?: string } | undefined;
+  /**
+   * The cause last written ([`COMPACTION`]), until a compaction or a message is written
+   * after it: omp offers `session_before_compact` again for each method it tries
+   * (v18.10.4), and the entry already stands before the compaction to come.
+   */
+  let causeWritten: string | undefined;
 
   /**
    * The harness wrote these words into the conversation as the person's message: the ones
@@ -3745,6 +3751,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   pi.on("message_end", (event, ctx) => {
     live = ctx;
     taken(spoken(event.message));
+    causeWritten = undefined;
     const answer = event.message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | null | undefined;
     if (answer && typeof answer === "object" && answer.role === "assistant") {
       if (answer.stopReason === "error") failure = typeof answer.errorMessage === "string" ? answer.errorMessage : "";
@@ -3890,9 +3897,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const asked = event.customInstructions;
     if (typeof asked !== "string" || !asked.startsWith(COMPACT_MARK)) {
       const by = compactor(event.reason);
-      if (by) {
+      const cause = by && JSON.stringify(by);
+      if (cause && cause !== causeWritten) {
         try {
           pi.appendEntry?.(COMPACTION, by);
+          causeWritten = cause;
         } catch {
           // A transcript that cannot be written says only the compaction.
         }
@@ -3917,6 +3926,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   });
   pi.on("session_compact", (event, ctx) => {
     live = ctx;
+    causeWritten = undefined;
     const details = entriesOf([event.compactionEntry])[0]?.details;
     const own = ownCompaction;
     if (own && details && typeof details === "object" && "steery" in details && details.steery === own.id) {
