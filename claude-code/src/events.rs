@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Clip, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
+    Clip, Compactor, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
 };
 
 use crate::calls;
@@ -156,8 +156,32 @@ impl State<'_> {
             Some("system") if text(record, "subtype") == Some("turn_duration") => {
                 self.end(TurnState::Finished, None);
             }
+            Some("system") if text(record, "subtype") == Some("compact_boundary") => {
+                self.compacted(id, record.get("compactMetadata"));
+            }
             _ => {}
         }
+    }
+
+    /// Claude Code's `compact_boundary`: `trigger` `manual` where its person ran `/compact`,
+    /// `auto` where the context reached its limit, and the context's tokens before and
+    /// after (`preTokens`, `postTokens`).
+    fn compacted(&mut self, id: String, metadata: Option<&Value>) {
+        let tokens = |name: &str| metadata?.get(name)?.as_u64();
+        let by = match metadata.and_then(|metadata| text(metadata, "trigger")) {
+            Some("manual") => Compactor::Person,
+            Some("auto") => Compactor::Harness {
+                reason: Some("threshold".into()),
+            },
+            _ => Compactor::Harness { reason: None },
+        };
+        self.out.push(Event::Compacted {
+            at: self.at,
+            id,
+            by,
+            tokens_before: tokens("preTokens"),
+            tokens_after: tokens("postTokens"),
+        });
     }
 
     fn user(&mut self, id: String, record: &Value) {
@@ -1214,12 +1238,28 @@ mod tests {
         )));
     }
 
-    /// A compaction's summary is the harness's summary of earlier history.
+    /// A compaction is its `compact_boundary`: who made it by its `trigger`, and the
+    /// context's tokens before and after; its summary is the harness's summary of earlier
+    /// history. A sub-agent's compaction inlined in its lead's transcript is none of the
+    /// lead's.
     #[test]
-    fn a_compaction_is_a_summary() {
+    fn a_compaction_says_who_made_it_and_is_a_summary() {
+        let boundary = |uuid: &str, metadata: Value| {
+            json!({"parentUuid": null, "logicalParentUuid": "735e2458", "isSidechain": false,
+                "type": "system", "subtype": "compact_boundary", "content": "Conversation compacted",
+                "isMeta": false, "timestamp": "2026-06-30T11:39:50.021Z", "uuid": uuid, "level": "info",
+                "compactMetadata": metadata})
+        };
         let read = events(&[
+            boundary("147513ec", json!({"trigger": "manual", "preTokens": 165775, "durationMs": 95526,
+                "preservedSegment": {"headUuid": "6d6a85c0", "anchorUuid": "d153c248", "tailUuid": "735e2458"}})),
             json!({"type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
             "message": {"role": "user", "content": "This session is being continued. Summary: built the parser."}}),
+            boundary("2f0c9d1a", json!({"trigger": "auto", "preTokens": 929582, "postTokens": 41230,
+                "cumulativeDroppedTokens": 888352, "durationMs": 70211})),
+            boundary("5e1b7c40", json!({"preTokens": 120000})),
+            json!({"isSidechain": true, "type": "system", "subtype": "compact_boundary", "uuid": "side",
+                "compactMetadata": {"trigger": "auto", "preTokens": 180000}}),
         ]);
         assert_eq!(
             said(&read),
@@ -1227,6 +1267,33 @@ mod tests {
                 Voice::Summary,
                 "This session is being continued. Summary: built the parser."
             )]
+        );
+        let at = millis("2026-06-30T11:39:50.021Z").unwrap();
+        let compacted = |id: &str, by: Compactor, before: u64, after: Option<u64>| Event::Compacted {
+            at,
+            id: id.into(),
+            by,
+            tokens_before: Some(before),
+            tokens_after: after,
+        };
+        let compactions: Vec<&Event> = read
+            .iter()
+            .filter(|event| matches!(event, Event::Compacted { .. }))
+            .collect();
+        assert_eq!(
+            compactions,
+            [
+                &compacted("147513ec", Compactor::Person, 165_775, None),
+                &compacted(
+                    "2f0c9d1a",
+                    Compactor::Harness {
+                        reason: Some("threshold".into())
+                    },
+                    929_582,
+                    Some(41_230)
+                ),
+                &compacted("5e1b7c40", Compactor::Harness { reason: None }, 120_000, None),
+            ]
         );
     }
 }
