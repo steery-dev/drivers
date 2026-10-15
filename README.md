@@ -18,7 +18,7 @@ mark, is what its `initialize` says.
 |---|---|---|---|
 | `omp` | omp | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
-| `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
+| `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox, and a fork for its recap) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`, so it builds alone.
@@ -272,13 +272,21 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
     the transcript past a mark.
   - `models`: the model in `settings.json`, and Claude Code's effort levels for any other.
   - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode` and no session
-    kept.
+    kept. Claude Code asks its provider again once after a refusal
+    (`CLAUDE_CODE_MAX_RETRIES=1`), so a rate limit or a sign-in gone is said in its own
+    words, on standard output, within the runtime's bound, never waited out.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session
     holds it, and the Claude app's link for a conversation it started.
-- **Live** (`say`). Words go into the inbox socket the registered session opens, after its
-  peer token; the socket says nothing back, so they are unconfirmed and the runtime finds
-  them with `receipt/find`. The session keeps its own model, so `pick` is unsupported, and
-  there is no `recap`.
+- **Live** (`say`, `recap`). Words go into the inbox socket the registered session opens,
+  after its peer token; the socket says nothing back, so they are unconfirmed and the
+  runtime finds them with `receipt/find`. The inbox reads them as words, never as a
+  command, and the session keeps its own model, so `pick` is unsupported. `recap` is
+  written by the conversation's own model on its own history, in a one-shot fork that
+  keeps nothing (`claude --print --resume <id> --fork-session --no-session-persistence
+  --safe-mode`, no tools, no MCP server, no retry), within 35 seconds.
+- **Knowing.** The skill carries `${CLAUDE_SESSION_ID}`, which Claude Code substitutes as
+  it loads it; Claude Code 2.1.300 also puts the same id in `CLAUDE_CODE_SESSION_ID` on
+  every command it runs for the agent.
 
 ```sh
 cd claude-code && cargo build

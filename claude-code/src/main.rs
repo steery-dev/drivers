@@ -1,7 +1,8 @@
 //! Steery's `claude-code` driver, at observe, drive and live. It reads Claude
 //! Code's conversations from their transcripts, plans the entries that set Claude Code up
-//! for Steery, answers its hooks, plans and follows its background sessions' turns, and
-//! reaches a live session through the inbox socket Claude Code opens for it.
+//! for Steery, answers its hooks, plans and follows its background sessions' turns,
+//! reaches a live session through the inbox socket Claude Code opens for it, and has a
+//! conversation's own model recap it in a fork that keeps nothing.
 //!
 //! Run as `steery-driver-claude-code turn …`, it is one turn's follower ([`turn`]), which
 //! `start` plans.
@@ -53,14 +54,16 @@ pub(crate) const STEERY: &str = "steery";
 /// How an agent in Claude Code learns its conversation's id, as Steery's skill says it.
 /// Claude Code substitutes `${CLAUDE_SESSION_ID}` into a skill as it loads it: a skill
 /// carrying that name was read back holding a UUID, and a transcript named for that same
-/// UUID was written under the project. No variable in the agent's environment carries it;
-/// the only other place it appears is the hook document, which a hook reads and an agent
-/// cannot.
+/// UUID was written under the project. Claude Code 2.1.300 also puts the id in
+/// `CLAUDE_CODE_SESSION_ID` on every process it starts, its own over any it inherited:
+/// `printenv CLAUDE_CODE_SESSION_ID` run by its Bash tool answered the id of the
+/// conversation running it. An older release may set neither.
 const KNOWING: &str = "Claude Code substitutes the identifier into this text as it loads it, so it is already\n\
                        here: `${CLAUDE_SESSION_ID}`. Send what you are reading there, if what you are reading is\n\
-                       a UUID. If it still reads as that name in braces then nothing replaced it, and nothing\n\
-                       else on this machine reaches the identifier — no variable in your environment carries it\n\
-                       — so describe nothing.";
+                       a UUID. If it still reads as that name in braces, run `printenv CLAUDE_CODE_SESSION_ID`:\n\
+                       Claude Code puts the same identifier in the environment of every command it runs for you.\n\
+                       If neither gives you a UUID — an older Claude Code sets neither — you have no\n\
+                       identifier: describe nothing.";
 
 /// How Claude Code's transcript file reads.
 const TRANSCRIPT: &str = "One JSON record per line: `user` and `assistant` records carry `message.content`, \
@@ -173,8 +176,8 @@ impl Program for ClaudeCode {
                     "Claude Code's inbox keeps the session's own model",
                 ))
             }
-            // A reader's output is its answer whole, and Claude Code has no recap of its
-            // own a live session gives.
+            method::RECAP => result(live::recap(self.store()?, given(params)?).await?),
+            // A reader's output is its answer whole, so there is no `reader/read`.
             _ => Err(Error::Unknown),
         }
     }

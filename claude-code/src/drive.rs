@@ -552,7 +552,7 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
 }
 
 /// The configuration root a transcript is filed under: `<root>/projects/<folder>/<id>.jsonl`.
-fn config_root(transcript: &Path) -> Option<&Path> {
+pub(crate) fn config_root(transcript: &Path) -> Option<&Path> {
     let projects = transcript.parent()?.parent()?;
     (projects.file_name()? == "projects").then_some(())?;
     projects.parent()
@@ -581,6 +581,9 @@ fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
+/// The variable that bounds how often Claude Code asks its provider again after a refusal.
+pub(crate) const RETRIES: &str = "CLAUDE_CODE_MAX_RETRIES";
+
 /// `reader`: `claude --print`, the words on standard input, on the model given, else the
 /// one this machine chose in Claude Code's settings, with nothing of the machine's
 /// own: `--tools ""` disables every built-in tool (or `Read,Glob,Grep` for a reader that
@@ -589,6 +592,12 @@ fn quoted(word: &str) -> String {
 /// `--safe-mode` drops memory files, skills, plugins, hooks — Steery's own among them,
 /// so the run is never seen as a conversation — commands and agents, and
 /// `--no-session-persistence` leaves nothing behind. The answer is the whole output.
+///
+/// Claude Code asks its provider again after a refusal ten times by default, waiting as
+/// long as each refusal says: a rate limit saying "Retry in 60s" held a reader past the
+/// runtime's 240 seconds, killed with no reason. One retry (`CLAUDE_CODE_MAX_RETRIES`)
+/// rides out a passing overload and still exits within the bound, its provider's words
+/// on standard output (measured on 2.1.300: 61 s with one, 1.3 s with none).
 pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
@@ -628,7 +637,7 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     );
     Ok(ReaderPlan {
         argv,
-        env: BTreeMap::new(),
+        env: BTreeMap::from([(RETRIES.to_owned(), "1".to_owned())]),
         cwd: reader.cwd,
         stdin: Stdin::Words,
         files: Vec::new(),
