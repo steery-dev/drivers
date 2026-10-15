@@ -100,6 +100,18 @@ const WARM_SHARE = 0.5;
 const CACHED_MS = 5 * 60_000;
 const CACHED_HOUR_MS = 60 * 60_000;
 
+/**
+ * The turn and its answer a compacted context opens with, before its summary ([`opened`]).
+ * A proxy that cloaks the harness as Claude Code on a Claude subscription (CLIProxyAPI) sends
+ * the system prompt as a turn after the first person's turn, so a compaction changed what
+ * comes before it and the call after wrote it to the cache again; after these it stays
+ * cached, its breakpoint kept ([`unanchored`]). Through omp on 2026-10-16, the call after a
+ * new summary read 22,427 tokens from the cache and wrote 1,369 with both; with either
+ * missing it read 8,339, the tools alone, and wrote about 15,400.
+ */
+const OPENING = "This conversation was compacted: the next message summarises its earlier work.";
+const OPENED = "Understood.";
+
 /** The fields of a message and its parts whose characters a model reads. */
 const READ_FIELDS: Record<string, true> = {
   content: true,
@@ -226,7 +238,7 @@ function entry(json: string): Record<string, unknown> {
 type Usage = { tokens?: number | null; contextWindow?: number } | undefined;
 
 /** A model as both harnesses hold one; Steery names it `<provider>/<id>`. */
-type Model = { provider: string; id: string };
+type Model = { provider: string; id: string; /** The wire its provider speaks. */ api?: string };
 
 /** One model request's answer, as both harnesses return it: its text parts and how it stopped. */
 type Answered = { content?: { type?: string; text?: string }[]; stopReason?: string; errorMessage?: string };
@@ -410,6 +422,10 @@ type Event = {
   customInstructions?: unknown;
   /** `session_compact`: the entry it wrote. */
   compactionEntry?: unknown;
+  /** `context`: the messages the model is handed on this call, a copy the handler may change. */
+  messages?: unknown;
+  /** `before_provider_request`: what goes to the model's provider, the harness's to send unless replaced. */
+  payload?: unknown;
 };
 
 type Api = {
@@ -662,6 +678,52 @@ function worth(branch: Entry[], forgot: number, summary: number, now: number): b
     cached = countedOf(entry)?.hour === true;
   }
   return !cached || forgot >= WARM_SHARE * (last.total - forgot + summary);
+}
+
+/**
+ * The messages a call hands `model`, opened with [`OPENING`] and its answer where they start
+ * with a compaction's summary; else nothing, and the call goes as it was.
+ */
+function opened(messages: unknown, model: Model | undefined): unknown[] | undefined {
+  if (!Array.isArray(messages) || !model?.api) return undefined;
+  const first: unknown = messages[0];
+  if (!first || typeof first !== "object" || !("role" in first) || first.role !== "compactionSummary") return undefined;
+  const timestamp = "timestamp" in first && typeof first.timestamp === "number" ? first.timestamp : Date.now();
+  const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost };
+  return [
+    { role: "user", content: [{ type: "text", text: OPENING }], timestamp },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: OPENED }],
+      api: model.api,
+      provider: model.provider,
+      model: model.id,
+      usage,
+      stopReason: "stop",
+      timestamp,
+    },
+    ...messages,
+  ];
+}
+
+/**
+ * A provider request with no cache breakpoint on its tools, else nothing where none carries
+ * one. A request takes at most four; omp spends one on its tools, which every breakpoint
+ * after them covers too. A proxy that cloaks it as Claude Code (CLIProxyAPI) adds its own and
+ * then drops the earliest message's, the system prompt it moved into a turn ([`OPENING`]).
+ */
+function unanchored(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || !("tools" in payload) || !Array.isArray(payload.tools)) return undefined;
+  const anchored = (tool: unknown): tool is { cache_control: unknown } =>
+    !!tool && typeof tool === "object" && "cache_control" in tool;
+  if (!payload.tools.some(anchored)) return undefined;
+  const tools = payload.tools.map((tool: unknown) => {
+    if (!anchored(tool)) return tool;
+    const { cache_control: _, ...rest } = tool;
+    return rest;
+  });
+  return { ...payload, tools };
 }
 
 /**
@@ -4029,6 +4091,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (HARNESS === "pi") compacted();
     noteState();
   });
+  // Every call of a compacted context, whoever compacted it, opens before its summary
+  // ([`opened`]), and no call spends a cache breakpoint on its tools ([`unanchored`]).
+  pi.on("context", (event, ctx) => {
+    const messages = opened(event.messages, ctx.model);
+    return messages && { messages };
+  });
+  pi.on("before_provider_request", (event) => unanchored(event.payload));
   /**
    * Steery's words to keep a turn about to end going, from the runtime (`settle`'s
    * answer, `ok.say`): none where the turn asked its person, its agent parked the
