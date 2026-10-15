@@ -83,6 +83,23 @@ const COMPACT_MARK = "steery-compact:";
 /** What pi counts an image as, in characters, for its four-to-a-token estimate. */
 const IMAGE_CHARS = 4800;
 
+/** Characters to a token where a branch's model counted none of it ([`tokenRate`]): pi's own estimate. */
+const CHARS_PER_TOKEN = 4;
+
+/**
+ * The least share of what the context holds after a compaction that the compaction must
+ * forget while the provider still caches the context ([`worth`]). Every call after it then
+ * reads what it forgot no more, at a cache read each, but the first writes all that stays to
+ * the cache again, twenty times a read for Anthropic's one-hour entries. Over Steery's 145
+ * compactions on one Mac on 2026-10-15, the 27 a half would have stopped lost $7.37 in 18
+ * and saved $2.57 in 9.
+ */
+const WARM_SHARE = 0.5;
+
+/** How long a provider caches a context after its last call: five minutes, or an hour where its writes say so ([`worth`]). */
+const CACHED_MS = 5 * 60_000;
+const CACHED_HOUR_MS = 60 * 60_000;
+
 /** The fields of a message and its parts whose characters a model reads. */
 const READ_FIELDS: Record<string, true> = {
   content: true,
@@ -479,7 +496,7 @@ function reached(pi: Api): boolean {
  * pi, after any edit to the context, counts four characters to a token, and read 630,362
  * tokens for a conversation the model had counted at 1,000,920 — 63% used while the model
  * refused every request as too long. The model's own count stands until a compaction or a
- * branch summary replaces what it read ([`counted`]), so the larger of the two is used.
+ * branch summary replaces what it read ([`newest`]), so the larger of the two is used.
  */
 function left(ctx: Context): number | undefined {
   try {
@@ -487,7 +504,7 @@ function left(ctx: Context): number | undefined {
     const window = usage?.contextWindow;
     if (typeof window !== "number" || !(window > 0)) return undefined;
     const estimate = typeof usage?.tokens === "number" ? usage.tokens : undefined;
-    const model = counted(ctx);
+    const model = newest(ctx.sessionManager.getBranch?.() ?? [])?.total;
     const tokens = estimate === undefined ? model : Math.max(estimate, model ?? 0);
     if (tokens === undefined) return undefined;
     return Math.min(1, Math.max(0, 1 - tokens / window));
@@ -497,23 +514,35 @@ function left(ctx: Context): number | undefined {
 }
 
 /**
- * The tokens the model counted for the last response it gave — what it read and what it
- * wrote — while that is still what the conversation holds: nothing once a compaction or a
- * branch summary came after it. A failed or aborted response counts nothing.
+ * What the model counted for a response of the assistant's: the tokens it read (`read`),
+ * all it read and wrote (`total`), and whether it wrote the cache's one-hour entries (omp's
+ * `usage.cttl`). None for a failed or aborted response, or one that counted nothing.
  */
-function counted(ctx: Context): number | undefined {
-  const entries = ctx.sessionManager.getBranch?.() ?? [];
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const entry = entries[i];
+function countedOf(entry: Entry): { read: number; total: number; hour: boolean } | undefined {
+  if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") return undefined;
+  const message = entry.message as { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> };
+  if (message.role !== "assistant" || message.stopReason === "error" || message.stopReason === "aborted") return undefined;
+  const usage = message.usage ?? {};
+  const n = (key: string) => (typeof usage[key] === "number" ? (usage[key] as number) : 0);
+  const read = n("input") + n("cacheRead") + n("cacheWrite");
+  const total = n("totalTokens") || read + n("output");
+  if (!(total > 0)) return undefined;
+  const ttl = usage.cttl && typeof usage.cttl === "object" ? (usage.cttl as Record<string, unknown>) : {};
+  return { read, total, hour: typeof ttl.ephemeral1h === "number" && ttl.ephemeral1h > 0 };
+}
+
+/**
+ * The newest response of a branch while it is still what the conversation holds — none once
+ * a compaction or a branch summary came after it — at its index, with all its model counted.
+ */
+function newest(branch: readonly unknown[]): { at: number; entry: Entry; total: number } | undefined {
+  for (let at = branch.length - 1; at >= 0; at--) {
+    const entry = branch[at];
     if (!entry || typeof entry !== "object" || !("type" in entry)) continue;
-    if (entry.type === "compaction" || entry.type === "branch_summary") return undefined;
-    if (entry.type !== "message" || !("message" in entry)) continue;
-    const message = entry.message as { role?: unknown; stopReason?: unknown; usage?: Record<string, unknown> } | null;
-    if (message?.role !== "assistant" || message.stopReason === "error" || message.stopReason === "aborted") continue;
-    const usage = message.usage ?? {};
-    const n = (key: string) => (typeof usage[key] === "number" ? (usage[key] as number) : 0);
-    const total = n("totalTokens") || n("input") + n("output") + n("cacheRead") + n("cacheWrite");
-    if (total > 0) return total;
+    const one = entry as Entry;
+    if (one.type === "compaction" || one.type === "branch_summary") return undefined;
+    const counted = countedOf(one);
+    if (counted) return { at, entry: one, total: counted.total };
   }
   return undefined;
 }
@@ -555,13 +584,47 @@ function chars(value: unknown): number {
 }
 
 /**
+ * Tokens to a character of what the model reads of a branch, as its own model counted them:
+ * how much more each response read than the one before it in the same context, over the
+ * characters of the entries between ([`chars`]). Code and tool output run near two
+ * characters a token, and pi's four counted about half of what Steery's compactions forgot.
+ * Where the branch's model counted no such growth, pi's four ([`CHARS_PER_TOKEN`]).
+ */
+function tokenRate(branch: Entry[]): number {
+  let tokens = 0;
+  let read = 0;
+  let previous: { at: number; read: number } | undefined;
+  for (let at = 0; at < branch.length; at++) {
+    const entry = branch[at];
+    if (entry.type === "compaction" || entry.type === "branch_summary") {
+      previous = undefined;
+      continue;
+    }
+    const counted = countedOf(entry);
+    if (!counted || !(counted.read > 0)) continue;
+    if (previous) {
+      let between = 0;
+      for (let one = previous.at; one < at; one++) between += chars(branch[one].message ?? branch[one]);
+      const grew = counted.read - previous.read;
+      if (grew > 0 && between > 0) {
+        tokens += grew;
+        read += between;
+      }
+    }
+    previous = { at, read: counted.read };
+  }
+  return tokens > 0 ? tokens / read : 1 / CHARS_PER_TOKEN;
+}
+
+/**
  * Where Steery's compaction of a branch would cut ([`compact`]). The context starts at the
  * first entry the latest compaction kept, else at the first entry (`from`). The cut is the
  * last message of the person's or the assistant's — never a tool result — written at or
  * before `before`, after the latest compaction and the context's start; what it forgets is
- * every entry from the start to the cut but that compaction, four characters to a token.
+ * every entry from the start to the cut but that compaction, at `rate` tokens a character
+ * ([`tokenRate`]).
  */
-function cutOf(branch: Entry[], before: number): { from: number; cut?: Entry; forgot: number } {
+function cutOf(branch: Entry[], before: number, rate: number): { from: number; cut?: Entry; forgot: number } {
   const latest = branch.findLastIndex((entry) => entry.type === "compaction");
   const kept = latest < 0 ? 0 : branch.findIndex((entry) => entry.id === branch[latest]?.firstKeptEntryId);
   const start = kept < 0 ? latest : kept;
@@ -576,9 +639,29 @@ function cutOf(branch: Entry[], before: number): { from: number; cut?: Entry; fo
     }
     let read = 0;
     for (const one of branch.slice(start, at)) read += one.type === "compaction" ? 0 : chars(one.message ?? one);
-    return { from, cut: entry, forgot: Math.ceil(read / 4) };
+    return { from, cut: entry, forgot: Math.ceil(read * rate) };
   }
   return { from, forgot: 0 };
+}
+
+/**
+ * Whether forgetting `forgot` tokens for a summary of `summary` tokens pays for itself
+ * ([`WARM_SHARE`]). Always where the provider caches nothing of the context: no response
+ * since the latest compaction ([`newest`]), or the newest written longer ago than the cache
+ * lives — an hour where a response of the context wrote one-hour entries, else five
+ * minutes. Else only where it forgets at least that share of what the context holds after.
+ */
+function worth(branch: Entry[], forgot: number, summary: number, now: number): boolean {
+  const last = newest(branch);
+  const at = writtenAt(last?.entry);
+  if (!last || at === undefined || now - at >= CACHED_HOUR_MS) return true;
+  let cached = now - at < CACHED_MS;
+  for (let one = last.at; !cached && one >= 0; one--) {
+    const entry = branch[one];
+    if (entry.type === "compaction" || entry.type === "branch_summary") break;
+    cached = countedOf(entry)?.hour === true;
+  }
+  return !cached || forgot >= WARM_SHARE * (last.total - forgot + summary);
 }
 
 /**
@@ -3221,11 +3304,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * compaction with no model run: its `session_before_compact` hook answers this ask alone,
    * known by its marker ([`ownCompaction`]). Only while the conversation is quiet: either
    * harness aborts a turn it compacts under. Where the cut ([`cutOf`]) would forget fewer
-   * than `least` tokens, or the harness finds nothing to compact, nothing is done
-   * (`forgot: 0`, `from` where the context starts now). Words asked meanwhile wait
-   * ([`compacting`]). Answered `{from, forgot}`, `from` when the cut entry was written, once
-   * the harness wrote Steery's compaction; whatever else became of it within
-   * [`COMPACTED_WITHIN_MS`] is refused with the harness's own line.
+   * than `least` tokens, the provider still caches the context and the cut is too small to
+   * pay for writing what stays to its cache again ([`worth`]), or the harness finds nothing
+   * to compact, nothing is done (`forgot: 0`, `from` where the context starts now). Words
+   * asked meanwhile wait ([`compacting`]). Answered `{from, forgot}`, `from` when the cut
+   * entry was written, once the harness wrote Steery's compaction; whatever else became of
+   * it within [`COMPACTED_WITHIN_MS`] is refused with the harness's own line.
    */
   const compact = async (ctx: Context, id: string, before: unknown, summary: unknown, least: unknown): Promise<Said> => {
     if (typeof before !== "number" || !Number.isSafeInteger(before) || before < 0) {
@@ -3241,9 +3325,19 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (turning || !quiet(ctx)) {
       return { refused: "harness-busy", error: "the conversation is working, has words waiting, or somebody is typing" };
     }
-    const { from, cut, forgot } = cutOf(entriesOf(ctx.sessionManager.getBranch?.()), before);
+    const branch = entriesOf(ctx.sessionManager.getBranch?.());
+    const rate = tokenRate(branch);
+    const { from, cut, forgot } = cutOf(branch, before, rate);
     const at = writtenAt(cut);
-    if (!cut || typeof cut.id !== "string" || at === undefined || forgot < least) return { ok: { from, forgot: 0 } };
+    if (
+      !cut ||
+      typeof cut.id !== "string" ||
+      at === undefined ||
+      forgot < least ||
+      !worth(branch, forgot, Math.ceil(summary.length * rate), Date.now())
+    ) {
+      return { ok: { from, forgot: 0 } };
+    }
     const marker = `${COMPACT_MARK}${id}`;
     const own = { id, marker, summary, cut: cut.id, seen: false };
     ownCompaction = own;
