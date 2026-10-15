@@ -699,6 +699,8 @@ fn read_from(
             let (read, cut) =
                 records(&open, off, len, budget, first).map_err(|_| unreadable(&segment.file))?;
             first = false;
+            // Every stretch before a fork is the history it took from its parent.
+            let copied = segments[seg..].iter().any(|later| later.fork.is_some());
             for (start, record) in &read.records {
                 if let Some(record) = record {
                     let at = stamped(record).unwrap_or(0);
@@ -708,6 +710,7 @@ fn read_from(
                                 segment: seg,
                                 offset: *start,
                                 at,
+                                copied,
                                 record,
                             },
                             &mut events,
@@ -850,7 +853,7 @@ fn records(
 mod tests {
     use super::*;
     use serde_json::json;
-    use steery_sdk::wire::harness::Voice;
+    use steery_sdk::wire::harness::{Compactor, Voice};
 
     fn home() -> PathBuf {
         let home = std::env::temp_dir().join(format!("steery-codex-{}", uuid::Uuid::now_v7()));
@@ -1058,8 +1061,8 @@ mod tests {
     }
 
     /// A fork reads its parent's history up to where it was taken, then says the fork,
-    /// then its own; a cursor goes on where the last read stopped, and a tail reads only
-    /// the newest records.
+    /// then its own; a compaction in what it took was its parent's. A cursor goes on where
+    /// the last read stopped, and a tail reads only the newest records.
     #[test]
     fn a_fork_reads_its_parent_s_history_first_and_a_cursor_goes_on() {
         let home = home();
@@ -1070,36 +1073,53 @@ mod tests {
             json!({"timestamp": at, "type": "response_item", "payload":
             {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
         };
+        // Codex's `compacted` as it wrote it from 2026-09 on, its history left out.
+        let compacted = |at: &str, window: &str, total: u64| {
+            json!({"timestamp": at, "type": "compacted", "payload": {"message": "",
+                "replacement_history": [], "compaction_response_id": "msg_011CfEqmkBnmXf3CgQfUFzUj",
+                "latest_token_usage_record": {"thread_id": parent, "turn_id": "01a0bf31-a654",
+                    "response_id": "msg_011CfEqmkBnmXf3CgQfUFzUj",
+                    "usage": {"input_tokens": total - 1085, "cached_input_tokens": 13782,
+                        "cache_write_input_tokens": 0, "output_tokens": 1085,
+                        "reasoning_output_tokens": 148, "total_tokens": total}},
+                "window_id": window, "first_window_id": "01a12008-w0", "previous_window_id": "01a12008-w0",
+                "window_number": 1}})
+        };
         let parent_file = dir.join(format!("rollout-2026-10-09T09-39-59-{parent}.jsonl"));
         let taken = [
             meta(parent, parent, "2026-10-09T09:39:59Z", json!({})),
             said("2026-10-09T09:40:00Z", "first"),
+            compacted("2026-10-09T09:40:30Z", "01a12008-w1", 33_052),
         ];
         write(
             &parent_file,
             &[
                 taken[0].clone(),
                 taken[1].clone(),
+                taken[2].clone(),
                 said("2026-10-09T09:41:00Z", "after the fork"),
             ],
             ago(30),
         );
         let end: usize = taken.iter().map(|r| r.to_string().len() + 1).sum();
         let fork_file = dir.join(format!("rollout-2026-10-09T09-40-52-{fork}.jsonl"));
-        write(
-            &fork_file,
-            &[
-                meta(
-                    fork,
-                    fork,
-                    "2026-10-09T09:40:52Z",
-                    json!({"forked_from_id": parent,
-                "history_base": {"thread_id": parent, "end_byte_offset": end}}),
-                ),
-                said("2026-10-09T09:40:53Z", "again"),
-            ],
-            ago(20),
-        );
+        let own = [
+            meta(
+                fork,
+                fork,
+                "2026-10-09T09:40:52Z",
+                json!({"forked_from_id": parent,
+            "history_base": {"thread_id": parent, "end_byte_offset": end}}),
+            ),
+            said("2026-10-09T09:40:53Z", "again"),
+            // As Codex wrote it until 2026-07: no window, no tokens.
+            json!({"timestamp": "2026-10-09T09:40:54Z", "type": "compacted",
+                "payload": {"message": "", "replacement_history": [],
+                    "compaction_response_id": null, "latest_token_usage_record": null}}),
+            compacted("2026-10-09T09:40:55Z", "01a12009-w2", 412_647),
+        ];
+        let unnamed: usize = own[..2].iter().map(|r| r.to_string().len() + 1).sum();
+        write(&fork_file, &own, ago(20));
         let store = Store::new(home.clone());
         let listed = store.list(List::default());
         let session = listed
@@ -1129,6 +1149,13 @@ mod tests {
                     ..
                 } => text.clone(),
                 Event::Fork { parent, .. } => format!("fork {parent}"),
+                Event::Compacted {
+                    id,
+                    by: Compactor::Harness { reason: None },
+                    tokens_before,
+                    tokens_after: None,
+                    ..
+                } => format!("compacted {id} {tokens_before:?}"),
                 other => format!("{other:?}"),
             })
             .collect();
@@ -1137,7 +1164,9 @@ mod tests {
             [
                 "first".to_owned(),
                 format!("fork {parent}"),
-                "again".to_owned()
+                "again".to_owned(),
+                format!("compacted 1:{unnamed} None"),
+                "compacted 01a12009-w2 Some(412647)".to_owned(),
             ]
         );
 

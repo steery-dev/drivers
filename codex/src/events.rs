@@ -5,7 +5,8 @@
 //! (messages, reasoning, calls and their output); `event_msg` records say what happened
 //! (`task_started`, `task_complete`, `turn_aborted`, `token_count`, `thread_rolled_back`,
 //! `thread_settings_applied`, `error`) and repeat the items as the terminal drew them;
-//! `turn_context` says what a turn runs on; `compacted` is a summary of earlier history.
+//! `turn_context` says what a turn runs on; `compacted` is a compaction, whose summary is
+//! of earlier history.
 //! Only the items are read for words, so nothing is said twice.
 
 use std::collections::BTreeMap;
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Clip, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
+    Clip, Compactor, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
 };
 
 use crate::{calls, words};
@@ -63,6 +64,8 @@ pub struct Place<'a> {
     pub segment: usize,
     pub offset: u64,
     pub at: u64,
+    /// History a fork took from its parent: what was compacted in it was the parent's.
+    pub copied: bool,
     pub record: &'a Value,
 }
 
@@ -99,6 +102,9 @@ impl State {
                         call: None,
                         clips: Vec::new(),
                     });
+                }
+                if !place.copied {
+                    out.push(compacted(place, payload));
                 }
             }
             Some("event_msg") => return self.event(kind, payload, at, out),
@@ -663,6 +669,23 @@ pub fn person_words(blocks: &[Value]) -> Option<(String, Vec<Clip>)> {
     (!said.is_empty() || !clips.is_empty()).then_some((said, clips))
 }
 
+/// A `compacted` record as Codex writes it: named by the context window it opens
+/// (`window_id`), else where it is; who made it unrecorded. `latest_token_usage_record`
+/// is the last response's before it, whose `total_tokens` Codex counts as the context's.
+fn compacted(place: &Place<'_>, payload: &Value) -> Event {
+    Event::Compacted {
+        at: place.at,
+        id: text(payload, "window_id")
+            .filter(|id| !id.is_empty())
+            .map_or_else(|| format!("{}:{}", place.segment, place.offset), str::to_owned),
+        by: Compactor::Harness { reason: None },
+        tokens_before: payload
+            .pointer("/latest_token_usage_record/usage/total_tokens")
+            .and_then(Value::as_u64),
+        tokens_after: None,
+    }
+}
+
 /// The id of the words a record carries: Codex's own where it gives one, else where the
 /// record is.
 fn id(place: &Place<'_>, payload: &Value, n: usize) -> String {
@@ -755,6 +778,7 @@ mod tests {
                     segment: 0,
                     offset: n as u64,
                     at: stamped(record).unwrap_or(0),
+                    copied: false,
                     record,
                 },
                 &mut out,
@@ -1131,6 +1155,7 @@ mod tests {
             segment: 0,
             offset: 0,
             at: 0,
+            copied: false,
             record: &record,
         };
         assert_eq!(state.read(&place, &mut Vec::new()), Err(UNCOUNTED));
@@ -1140,6 +1165,7 @@ mod tests {
             segment: 0,
             offset: 0,
             at: 0,
+            copied: false,
             record: &record,
         };
         assert_eq!(state.read(&place, &mut Vec::new()), Err(UNCOUNTED));
