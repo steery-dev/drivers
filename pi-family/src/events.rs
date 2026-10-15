@@ -9,12 +9,17 @@
 //!
 //! pi also says the thinking level a conversation runs at, what its tool results and its
 //! own summaries spent, and, through Steery's plugin, a prompt past the model's limit.
+//!
+//! A `compaction` record is a `compacted` event. Steery's plugin writes who made a
+//! compaction that is not Steery's own just before it ([`COMPACTION`]), and a compaction can
+//! take minutes: a cause with no compaction yet and what follows it are read again later,
+//! and a message before the compaction drops it.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Clip, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
+    Clip, Compactor, Count, Event, Execution, Failure, FailureKind, TurnState, Voice,
 };
 
 use crate::{Harness, calls};
@@ -22,6 +27,10 @@ use crate::{Harness, calls};
 /// The custom entry Steery's plugin appends in pi once pi gave up compacting a prompt over
 /// the model's limit.
 const CONTEXT_FULL: &str = "steery-context-full";
+
+/// The custom entry Steery's plugin appends just before a compaction not Steery's own, saying
+/// who made it: `{by: "harness", reason?}` or `{by: "person"}`.
+const COMPACTION: &str = "steery-compaction";
 
 /// How long a transcript that ends on a failed model call stays still before the failure
 /// is the turn's end: longer than omp waits between its own retries.
@@ -57,16 +66,28 @@ pub struct Read {
     pub forked: bool,
 }
 
-/// The events of `records`, read on from where `forked` says the fork stands. `settled`:
-/// a failure still undecided at their end is the turn's end; otherwise it and everything
-/// after it are left for the next read.
-pub fn read(reading: &Reading, records: &[Record], forked: bool, settled: bool) -> Read {
+/// What a read does with what its records leave undecided at their end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The transcript may still go on: a failure still undecided, and a compaction's cause
+    /// with no compaction yet, are left with everything after them for the next read.
+    Open,
+    /// The transcript stood still for [`SETTLE`]: a failure still undecided is its turn's
+    /// end; a cause still waits for its compaction, which can take longer.
+    Still,
+    /// What was read stands: a batch that held back everything it read would never move on.
+    Forced,
+}
+
+/// The events of `records`, read on from where `forked` says the fork stands.
+pub fn read(reading: &Reading, records: &[Record], forked: bool, end: End) -> Read {
     let mut state = State {
         reading,
         at: 0,
         index: 0,
         forked,
         pending: None,
+        cause: None,
         model: None,
         thinking: None,
         out: Vec::new(),
@@ -78,15 +99,20 @@ pub fn read(reading: &Reading, records: &[Record], forked: bool, settled: bool) 
             state.record(record.start, value);
         }
     }
-    match state.pending.take() {
-        Some(pending) if !settled => {
-            state.out.truncate(pending.mark);
-            consumed = pending.index;
-            state.forked = pending.forked;
-        }
-        Some(pending) => state.out.push(pending.ended()),
-        None => {}
+    // A cause always comes after a failure still undecided: the failure's message drops any
+    // cause before it.
+    let cause = state.cause.take().filter(|_| end != End::Forced);
+    let (held, ended) = match state.pending.take() {
+        Some(pending) if end == End::Open => (Some(pending.held), None),
+        Some(pending) => (cause.map(|cause| cause.held), Some(pending.ended())),
+        None => (cause.map(|cause| cause.held), None),
+    };
+    if let Some(held) = held {
+        state.out.truncate(held.mark);
+        consumed = held.index;
+        state.forked = held.forked;
     }
+    state.out.extend(ended);
     Read {
         events: state.out,
         consumed,
@@ -94,14 +120,19 @@ pub fn read(reading: &Reading, records: &[Record], forked: bool, settled: bool) 
     }
 }
 
+/// A record left for the next read with everything after it: which it is, how many events
+/// came before it, and where the fork stood.
+struct Held {
+    index: usize,
+    mark: usize,
+    forked: bool,
+}
+
 /// A failed model call whose turn may still go on.
 struct Pending {
     at: u64,
     failure: Failure,
-    /// Which record it is, and how many events came before it.
-    index: usize,
-    mark: usize,
-    forked: bool,
+    held: Held,
 }
 
 impl Pending {
@@ -113,6 +144,12 @@ impl Pending {
             failure: Some(self.failure),
         }
     }
+}
+
+/// Who made the compaction to come, as Steery's plugin wrote it ([`COMPACTION`]).
+struct Cause {
+    by: Compactor,
+    held: Held,
 }
 
 impl State<'_> {
@@ -152,6 +189,7 @@ struct State<'a> {
     index: usize,
     forked: bool,
     pending: Option<Pending>,
+    cause: Option<Cause>,
     /// What the conversation runs on, as last said.
     model: Option<String>,
     thinking: Option<String>,
@@ -185,21 +223,27 @@ impl State<'_> {
             Some("thinking_level_change") => {
                 self.runs_on(at, None, text(record, "thinkingLevel"));
             }
-            Some("compaction" | "branch_summary") => {
-                if let Some(summary) = text(record, "summary").filter(|s| !s.trim().is_empty()) {
-                    self.words(
+            Some("compaction") => {
+                self.summarized(at, &id, record);
+                let cause = self.cause.take();
+                // History a fork copied was compacted for its parent.
+                if self.reading.fork.is_none() || self.forked {
+                    let by = match record.pointer("/details/steery").and_then(Value::as_str) {
+                        Some(compaction) => Compactor::Steery {
+                            compaction: compaction.to_owned(),
+                        },
+                        None => cause.map_or(Compactor::Harness { reason: None }, |cause| cause.by),
+                    };
+                    self.out.push(Event::Compacted {
                         at,
-                        id.clone(),
-                        Voice::Summary,
-                        summary.to_owned(),
-                        None,
-                        Vec::new(),
-                    );
-                }
-                if pi && let Some(usage) = record.get("usage") {
-                    self.out.push(tokens(at, &id, record, usage));
+                        id,
+                        by,
+                        tokens_before: record.get("tokensBefore").and_then(Value::as_u64),
+                        tokens_after: record.get("tokensAfter").and_then(Value::as_u64),
+                    });
                 }
             }
+            Some("branch_summary") => self.summarized(at, &id, record),
             // pi counts what its own entries spent too.
             Some("usage") if pi => {
                 if let Some(usage) = record.get("usage") {
@@ -212,6 +256,16 @@ impl State<'_> {
             Some("custom") if text(record, "customType") == Some("session_exit") => {
                 self.settle();
             }
+            Some("custom") if text(record, "customType") == Some(COMPACTION) => {
+                self.cause = record.get("data").and_then(compactor).map(|by| Cause {
+                    by,
+                    held: Held {
+                        index: self.index,
+                        mark: self.out.len(),
+                        forked: self.forked,
+                    },
+                });
+            }
             // Steery's plugin says so in pi, which classifies no error, once pi gave up
             // compacting a prompt over the model's limit.
             Some("custom") if pi && text(record, "customType") == Some(CONTEXT_FULL) => {
@@ -220,11 +274,31 @@ impl State<'_> {
                 }
             }
             Some("message") => {
+                self.cause = None;
                 if let Some(message) = record.get("message") {
                     self.message(at, id, message);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A compaction's or a branch's summary: its words, and in pi what it spent.
+    fn summarized(&mut self, at: u64, id: &str, record: &Value) {
+        if let Some(summary) = text(record, "summary").filter(|s| !s.trim().is_empty()) {
+            self.words(
+                at,
+                id.to_owned(),
+                Voice::Summary,
+                summary.to_owned(),
+                None,
+                Vec::new(),
+            );
+        }
+        if self.reading.harness == Harness::Pi
+            && let Some(usage) = record.get("usage")
+        {
+            self.out.push(tokens(at, id, record, usage));
         }
     }
 
@@ -314,9 +388,11 @@ impl State<'_> {
                 self.pending = Some(Pending {
                     at,
                     failure: failure(message, at),
-                    index: self.index,
-                    mark,
-                    forked,
+                    held: Held {
+                        index: self.index,
+                        mark,
+                        forked,
+                    },
                 });
             }
             // Retries given up end the failed turn as failed; an abort alone interrupts it.
@@ -528,6 +604,17 @@ impl State<'_> {
                 name,
             }),
         }
+    }
+}
+
+/// Who Steery's plugin says made the compaction after its entry ([`COMPACTION`]).
+fn compactor(data: &Value) -> Option<Compactor> {
+    match text(data, "by")? {
+        "person" => Some(Compactor::Person),
+        "harness" => Some(Compactor::Harness {
+            reason: text(data, "reason").map(str::to_owned),
+        }),
+        _ => None,
     }
 }
 
@@ -948,6 +1035,104 @@ mod tests {
                 ("k2", 1_791_140_762_311),
                 ("k3", 1_791_140_756_309)
             ]
+        );
+    }
+
+    fn compactions(events: &[Event]) -> Vec<(&str, &Compactor, Option<u64>, Option<u64>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Compacted {
+                    id,
+                    by,
+                    tokens_before,
+                    tokens_after,
+                    ..
+                } => Some((id.as_str(), by, *tokens_before, *tokens_after)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Each compaction is said with who made it and its tokens: Steery's by its marker, the
+    /// harness's or the person's by the cause Steery's plugin wrote just before it, and one
+    /// with none as the harness's, why unrecorded. A cause whose compaction has not come is
+    /// read again with it; a message between them drops it. A branch's summary is no
+    /// compaction, and a fork never says its parent's.
+    #[test]
+    fn a_compaction_says_who_made_it() {
+        let home = Home::new("compacted");
+        let file = home.write(
+            FILED,
+            &[
+                SESSION,
+                ASKED,
+                r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-01T13:19:30Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"done"}]}}"#,
+                r#"{"type":"custom","customType":"steery-compaction","data":{"by":"harness","reason":"threshold"},"id":"c","parentId":"b","timestamp":"2026-10-01T13:19:31Z"}"#,
+            ],
+        );
+        let store = home.store(Harness::Omp, None);
+        let first = read(&store, "f1", None, None);
+        assert!(compactions(&first.events).is_empty());
+        assert!(
+            first
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::TurnEnded { .. })),
+            "what came before the cause is read"
+        );
+        home.append(
+            &file,
+            &[
+                r#"{"type":"compaction","id":"d","parentId":"c","timestamp":"2026-10-01T13:19:32Z","summary":"Resume prior conversation.","shortSummary":"Archived 89,486 chars","firstKeptEntryId":"b","tokensBefore":402796,"tokensAfter":95071,"method":"snapcompact","details":{"readFiles":[],"modifiedFiles":[]},"fromExtension":false,"preserveData":{"snapcompact":{"frames":[]}}}"#,
+                r#"{"type":"compaction","id":"e","parentId":"d","timestamp":"2026-10-01T13:20:00Z","summary":"Resume prior conversation.","firstKeptEntryId":"b","tokensBefore":262897,"tokensAfter":116479,"details":{"steery":"01a13e6b-14c7-7e53-a21c-ed3fd44970cd"},"fromExtension":true}"#,
+                r#"{"type":"custom","customType":"steery-compaction","data":{"by":"person"},"id":"f","parentId":"e","timestamp":"2026-10-01T13:21:00Z"}"#,
+                r#"{"type":"message","id":"g","parentId":"f","timestamp":"2026-10-01T13:21:01Z","message":{"role":"user","content":[{"type":"text","text":"go on"}]}}"#,
+                r#"{"type":"compaction","id":"h","parentId":"g","timestamp":"2026-10-01T13:22:00Z","summary":"Goal: boot","shortSummary":"I wrapped","firstKeptEntryId":"g","tokensBefore":483002,"details":{"readFiles":[],"modifiedFiles":[]},"fromExtension":false}"#,
+                r#"{"type":"branch_summary","id":"i","parentId":"h","timestamp":"2026-10-01T13:23:00Z","fromId":"g","summary":"The branch left"}"#,
+                r#"{"type":"custom","customType":"steery-compaction","data":{"by":"person"},"id":"j","parentId":"i","timestamp":"2026-10-01T13:24:00Z"}"#,
+                r#"{"type":"compaction","id":"k","parentId":"j","timestamp":"2026-10-01T13:24:05Z","summary":"Goal: boot","firstKeptEntryId":"g","tokensBefore":120000,"tokensAfter":30000,"method":"soft","details":{},"fromExtension":false}"#,
+            ],
+        );
+        let on = read(&store, "f1", None, Some(&first.cursor));
+        let threshold = Compactor::Harness {
+            reason: Some("threshold".into()),
+        };
+        let steery = Compactor::Steery {
+            compaction: "01a13e6b-14c7-7e53-a21c-ed3fd44970cd".into(),
+        };
+        let unrecorded = Compactor::Harness { reason: None };
+        assert_eq!(
+            compactions(&on.events),
+            [
+                ("d", &threshold, Some(402_796), Some(95_071)),
+                ("e", &steery, Some(262_897), Some(116_479)),
+                ("h", &unrecorded, Some(483_002), None),
+                ("k", &Compactor::Person, Some(120_000), Some(30_000)),
+            ]
+        );
+        assert!(on.events.iter().any(|event| matches!(event,
+            Event::Words { id, voice: Voice::Summary, .. } if id == "d")));
+
+        // A fork copies its parent's records, stamped before it began.
+        home.write(
+            ".omp/agent/sessions/--tmp--/2026-10-01T14-00-00-000Z_f2.jsonl",
+            &[
+                r#"{"type":"session","version":3,"id":"f2","parentSession":"f1","cwd":"/tmp","timestamp":"2026-10-01T14:00:00Z"}"#,
+                ASKED,
+                r#"{"type":"compaction","id":"d","parentId":"a","timestamp":"2026-10-01T13:19:32Z","summary":"Resume prior conversation.","firstKeptEntryId":"a","tokensBefore":402796,"tokensAfter":95071,"method":"snapcompact","details":{},"fromExtension":false}"#,
+                r#"{"type":"message","id":"l","parentId":"d","timestamp":"2026-10-01T14:01:00Z","message":{"role":"user","content":[{"type":"text","text":"and now"}]}}"#,
+                r#"{"type":"custom","customType":"steery-compaction","data":{"by":"harness","reason":"overflow"},"id":"m","parentId":"l","timestamp":"2026-10-01T14:02:00Z"}"#,
+                r#"{"type":"compaction","id":"n","parentId":"m","timestamp":"2026-10-01T14:02:30Z","summary":"Goal: boot","firstKeptEntryId":"l","tokensBefore":210000,"tokensAfter":40000,"method":"snapcompact","details":{},"fromExtension":false}"#,
+            ],
+        );
+        let forked = read(&store, "f2", None, None);
+        let overflow = Compactor::Harness {
+            reason: Some("overflow".into()),
+        };
+        assert_eq!(
+            compactions(&forked.events),
+            [("n", &overflow, Some(210_000), Some(40_000))]
         );
     }
 }

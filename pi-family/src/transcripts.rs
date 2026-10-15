@@ -881,11 +881,16 @@ fn read_from(
                         .is_none_or(|at| at >= *began)
                 }),
             };
-            let mut said = events::read(reading, records, forked, !read.rest && still);
+            let end = if read.rest || !still {
+                events::End::Open
+            } else {
+                events::End::Still
+            };
+            let mut said = events::read(reading, records, forked, end);
             // A batch that held back everything it read would never move on: what it held
             // stands.
             if read.rest && said.consumed == 0 {
-                said = events::read(reading, records, forked, true);
+                said = events::read(reading, records, forked, events::End::Forced);
             }
             for record in &read.aside {
                 if let Some(value) = &record.value {

@@ -135,6 +135,14 @@ const FLUSH_MS = 500;
  */
 const CONTEXT_FULL = "steery-context-full";
 
+/**
+ * The custom entry written just before a compaction that is not Steery's, saying who made
+ * it: `{by: "harness", reason}` where the harness compacted on its own, `{by: "person"}`
+ * where it was asked. The driver's reader takes it by this name (`COMPACTION`) for the
+ * compaction entry after it.
+ */
+const COMPACTION = "steery-compaction";
+
 /** The first wait before dialing the door again, doubled at each failure up to the next. */
 const REDIAL_MIN_MS = 250;
 const REDIAL_MAX_MS = 2000;
@@ -367,7 +375,10 @@ type Event = {
   last_assistant_message?: unknown;
   /** omp's `agent_end`: the run goes on by itself. */
   willContinue?: unknown;
-  /** pi's `session_start` and `session_shutdown`, and omp's `session_switch`: why. */
+  /**
+   * pi's `session_start` and `session_shutdown`, omp's `session_switch`: why. omp's
+   * `auto_compaction_start` and pi's `session_before_compact`: why it compacts.
+   */
   reason?: unknown;
   /** omp's `session_switch`: the conversation it left. */
   previousSessionFile?: unknown;
@@ -400,7 +411,7 @@ type Api = {
   getCommands?(): { name: string }[];
   /** pi: an MCP server for this session, replacing one of the same name this extension registered. */
   registerMcpServer?(name: string, config: Record<string, unknown>): void;
-  /** pi: a custom entry written into the conversation's own transcript, never sent to its model. */
+  /** A custom entry written into the conversation's own transcript, never sent to its model. */
   appendEntry?(customType: string, data?: unknown): void;
   unregisterMcpServer?(name: string): void;
 };
@@ -2251,6 +2262,14 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * and whether the harness wrote it.
    */
   let ownCompaction: { id: string; marker: string; summary: string; cut: string; seen: boolean } | undefined;
+  /**
+   * omp: why it compacts on its own (`threshold`, `overflow`, `idle`, `incomplete`), from
+   * its `auto_compaction_start` to its `auto_compaction_end`. omp says no reason at its
+   * `session_before_compact`; every compaction it starts on its own and offers that hook
+   * is announced first (v18.10.4 `session-maintenance.ts`), so one not announced was asked
+   * for: `/compact`, rpc `compact`, or an extension's `compact`, as pi says `manual` too.
+   */
+  let autoCompaction: { reason?: string } | undefined;
 
   /**
    * The harness wrote these words into the conversation as the person's message: the ones
@@ -3840,17 +3859,46 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       noteState();
     });
   }
+  /**
+   * Who made the compaction `session_before_compact` announces: pi says why itself
+   * (`manual`, `threshold`, `overflow`; pi 1.1.0), omp only through its
+   * `auto_compaction_start` ([`autoCompaction`]). pi before 1.1.0 says nothing: nothing is
+   * written, and the reader says the harness made it, why unrecorded.
+   */
+  const compactor = (reason: unknown): { by: "harness"; reason?: string } | { by: "person" } | undefined => {
+    if (HARNESS === "omp") return autoCompaction ? { by: "harness", ...autoCompaction } : { by: "person" };
+    if (reason === "manual") return { by: "person" };
+    return typeof reason === "string" ? { by: "harness", reason } : undefined;
+  };
+  if (HARNESS === "omp") {
+    pi.on("auto_compaction_start", (event) => {
+      autoCompaction = typeof event.reason === "string" ? { reason: event.reason } : {};
+    });
+    pi.on("auto_compaction_end", () => {
+      autoCompaction = undefined;
+    });
+  }
   // pi compacts after a run as well as when its person asks, and takes no words until it is
   // done ([`compacting`]). Steery's own compaction is answered here with its summary and
-  // cut, and no model runs ([`compact`]); every other compaction passes untouched. One
-  // carrying Steery's marker for an ask that already gave up is cancelled: the harness would
-  // summarise it with its model.
+  // cut, and no model runs ([`compact`]); every other compaction passes untouched, after
+  // saying who made it ([`COMPACTION`]). One carrying Steery's marker for an ask that already
+  // gave up is cancelled: the harness would summarise it with its model.
   pi.on("session_before_compact", (event, ctx) => {
     live = ctx;
     if (HARNESS === "pi") compacting ??= Promise.withResolvers<void>();
     noteState();
     const asked = event.customInstructions;
-    if (typeof asked !== "string" || !asked.startsWith(COMPACT_MARK)) return undefined;
+    if (typeof asked !== "string" || !asked.startsWith(COMPACT_MARK)) {
+      const by = compactor(event.reason);
+      if (by) {
+        try {
+          pi.appendEntry?.(COMPACTION, by);
+        } catch {
+          // A transcript that cannot be written says only the compaction.
+        }
+      }
+      return undefined;
+    }
     const own = ownCompaction;
     if (own?.marker !== asked) return { cancel: true };
     const preparation = event.preparation && typeof event.preparation === "object" ? event.preparation : {};
