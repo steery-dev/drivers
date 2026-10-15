@@ -152,6 +152,15 @@ const PROMPT_MS = 1500;
 /** How long a call waits for what Steery has to say beside it before going on without it. */
 const CALL_MS = 500;
 
+/**
+ * How long a call to one of Steery's own tools waits for the runtime to have written down
+ * which conversation makes it, where the MCP connection names none. The runtime answers a
+ * moment once it has, and a call sent before that is made as nobody's: in the machine's
+ * Personal workspace, where a read of this conversation's data is 404 or empty. Under a
+ * busy runtime the answer was measured 1.3–6.5 s late on 2026-10-15.
+ */
+const STAMP_MS = 15_000;
+
 /** How long a turn's end waits for Steery's words to keep it going before ending without them. */
 const SETTLE_MS = 1000;
 
@@ -4168,6 +4177,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       "PreToolUse",
       document(ctx, { tool_name: event.toolName, tool_use_id: event.toolCallId, tool_input: event.input ?? null }),
     );
+    // A call to Steery's own tools, where the MCP connection names no conversation, goes
+    // once the runtime wrote down whose it is: the runtime answers this moment only then.
+    if (tool !== undefined && !REGISTERS) {
+      await awaited(id, STAMP_MS);
+      return undefined;
+    }
     // A shell command a resource's cue names is told, with the call's result, which
     // resource it acts on and who holds it: omp hands a `tool_call` handler's
     // `additionalContext` to the model beside the result. Only a shell command waits, and
