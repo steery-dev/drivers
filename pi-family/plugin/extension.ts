@@ -2411,6 +2411,24 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     compacting = undefined;
   };
   /**
+   * pi's compaction is over for words once pi takes them again. A compaction its person
+   * asked for (`manual`) refuses words until its `session_compact` handlers have returned
+   * (pi 1.0.0 `AgentSession.compact` clears its state after them), so that one is over once
+   * pi reads idle; one pi started inside a run (`threshold`, `overflow`) queues words into
+   * that run, and is over at once.
+   */
+  const piCompacted = (ctx: Context, reason: unknown) => {
+    const gate = compacting;
+    const over = (late: boolean) => {
+      if (compacting !== gate) return;
+      if (reason === "threshold" || reason === "overflow" || ctx.isIdle?.() !== false) {
+        compacted();
+        if (late) noteState();
+      } else setTimeout(() => over(true), 10);
+    };
+    over(false);
+  };
+  /**
    * Steery's own compaction while its ask waits on the harness ([`compact`]): the ask, the
    * marker its `customInstructions` carry, the summary and cut the hook hands the harness,
    * and whether the harness wrote it.
@@ -4097,7 +4115,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (own && details && typeof details === "object" && "steery" in details && details.steery === own.id) {
       own.seen = true;
     }
-    if (HARNESS === "pi") compacted();
+    if (HARNESS === "pi") piCompacted(ctx, event.reason);
     noteState();
   });
   // Every call of a compacted context, whoever compacted it, opens before its summary
