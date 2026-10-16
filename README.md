@@ -153,7 +153,7 @@ driver reads nothing it needs from its environment.
 ## omp and pi: `pi-family/`
 
 omp is a fork of pi. Both write the same transcript, load the same plugin, read the same
-`PI_*` variables for their folders and speak the same JSON lines in a print run, so one
+`PI_*` variables for their folders and run kept in their RPC mode, so one
 crate holds both drivers: a library, and two binaries, `steery-driver-omp` and
 `steery-driver-pi`, each one line that serves the library for its harness. Neither driver
 has settings.
@@ -186,11 +186,14 @@ What each driver does:
     stray process, since a pi without the plugin holds no file open.
   - `models`: omp's comes from `omp models --json`, with its default from `config.yml`.
     pi's comes from `pi --list-models` and its RPC mode's `get_available_models`.
-  - `start`: a turn is `-p --mode json`. omp continues by id (`--resume`) and checks a
-    model against its catalog first. pi continues by transcript (`--session <file>`) and
-    passes a model to the plugin as well (`--steery-model`), which refuses one pi does not
-    run exactly.
-  - `turn/read`: reads the run's JSON lines and the harness's own refusals.
+  - `start`: a turn is a kept process, `--mode rpc` (omp's with `--no-ui`) with its
+    standard input held: it stays up between turns and takes every turn's words, the first
+    included, through the plugin door. omp continues by id (`--resume`) and checks a model
+    against its catalog first. pi continues by transcript (`--session <file>`) and passes a
+    model to the plugin as well (`--steery-model`), which ends the process with a refusal
+    where pi does not run it exactly.
+  - `turn/read`: the harness's own refusals on standard error; its standard output is
+    discarded, and its door says what it does.
   - `receipt/mark`, `receipt/find`: the person's message carrying the delivery marker, in
     the transcript past a mark; words the door hands over mid-turn go in at the next tool.
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.

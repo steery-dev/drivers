@@ -1,33 +1,29 @@
 //! The harness's own way in, from its command line.
 //!
-//! omp runs kept: `omp --mode rpc --no-ui` stays up between turns with a standard input
-//! that never ends (`Stdin::Held`), and takes every turn's words, its first included,
-//! through Steery's plugin door; its standard output is never read. pi runs one turn and
-//! exits: `pi -p --mode json`, reading the words on standard input. omp continues a
-//! conversation by id, `--resume <id>`, and forks one with `--fork <id>`; pi by its
-//! transcript, `--session <file>` and `--fork <file>`. A fork starts in the folder the turn
-//! starts in. A conversation whose folder is gone neither resumes, and says so. Neither
-//! makes a worktree of its own.
+//! Both harnesses run kept: `omp --mode rpc --no-ui` and `pi --mode rpc` stay up between
+//! turns with a standard input that never ends (`Stdin::Held`), and take every turn's
+//! words, the first included, through Steery's plugin door; their standard output is never
+//! read. omp continues a conversation by id, `--resume <id>`, and forks one with `--fork
+//! <id>`; pi by its transcript, `--session <file>` and `--fork <file>`. A fork starts in the
+//! folder the turn starts in. A conversation whose folder is gone neither resumes, and says
+//! so. Neither makes a worktree of its own.
 //!
-//! A pi run says itself in pi's JSON lines: the `session` line names the conversation before
-//! anything is asked of a model, the person's `message_end` is the receipt of the words,
-//! and `agent_end` says how the run ended. Either harness's standard error says what it
-//! refuses to start. omp's `--model` resolves loosely, so a pick goes to omp only as one of
-//! its own catalog's entries; pi's goes to Steery's plugin (`--steery-model`), which refuses
-//! one pi does not run exactly.
+//! Either harness's standard error says what it refuses to start, before its door opens.
+//! omp's `--model` resolves loosely, so a pick goes to omp only as one of its own catalog's
+//! entries; pi's goes to Steery's plugin too (`--steery-model`), which ends the process with
+//! a refusal where pi does not run exactly that pick.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steery_driver_common::receipt::{self, DELIVERED, End, marked};
+use steery_driver_common::receipt::{self, End, marked};
 use steery_sdk::wire::harness::{
-    Act, Ended, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Marked, ReadAs, Reader,
+    Act, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Marked, ReadAs, Reader,
     ReaderFile, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample, Sampled, Start,
-    Stdin, Stream, Terminal, TerminalCommand, TurnLine, TurnRead, TurnState,
+    Stdin, Stream, Terminal, TerminalCommand, TurnLine, TurnRead,
 };
 use steery_sdk::{Error, refusal};
 
@@ -81,8 +77,8 @@ pub fn idle(store: &Store, held: Held) -> Sampled {
 const STEERY_MODEL: &str = "steery-model";
 const STEERY_THINKING: &str = "steery-thinking";
 
-/// `start`: the launch plan of a turn: omp kept with its stdin held, pi one-shot with the
-/// words on standard input.
+/// `start`: the launch plan of a turn: the harness kept with its standard input held, its
+/// words to come through its door.
 pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Launch, Error> {
     let harness = store.harness();
     if start.worktree {
@@ -163,17 +159,14 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
         argv,
         env: BTreeMap::new(),
         cwd: start.cwd,
-        stdin: match harness {
-            Harness::Omp => Stdin::Held,
-            Harness::Pi => Stdin::Words,
-        },
+        stdin: Stdin::Held,
         inbox: false,
     })
 }
 
-/// A turn's arguments after the binary: omp's kept RPC host with no client UI to wait on,
-/// pi's one run in JSON lines; the conversation it opens as the harness names it, and the
-/// pick — to pi also as Steery's plugin's own flags. omp's RPC takes no prompt argument.
+/// A turn's arguments after the binary: the harness's kept RPC host (omp's with no client
+/// UI to wait on), the conversation it opens as the harness names it, and the pick — to pi
+/// also as Steery's plugin's own flags. RPC takes no prompt argument.
 fn args(
     harness: Harness,
     opened: Option<[String; 2]>,
@@ -182,7 +175,7 @@ fn args(
 ) -> Vec<String> {
     let mut args: Vec<String> = match harness {
         Harness::Omp => ["--mode", "rpc", "--no-ui"].map(String::from).into(),
-        Harness::Pi => ["-p", "--mode", "json"].map(String::from).into(),
+        Harness::Pi => ["--mode", "rpc"].map(String::from).into(),
     };
     args.extend(opened.into_iter().flatten());
     if let Some(model) = model {
@@ -202,87 +195,16 @@ fn args(
     args
 }
 
-/// What each turn's lines said so far, by the turn they belong to: a turn is held from
-/// its first line until `ended` is answered for it.
-#[derive(Default)]
-pub struct Runs {
-    runs: Mutex<HashMap<String, Run>>,
-}
-
-/// One turn's lines so far.
-struct Run {
-    /// The harness took the words.
-    took: bool,
-}
-
-impl Runs {
-    /// `turn/read`: what one line of a run says. Standard output is pi's JSON lines;
-    /// standard error is the harness's own words for what it will not run. A turn's words
-    /// are taken once; past the line that ended it, the lines the harness writes as it
-    /// settles say nothing, and a run started again (`agent_start`) is read on.
-    pub fn read(&self, harness: Harness, read: TurnRead) -> TurnLine {
-        let line = match read.stream {
-            Stream::Stderr => {
-                return TurnLine {
-                    refused: refused_by(harness, &read.line).map(str::to_owned),
-                    ..TurnLine::default()
-                };
-            }
-            Stream::Stdout => match serde_json::from_str::<Value>(&read.line) {
-                Ok(line) => line,
-                Err(_) => return TurnLine::default(),
-            },
-        };
-        let named = named(&line);
-        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
-        let run = match runs.get_mut(&read.turn) {
-            Some(run) => run,
-            // A turn not held is a new one, which the harness opens with its naming line,
-            // or one whose end was answered: settling lines say nothing, and a run started
-            // again took its words before.
-            None if named.is_none() && after_end(&line) => return TurnLine::default(),
-            None => runs.entry(read.turn.clone()).or_insert(Run {
-                took: named.is_none(),
-            }),
-        };
-        let took = !run.took && taken(&line, read.delivery.as_deref());
-        run.took |= took;
-        let ended = end(&line);
-        if ended.is_some() {
-            runs.remove(&read.turn);
-        }
-        TurnLine {
-            named,
-            took: took.then_some(true),
-            ended,
-            refused: None,
-        }
-    }
-}
-
-/// `{"type":"session","id"}`, the first line of every run, names the conversation.
-fn named(line: &Value) -> Option<String> {
-    (line.get("type").and_then(Value::as_str) == Some("session"))
-        .then(|| line.get("id").and_then(Value::as_str))
-        .flatten()
-        .map(str::to_owned)
-}
-
-/// The receipt of the turn's words: the person's message going into the conversation
-/// (`message_end`, which the harness writes to its transcript as it says it). Words that
-/// carry a `delivery` are taken only by a message naming it whole — `aim.<throw>.1` is not
-/// `aim.<throw>.10` — so nothing else the run takes in is read as them; words without one
-/// by the run's first message of the person's.
-fn taken(line: &Value, delivery: Option<&str>) -> bool {
-    if line.get("type").and_then(Value::as_str) != Some("message_end") {
-        return false;
-    }
-    let Some(message) = line.get("message") else {
-        return false;
-    };
-    match delivery {
-        None => message.get("role").and_then(Value::as_str) == Some("user"),
-        Some(delivery) => says(message, &format!("{DELIVERED}{delivery}")),
+/// `turn/read`: a kept turn's standard output is discarded — its door says what it does —
+/// so only its standard error says anything: the harness's own words for what it will not
+/// run.
+pub fn read(harness: Harness, read: TurnRead) -> TurnLine {
+    TurnLine {
+        refused: match read.stream {
+            Stream::Stderr => refused_by(harness, &read.line).map(str::to_owned),
+            Stream::Stdout => None,
+        },
+        ..TurnLine::default()
     }
 }
 
@@ -353,67 +275,13 @@ pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
 
 /// Whether a transcript record is the person's message whose words carry `marker` whole:
 /// `{"type":"message","message":{"role":"user",…}}`, as both harnesses write the words
-/// the plugin door or a turn's standard input hands them. Nothing else they write is the
-/// person's: custom messages, tool results, compactions.
+/// the plugin door hands them. Nothing else they write is the person's: custom messages,
+/// tool results, compactions.
 fn input_carries(record: &Value, marker: &str) -> bool {
     record.get("type").and_then(Value::as_str) == Some("message")
         && record
             .get("message")
             .is_some_and(|message| says(message, marker))
-}
-
-/// Every line after a run's `agent_end` but one that starts or ends the run again: what
-/// the harness writes as it settles.
-fn after_end(line: &Value) -> bool {
-    !matches!(
-        line.get("type").and_then(Value::as_str),
-        Some("agent_start" | "agent_end")
-    )
-}
-
-/// `agent_end`: the run ran to its end when the model's last word stopped of its own
-/// accord, failed when it stopped on an `error`, with the harness's `errorMessage`, and
-/// was interrupted on an `aborted` request. A run that goes on is no end: one retried
-/// (`willRetry`), and one the harness continues itself (`isTerminal: false`) unless it
-/// yielded while work it started runs on, where print mode exits.
-fn end(line: &Value) -> Option<Ended> {
-    if line.get("type").and_then(Value::as_str) != Some("agent_end") {
-        return None;
-    }
-    let flag = |name: &str| line.get(name).and_then(Value::as_bool);
-    if flag("willRetry") == Some(true)
-        || (flag("isTerminal") == Some(false) && flag("yielded") != Some(true))
-    {
-        return None;
-    }
-    let last =
-        line.get("messages")
-            .and_then(Value::as_array)
-            .and_then(|messages| {
-                messages.iter().rev().find(|message| {
-                    message.get("role").and_then(Value::as_str) == Some("assistant")
-                })
-            });
-    match last
-        .and_then(|message| message.get("stopReason"))
-        .and_then(Value::as_str)
-    {
-        Some("error") => Some(Ended {
-            state: TurnState::Failed,
-            error: last
-                .and_then(|message| message.get("errorMessage"))
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        }),
-        Some("aborted") => Some(Ended {
-            state: TurnState::Interrupted,
-            error: None,
-        }),
-        _ => Some(Ended {
-            state: TurnState::Finished,
-            error: None,
-        }),
-    }
 }
 
 /// What the harness will not run, by the words it says it in on standard error. Any
@@ -453,9 +321,10 @@ fn omp_refused(said: &str) -> Option<&'static str> {
 }
 
 /// pi 1.0's own lines, and Steery's plugin's `steery-refused: <word>[: why]`, which it
-/// says before pi looks for a model or a sign-in: a `--session` folder gone, a fork of a
-/// file that is not there, a model pi cannot find or finds twice, and a thinking level or
-/// a flag of the plugin's it does not take.
+/// says as the kept process starts, before its door opens, and then ends it: a `--session`
+/// folder gone, a fork of a file that is not there, a model pi cannot find, finds twice or
+/// resolves to another than the pick, and a thinking level or a flag of the plugin's it
+/// does not take.
 fn pi_refused(said: &str) -> Option<&'static str> {
     if let Some(word) = said.trim().strip_prefix("steery-refused: ") {
         let word = word.split(':').next().unwrap_or_default().trim();
@@ -720,23 +589,6 @@ mod tests {
     }
 
     #[test]
-    fn a_delivery_is_taken_only_whole() {
-        let line = |text: &str| {
-            serde_json::json!({"type": "message_end",
-                "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
-        };
-        assert!(taken(
-            &line("go steery-delivery:aim.t.1 now"),
-            Some("aim.t.1")
-        ));
-        assert!(!taken(
-            &line("go steery-delivery:aim.t.10"),
-            Some("aim.t.1")
-        ));
-        assert!(taken(&line("anything"), None));
-    }
-
-    #[test]
     fn each_harness_refuses_in_its_own_words() {
         assert_eq!(
             refused_by(Harness::Pi, "steery-refused: model-missing: no such model"),
@@ -786,9 +638,8 @@ mod tests {
         assert_eq!(
             args(Harness::Pi, None, Some("provider/model"), Some("high")),
             [
-                "-p",
                 "--mode",
-                "json",
+                "rpc",
                 "--model",
                 "provider/model",
                 "--thinking",
@@ -805,83 +656,6 @@ mod tests {
                 None
             ),
             ["--mode", "rpc", "--no-ui", "--fork", "01a0cd6f"]
-        );
-    }
-
-    /// A run's first line names its conversation; it ends on a terminal `agent_end`, as the
-    /// model's last stop says, an error with the harness's own words; nothing else ends it,
-    /// and the lines it writes as it settles say nothing.
-    #[test]
-    fn agent_end_is_the_end_and_an_error_says_what_went_wrong() {
-        let runs = Runs::default();
-        let read = |turn: &str, line: Value| {
-            runs.read(
-                Harness::Omp,
-                TurnRead {
-                    turn: turn.into(),
-                    stream: Stream::Stdout,
-                    line: line.to_string(),
-                    delivery: None,
-                },
-            )
-        };
-        let ended = |last: Value| {
-            serde_json::json!({"type": "agent_end", "isTerminal": true, "messages": [
-                {"role": "user"},
-                last,
-                {"role": "toolResult"}
-            ]})
-        };
-        let stopped =
-            |stop: &str| ended(serde_json::json!({"role": "assistant", "stopReason": stop}));
-        let state = |turn: &str, line: Value| read(turn, line).ended.map(|ended| ended.state);
-        assert_eq!(
-            read(
-                "a",
-                serde_json::json!({"type": "session", "version": 3, "id": "01a0cd6f", "cwd": "/w"})
-            )
-            .named
-            .as_deref(),
-            Some("01a0cd6f")
-        );
-        assert_eq!(
-            read(
-                "a",
-                serde_json::json!({"type": "turn_end", "message": {"stopReason": "stop"}})
-            )
-            .ended,
-            None
-        );
-        assert_eq!(
-            read(
-                "a",
-                serde_json::json!({"type": "agent_end", "isTerminal": false})
-            )
-            .ended,
-            None
-        );
-        assert_eq!(state("a", stopped("stop")), Some(TurnState::Finished));
-        assert_eq!(
-            read("a", serde_json::json!({"type": "message_end"})),
-            TurnLine::default(),
-            "a run that ended says nothing as it settles"
-        );
-        assert_eq!(state("b", stopped("aborted")), Some(TurnState::Interrupted));
-        // As omp keeps it, 2026-09-16.
-        let refused = r#"402 {"type":"error","error":{"type":"unknown_error","message":"Insufficient Balance"}}"#;
-        assert_eq!(
-            read(
-                "c",
-                ended(
-                    serde_json::json!({"role": "assistant", "stopReason": "error",
-                    "errorStatus": 402, "errorMessage": refused})
-                )
-            )
-            .ended,
-            Some(Ended {
-                state: TurnState::Failed,
-                error: Some(refused.to_owned())
-            })
         );
     }
 

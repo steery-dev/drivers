@@ -32,12 +32,11 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
 }
 
 /// The driver: the harness it speaks for, where that keeps everything, from
-/// `initialize`, the models it listed last, and what each turn's lines said so far.
+/// `initialize`, and the models it listed last.
 struct Driver {
     harness: Harness,
     place: OnceLock<Place>,
     catalog: models::Catalog,
-    runs: drive::Runs,
 }
 
 /// The person's home, the runtime's config folder, and the harness's conversations under
@@ -54,7 +53,6 @@ impl Driver {
             harness,
             place: OnceLock::new(),
             catalog: models::Catalog::default(),
-            runs: drive::Runs::default(),
         }
     }
 
@@ -140,7 +138,7 @@ impl Program for Driver {
             method::START => result(
                 drive::start(self.store()?, &self.catalog, steery_sdk::params(params)?).await?,
             ),
-            method::TURN_READ => result(self.runs.read(harness, steery_sdk::params(params)?)),
+            method::TURN_READ => result(drive::read(harness, steery_sdk::params(params)?)),
             method::RECEIPT_MARK => {
                 result(drive::mark(self.store()?, steery_sdk::params(params)?)?)
             }

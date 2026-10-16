@@ -489,11 +489,11 @@ function steerys(name: unknown): string | undefined {
 }
 
 /**
- * Whether this session can call the tool every paragraph Steery says ends in. pi 1.0
- * keeps an MCP server's tools listed while the server is away and connects again at the
- * next call, so a listed tool is reached; but a server taken away hides its tools and
- * keeps them listed as `exposure: "hidden"`, which no call reaches, and they stay so
- * until a registration connects again. Hidden is not reached.
+ * Whether this session can call the tool every conversation is listed, the one its line of
+ * work is told with. pi 1.0 keeps an MCP server's tools listed while the server is away and
+ * connects again at the next call, so a listed tool is reached; but a server taken away
+ * hides its tools and keeps them listed as `exposure: "hidden"`, which no call reaches, and
+ * they stay so until a registration connects again. Hidden is not reached.
  */
 function reached(pi: Api): boolean {
   try {
@@ -504,7 +504,7 @@ function reached(pi: Api): boolean {
           !!tool &&
           typeof tool === "object" &&
           "name" in tool &&
-          steerys(tool.name) === "requests_create" &&
+          steerys(tool.name) === "sessions_describe" &&
           (tool as { exposure?: unknown }).exposure !== "hidden",
       );
   } catch {
@@ -869,33 +869,48 @@ function called(event: Event): { tool: string | undefined; args: unknown } {
   return { tool: steerys(event.toolName), args: input };
 }
 
-/**
- * Whether a Steery call that came back leaves its turn waiting rather than idle
- * (specs/RESOURCES.md §9): a `resources_get` with `wait_secs`, a `resources_act` `watch`,
- * or a `resources_act` with `queue: true` whose row says it joined the queue
- * (`row.params.queue`). Its turn's end is then not reminded: the wait, the watch or the
- * queue wakes it.
- */
-function waits(tool: string, args: unknown, content: unknown): boolean {
-  const given = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-  if (tool === "resources_get") return typeof given.wait_secs === "number" && given.wait_secs > 0;
-  if (tool !== "resources_act") return false;
-  if (given.action === "watch") return true;
-  if (given.queue !== true || !Array.isArray(content)) return false;
-  const text = (content as unknown[]).find(
-    (part): part is { text: string } =>
-      !!part && typeof part === "object" && "text" in part && typeof part.text === "string",
-  );
-  const acted = parsed(text?.text);
-  const row = acted && typeof acted === "object" && "row" in acted ? acted.row : undefined;
-  const params = row && typeof row === "object" && "params" in row ? row.params : undefined;
-  return !!params && typeof params === "object" && "queue" in params && params.queue === true;
-}
-
-/** The shell command an omp call runs, where it runs one: its `bash` tool's `command`. */
+/** The shell command a call runs, where it runs one: a `bash` tool's `command`, in both harnesses. */
 function commandOf(input: unknown): string | undefined {
   const command = input && typeof input === "object" && "command" in input ? input.command : undefined;
   return typeof command === "string" && command.trim() ? command : undefined;
+}
+
+/** A Steery operation a shell command runs through the `steery` command line, and the words after it. */
+type Ran = { op: string; words: string };
+
+/**
+ * The Steery operation a shell command runs, as the catalog names it (`requests.create`):
+ * `steery <resource> <verb> …`, or a resource's singular for its `create` (`steery request
+ * …`), by its path or its name alone. Nothing where the command runs no `steery`.
+ */
+function ran(command: string | undefined): Ran | undefined {
+  const found = command?.match(/(?:^|[\s;&|(`'"\/])steery\s+([a-z][a-z_-]*)(?:\s+([a-z][a-z_-]*))?([^;&|\n]*)/);
+  if (!found) return undefined;
+  const [, resource, verb = "", rest = ""] = found;
+  if (resource === "request") return { op: "requests.create", words: `${verb} ${rest}` };
+  return { op: `${resource}.${verb}`, words: rest };
+}
+
+/**
+ * Whether a Steery command that came back leaves its turn waiting rather than idle
+ * (specs/RESOURCES.md §9): a `steery resources get` that waits, a `steery resources act`
+ * `watch`, or one with `--queue` whose row says it joined the queue (`row.params.queue`).
+ * Its turn's end is then not reminded: the wait, the watch or the queue wakes it.
+ */
+function waits(command: Ran, content: unknown): boolean {
+  const { op, words } = command;
+  if (op === "resources.get") return /--wait\b|"wait_secs"\s*:\s*[1-9]/.test(words);
+  if (op !== "resources.act") return false;
+  if (/--action[=\s]+["']?watch\b|"action"\s*:\s*"watch"/.test(words)) return true;
+  if (!/--queue\b|"queue"\s*:\s*true/.test(words) || !Array.isArray(content)) return false;
+  const text = (content as unknown[]).find(
+    (part): part is { text: string } =>
+      !!part && typeof part === "object" && "text" in part && typeof part.text === "string",
+  )?.text;
+  const acted = parsed(text?.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+  const row = acted && typeof acted === "object" && "row" in acted ? acted.row : undefined;
+  const params = row && typeof row === "object" && "params" in row ? row.params : undefined;
+  return !!params && typeof params === "object" && "queue" in params && params.queue === true;
 }
 
 /**
@@ -3755,7 +3770,34 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       // The runtime reads no answer, and says the words as it would without one.
     }
   };
+  /**
+   * pi: what a kept process the runtime started on a pick of its own refuses, where pi does
+   * not run exactly that pick (`<word>: why`): pi takes a model it can only partly match
+   * with a warning, and clamps a thinking level it cannot use, where Steery promised its
+   * person the one they chose. Read at the process's first start, before its door opens
+   * and any words go in; a `pick` through the door later moves it on its own terms.
+   */
+  const unpicked = (ctx: Context): string | undefined => {
+    const model = pi.getFlag?.("steery-model");
+    const thinking = pi.getFlag?.("steery-thinking");
+    const resolved = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no model";
+    if (typeof model === "string" && resolved !== model && !(!model.includes("/") && ctx.model?.id === model)) {
+      return `model-missing: ${model} resolved as ${resolved}`;
+    }
+    const level = pi.getThinkingLevel?.();
+    if (typeof thinking === "string" && level !== thinking) {
+      return `selection-unsupported: thinking ${thinking} resolved as ${level ?? "none"}`;
+    }
+    return undefined;
+  };
   pi.on("session_start", (event, ctx) => {
+    // A pick not met is refused in one line the runtime reads off standard error, and the
+    // process ends before anything went in: its turn ends on that refusal.
+    const refused = HARNESS === "pi" && event.reason === "startup" ? unpicked(ctx) : undefined;
+    if (refused) {
+      process.stderr.write(`steery-refused: ${refused}\n`);
+      process.exit(1);
+    }
     const id = ctx.sessionManager.getSessionId();
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
     reloading().delete(id);
@@ -3990,37 +4032,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // next turn or the door's own look says it.
     pi.on("model_select", changed);
     pi.on("thinking_level_select", changed);
-    // A one-shot run the runtime started with a pick of its own checks, before pi asks
-    // for credentials or starts anything, that pi resolved the pick to exactly what was
-    // picked: pi takes a model it can only partly match with a warning, and clamps a
-    // thinking level it cannot use, where Steery promised its person the one they chose.
-    // A pick not met is refused in one line the runtime reads (`steery-refused: <word>:`),
-    // and pi drops the words without a turn. Only the run's own words are checked: words
-    // the door hands in later come as an extension's, after a `pick` may have moved it.
-    pi.on("input", (event, ctx) => {
-      live = ctx;
-      if (event.source === "extension") {
-        // Passing `input` is no proof: what follows can still drop them ([`deliver`]).
-        return undefined;
-      }
-      const model = pi.getFlag?.("steery-model");
-      const thinking = pi.getFlag?.("steery-thinking");
-      const resolved = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no model";
-      if (
-        typeof model === "string" &&
-        resolved !== model &&
-        !(!model.includes("/") && ctx.model?.id === model)
-      ) {
-        process.stderr.write(`steery-refused: model-missing: ${model} resolved as ${resolved}\n`);
-        return { action: "handled" };
-      }
-      const level = pi.getThinkingLevel?.();
-      if (typeof thinking === "string" && level !== thinking) {
-        process.stderr.write(`steery-refused: selection-unsupported: thinking ${thinking} resolved as ${level ?? "none"}\n`);
-        return { action: "handled" };
-      }
-      return undefined;
-    });
     pi.on("session_compact_failed", (event, ctx) => {
       live = ctx;
       compacted();
@@ -4163,15 +4174,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       };
     });
   }
-  // A call the agent makes: raising or waiting on a request is asking, whoever makes it —
-  // the agent, or a codemode script the agent wrote. Only the agent's own calls are
-  // moments: a call made from inside another is said by the door's `calls`. The moment
-  // carries the call as the harness gave it — its tool, its id and its input — and the
-  // driver's `hook/read` reads what call it is.
+  // A call the agent makes: a shell command that raises or reads a request through the
+  // `steery` command line is asking, whoever runs it — the agent, or a script the agent
+  // wrote. Only the agent's own calls are moments: a call made from inside another is said
+  // by the door's `calls`. The moment carries the call as the harness gave it — its tool,
+  // its id and its input — and the driver's `hook/read` reads what call it is.
   pi.on("tool_call", async (event, ctx) => {
     live = ctx;
     const { tool } = called(event);
-    if (tool === "requests_create" || tool === "requests_get") asked = true;
+    const op = ran(commandOf(event.input))?.op;
+    if (op === "requests.create" || op === "requests.get") asked = true;
     if (typeof event.parentToolCallId === "string" && event.parentToolCallId) return undefined;
     const id = moment(
       "PreToolUse",
@@ -4196,7 +4208,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     live = ctx;
     const { tool, args } = called(event);
     // Each Steery call says whether the turn now waits ([`waits`]); the last one stands.
-    if (tool) waiting = event.isError !== true && waits(tool, args, event.content);
+    const command = ran(commandOf(event.input));
+    if (tool || command) waiting = event.isError !== true && !!command && waits(command, event.content);
     // `sessions_describe` with a `park` parks the conversation, once Steery took it: a
     // refused one leaves the conversation live.
     if (
@@ -4231,9 +4244,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // that does not go on by itself (`willContinue`: a retry, a continuation, its stop hook's
   // reminder), or that yields while work it started runs on in the background or waits to
   // hand its results back, which wakes the conversation later (omp 18.4.12
-  // `awaitingAsyncWork`, which an extension is not told apart from a run going on): as its
-  // own command line reads a run's end ([`attach::pi::end`]). One that goes on is still the
-  // turn. A one-shot run takes no words past its own turn: what waits is answered.
+  // `awaitingAsyncWork`, which an extension is not told apart from a run going on). One
+  // that goes on is still the turn. A one-shot run takes no words past its own turn: what
+  // waits is answered.
   pi.on(HARNESS === "pi" ? "agent_settled" : "agent_end", (event, ctx) => {
     live = ctx;
     // pi keeps no classification beside the error it recorded: the run's end says, in the
