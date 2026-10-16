@@ -1,5 +1,5 @@
 //! Claude Code's own door into a live conversation: the inbox socket of the session its
-//! registry names in it.
+//! registry names in it, and a one-shot fork of the conversation for its recap.
 //!
 //! One connection carries one `{"type":"auth","token":…}` line, where the session
 //! published a peer token, and one `{"type":"user","message":{"role":"user","content":…}}`
@@ -7,21 +7,29 @@
 //! and a running one reads it between tool calls. Delivered by default; a session that
 //! bypasses permission prompts holds it for its person, and a message never answers a
 //! permission prompt. The socket says nothing back, so words handed over are unconfirmed
-//! and the runtime looks for them with `receipt/find`. The session keeps its own model.
+//! and the runtime looks for them with `receipt/find`. The session keeps its own model:
+//! the inbox reads a message as words and never as a command (`skipSlashCommands` in
+//! Claude Code 2.1.300), so nothing sent there switches it.
 
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::json;
-use steery_sdk::wire::harness::{Said, Say, SayMode};
+use steery_sdk::wire::harness::{Recap, Said, Say, SayMode, Text};
 use steery_sdk::{Error, refusal};
 use tokio::io::AsyncWriteExt;
 
 use crate::registry;
+use crate::transcripts::Store;
 
 /// How long the socket has to take the two lines. The harness closes a connection that
 /// has not sent a complete line in 30 seconds; these are ready before it opens.
 const POST_WITHIN: Duration = Duration::from_secs(8);
+
+/// How long the conversation's own recap may take: under the forty seconds the runtime
+/// waits for it.
+const RECAP_WITHIN: Duration = Duration::from_secs(35);
 
 /// `say`: the words into the inbox of the session somebody is in. Claude Code's inbox
 /// checks nothing idle, so words that may go in only while nothing runs never go through
@@ -105,6 +113,106 @@ async fn post(
             ),
         )),
     }
+}
+
+/// `recap`: what the conversation's own model writes on its own history when asked, in a
+/// one-shot fork of it that keeps nothing: `claude --print --resume <id> --fork-session
+/// --no-session-persistence`, the asked words on standard input. The fork resumes on the
+/// conversation's own model and the system prompt Claude Code recorded for it; it reaches
+/// no tool and no MCP server, and none of the machine's customisations (`--safe-mode`:
+/// Steery's own hooks among them, so the fork is never seen as a conversation). Claude
+/// Code asks its provider once (`CLAUDE_CODE_MAX_RETRIES=0`), so a refusal is said in its
+/// own words within the bound rather than waited out. Nothing is written into the
+/// conversation, and a turn running in it goes on. Refused `no-answer` with Claude Code's
+/// own line where it wrote none.
+pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
+    let unanswered = |why: String| Error::refused(refusal::NO_ANSWER, why);
+    let binary =
+        crate::binary().ok_or_else(|| unanswered("claude is not installed here".into()))?;
+    let session = store.session(&recap.external_id).map_err(|_| {
+        unanswered(format!(
+            "Claude Code has no conversation {} here",
+            recap.external_id
+        ))
+    })?;
+    // Claude Code resumes a conversation by its id from any folder; its own folder, where
+    // it is still there, keeps what the fork reads of its place the same.
+    let cwd = session
+        .cwd
+        .filter(|cwd| cwd.is_dir())
+        .unwrap_or_else(|| store.root().to_owned());
+    let mut command = steery_driver_common::program::helper(&binary);
+    command
+        .args(["--print", "--output-format", "text", "--resume"])
+        .arg(&recap.external_id)
+        .args([
+            "--fork-session",
+            "--no-session-persistence",
+            "--safe-mode",
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--mcp-config",
+            r#"{"mcpServers":{}}"#,
+        ])
+        .env(crate::drive::RETRIES, "0")
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // A conversation filed under another configuration is resumed from there.
+    if let Some(root) = session
+        .transcripts
+        .first()
+        .and_then(|filed| crate::drive::config_root(filed))
+        .filter(|root| *root != store.root())
+    {
+        command.env("CLAUDE_CONFIG_DIR", root);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| unanswered(format!("starting claude: {e}")))?;
+    let mut stdin = child.stdin.take().expect("its standard input is piped");
+    let asked = recap.asked.into_bytes();
+    let ran = tokio::time::timeout(RECAP_WITHIN, async move {
+        // Written beside the wait: a pipe that fills before Claude Code reads it would
+        // hold both ends.
+        let write = async move {
+            let _ = stdin.write_all(&asked).await;
+            drop(stdin);
+        };
+        let (_, output) = tokio::join!(write, child.wait_with_output());
+        output
+    })
+    .await
+    .map_err(|_| {
+        unanswered(format!(
+            "Claude Code wrote no recap within {} seconds",
+            RECAP_WITHIN.as_secs()
+        ))
+    })?
+    .map_err(|e| unanswered(format!("reading claude: {e}")))?;
+    let text = String::from_utf8_lossy(&ran.stdout).trim().to_owned();
+    if !ran.status.success() {
+        let said = last_line(&text).or_else(|| last_line(&String::from_utf8_lossy(&ran.stderr)));
+        return Err(unanswered(match said {
+            Some(said) => format!("Claude Code wrote no recap: {said}"),
+            None => format!("Claude Code wrote no recap: it exited {}", ran.status),
+        }));
+    }
+    if text.is_empty() {
+        return Err(unanswered("Claude Code wrote no recap".into()));
+    }
+    Ok(Text { text })
+}
+
+/// The last line of `text` that holds anything.
+fn last_line(text: &str) -> Option<String> {
+    text.lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
