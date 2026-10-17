@@ -13,13 +13,14 @@
 // reads); at each turn the person starts the runtime answers the one paragraph Steery has
 // for its agent (`say`), and at a turn's end (`settle`) the words that keep it going. In a
 // conversation Steery started, the runtime asks the copy over the same door to hand words
-// to it (`say`), switch its model (`pick`), stop a turn (`stop`) and recap it (`recap`). In both
-// harnesses the copy draws the conversation's open requests where its person is
-// (`cards`), and `/steery` hands an answer to this machine's signer through the runtime's
-// `/answer` door. pi's copy also carries Steery's MCP entry, registering it for each
-// conversation with headers naming it; omp lets no extension register one, so its copy
-// carries none and omp reaches Steery through the entry `steery setup` writes into its own
-// `mcp.json`. Each place the two harnesses' APIs differ is a branch on `HARNESS`, here and
+// to it (`say`), switch its model (`pick`), stop a turn (`stop`), recap it (`recap`) and
+// compact it (`compact`). The copy draws nothing in the harness and takes no answer there:
+// a person answers Steery on Steery's own surfaces. pi's copy also carries Steery's MCP
+// entry, registering it for each conversation with headers naming it; omp lets no
+// extension register one, so its copy carries none and omp reaches Steery through the
+// entry `steery setup` writes into its own `mcp.json`. Each place the two harnesses' APIs
+// differ is a branch on `HARNESS`, here and nowhere else. Nothing here decides anything or
+// stands in a call's way: every handler
 // nowhere else. Nothing here decides anything or stands in a call's way: every handler
 // observes, the only waits are short and bounded — a moment's answer, a settle's, and a
 // conversation's last moments as it closes — a failure is swallowed, and a Steery that
@@ -37,9 +38,6 @@ const HARNESS: string = "__STEERY_HARNESS__";
 /** The plugin door version this copy speaks (PROTOCOL.md §4.4). */
 const DOOR_VERSION = 1;
 
-/** The runtime's loopback address, where the card hands a person's answer (`/answer`). */
-const RUNTIME: string = "__STEERY_RUNTIME__";
-
 /** The runtime's door. */
 const DOOR: string = "__STEERY_DOOR__";
 
@@ -51,9 +49,6 @@ const MCP: Record<string, unknown> = entry("__STEERY_MCP__");
 
 /** Whether this copy registers Steery's MCP entry for each conversation. */
 const REGISTERS = Object.keys(MCP).length > 0;
-
-// The form rule every surface draws a request by: `globalThis.steeryForm`.
-/*__STEERY_FORM_JS__*/
 
 /** How many of Steery's says the door keeps until it sees their words go in. */
 const SAYS_KEPT = 32;
@@ -225,15 +220,6 @@ const LOOK_EVERY_MS = 1000;
 /** How many moments the process keeps while no door is open, oldest dropped first. */
 const MOMENTS_KEPT = 256;
 
-/** pi caps a widget of lines at this many (`MAX_WIDGET_LINES`). */
-const WIDGET_LINES = 10;
-
-/** How many lines of a request's text the widget shows under its title. */
-const CARD_TEXT_LINES = 6;
-
-/** How many lines of a choice row's `detail` the card draws beneath the row, then "…". */
-const ROW_DETAIL_LINES = 6;
-
 /** The MCP entry this copy carries, or none where it carries none. */
 function entry(json: string): Record<string, unknown> {
   try {
@@ -252,17 +238,9 @@ type Model = { provider: string; id: string; /** The wire its provider speaks. *
 /** One model request's answer, as both harnesses return it: its text parts and how it stopped. */
 type Answered = { content?: { type?: string; text?: string }[]; stopReason?: string; errorMessage?: string };
 
-/** What of the harness's own surfaces the card draws with: the same in pi's terminal and its RPC clients. */
+/** The session's own input line, where it has one: the same in pi's terminal and its RPC clients. */
 type Ui = {
   getEditorText?(): string;
-  select?(title: string, options: string[]): Promise<string | undefined>;
-  notify?(message: string, type?: "info" | "warning" | "error"): void;
-  setStatus?(key: string, text: string | undefined): void;
-  setWidget?(key: string, content: string[] | undefined, options?: { placement?: string }): void;
-  /** A component of the extension's own in place of the editor until `done` is called: the card. */
-  custom?<T>(factory: (screen: Screen, paint: Paint, keys: unknown, done: (result: T) => void) => View): Promise<T>;
-  /** Every key its person presses, before anything else reads it; returns how to stop listening. */
-  onTerminalInput?(handler: (data: string) => undefined): () => void;
 };
 
 type Context = {
@@ -273,7 +251,7 @@ type Context = {
   agent?: { kind?: string; id?: string };
   /** Whether a person can type into this session: a terminal or a client's dialogs. */
   hasUI?: boolean;
-  /** The session's own input line and dialogs, where it has them. */
+  /** The session's own input line, where it has one. */
   ui?: Ui;
   sessionManager: {
     getSessionId(): string;
@@ -449,8 +427,6 @@ type Api = {
   setThinkingLevel?(level: string): void;
   /** pi: the value a command-line flag of the extension's own was given (registered by the loader). */
   getFlag?(name: string): boolean | string | undefined;
-  /** The session's slash commands, the loader's `/steery` among them once it registered one. */
-  getCommands?(): { name: string }[];
   /** pi: an MCP server for this session, replacing one of the same name this extension registered. */
   registerMcpServer?(name: string, config: Record<string, unknown>): void;
   /** A custom entry written into the conversation's own transcript, never sent to its model. */
@@ -1104,16 +1080,15 @@ type Kept = {
   calls: Call[];
   ended: Ended[];
   dialog: Dialog | null;
-  /** The requests the card walked here, by id: each opens by itself once. */
-  walked: string[];
 };
 
 /**
+/**
  * What the loader hands a copy as it starts: the context the harness last handed it where
- * it takes over a session already under way, what the copy before it kept, the harness's
- * own terminal toolkit ([`Toolkit`]), and its own model calls ([`Models`]).
+ * it takes over a session already under way, what the copy before it kept, and the
+ * harness's own model calls ([`Models`]).
  */
-type Carried = { ctx?: Context; kept?: unknown; tui?: unknown; models?: unknown };
+type Carried = { ctx?: Context; kept?: unknown; models?: unknown };
 
 /**
  * What of the harness's own packages a recap needs ([`recap`]), as the loader imports them:
@@ -1127,9 +1102,9 @@ type Models = {
 
 /**
  * A copy running in one session: stopped, it lets go of all it holds and says where the
- * session stands; given a command the loader registered for it ([`surfaces`]), it runs it.
+ * session stands.
  */
-type Running = { stop(): Promise<Kept>; command?(name: string, args: string, ctx: Context): Promise<void> };
+type Running = { stop(): Promise<Kept> };
 
 function restored(kept: unknown): Kept {
   const field = (name: string): unknown =>
@@ -1143,7 +1118,6 @@ function restored(kept: unknown): Kept {
   const calls = field("calls");
   const ended = field("ended");
   const dialog = field("dialog");
-  const walked = field("walked");
   const turning = field("turning") === true;
   const began = field("began");
   return {
@@ -1163,7 +1137,6 @@ function restored(kept: unknown): Kept {
     calls: Array.isArray(calls) ? calls.filter(isCall) : [],
     ended: Array.isArray(ended) ? ended.filter(isEnded).slice(-ENDED_KEPT) : [],
     dialog: isDialog(dialog) ? dialog : null,
-    walked: Array.isArray(walked) ? walked.filter((one): one is string => typeof one === "string") : [],
   };
 }
 
@@ -1248,1113 +1221,8 @@ function reloading(): Map<string, Kept> {
   return shared[key];
 }
 
-// ── the card ─────────────────────────────────────────────────────────────────
-
-/** One open request as the runtime pushes it: the request as it was read, and its terminal text form. */
-type Card = { request: Record<string, unknown>; text: string };
-
-/** One card in the terminal: its request, once it is chosen, and what closes the card. */
-type Walk = { id?: string; closed: AbortController };
-
-/** One way from where the person is to a signer, as a request carries it. */
-type Way = { kind: string; url?: string; label: string };
-
-/** One control of a request's form, as the form rule hands it over. */
-type Control = {
-  kind: string;
-  name: string;
-  label?: string;
-  placeholder?: string;
-  multiline?: boolean;
-  required?: boolean;
-  pick?: string;
-  options?: { id: string; label: string; description?: string; stance?: string; style?: string }[];
-  /** The things the same choice is asked of, one answer each (`form.js` `rowPicks`); `detail`
-   * is what a row stands for, in Markdown, drawn beneath it. */
-  rows?: { id: string; label: string; description?: string; detail?: string }[];
-  /** Each pick drawn as one menu of the options; this card lists them all the same. */
-  menu?: boolean;
-  min?: number;
-  max?: number;
-  step?: number;
-  /** A number's start, a text's words, a choice's picks (`form.js` `started`). */
-  default?: number | string | string[] | Record<string, string | string[]>;
-  unit?: string;
-};
-
-/** The form rule every surface draws a request by (`form.js`), as this copy uses it. */
-type Form = {
-  SUBMIT: string;
-  drawnForm(declared: unknown[]): { controls: Control[]; submit: boolean };
-  stanceOf(controls: Control[], values: Record<string, unknown>): string;
-  missingRequired(controls: Control[], values: Record<string, unknown>, stance: string): string | null;
-  shownLabel(control: Control, said: unknown): string;
-  /** What a control starts holding: its `default`, in the shape of its answer. */
-  started(control: Control): unknown;
-  /** A choice asked of rows, as each row's pick. */
-  rowPicks(control: Control, value: unknown): Record<string, unknown>;
-  /** What a choice holds after a press on one option, in one row where it is asked of rows. */
-  press(control: Control, value: unknown, rowId: string | undefined, optionId: string): unknown;
-  submission(
-    controls: Control[],
-    draft: Record<string, unknown>,
-    pressed: { name: string; id: string } | null,
-  ): { values: Record<string, unknown>; payload?: unknown };
-};
-
-function form(): Form | undefined {
-  // The rule sets itself on the process as it loads (`form.js`); only its own fields are read.
-  const shared: { steeryForm?: Form } = globalThis as unknown as { steeryForm?: Form };
-  const rule = shared.steeryForm;
-  return rule &&
-    typeof rule.drawnForm === "function" &&
-    typeof rule.submission === "function" &&
-    typeof rule.started === "function" ? rule : undefined;
-}
-
 function str(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function cardsOf(value: unknown): Card[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((one: unknown) => {
-    if (!one || typeof one !== "object") return [];
-    const card = one as Record<string, unknown>;
-    const request = card.request;
-    if (!request || typeof request !== "object" || Array.isArray(request)) return [];
-    return [{ request: request as Record<string, unknown>, text: str(card.text) }];
-  });
-}
-
-function waysOf(request: Record<string, unknown>): Way[] {
-  const ways = request.ways;
-  if (!Array.isArray(ways)) return [];
-  return ways.flatMap((one: unknown) => {
-    if (!one || typeof one !== "object") return [];
-    const way = one as Record<string, unknown>;
-    if (typeof way.kind !== "string" || typeof way.label !== "string") return [];
-    return [{ kind: way.kind, label: way.label, ...(typeof way.url === "string" ? { url: way.url } : {}) }];
-  });
-}
-
-function titleOf(card: Card): string {
-  return str(card.request.title).trim() || "A request";
-}
-
-/** One step of a request's series as its read carries it (`Request.steps`): a raised one with `id` and `status`, an expected one with only `title`. */
-type Step = { id?: string; title: string; status?: string };
-
-/** A request's steps, where it is one of a series of two or more. */
-function stepsOf(request: Record<string, unknown>): Step[] {
-  const steps = (Array.isArray(request.steps) ? request.steps : []).flatMap((one: unknown): Step[] => {
-    if (!one || typeof one !== "object") return [];
-    const step = one as Record<string, unknown>;
-    if (typeof step.title !== "string") return [];
-    return [
-      {
-        title: step.title.trim(),
-        ...(typeof step.id === "string" ? { id: step.id } : {}),
-        ...(typeof step.status === "string" ? { status: step.status } : {}),
-      },
-    ];
-  });
-  return steps.length >= 2 ? steps : [];
-}
-
-/** Widths where the harness handed no toolkit: a cell for each character. */
-const PLAIN: Pick<Toolkit, "visibleWidth" | "truncateToWidth"> = {
-  visibleWidth: (text) => [...text].length,
-  truncateToWidth: (text, width) => {
-    const chars = [...text];
-    if (chars.length <= width) return text;
-    return width > 0 ? `${chars.slice(0, width - 1).join("")}…` : "";
-  },
-};
-
-/**
- * The line drawn above a request's title where it is one of a series: which step it is,
- * then every step's title, settled `✓`, this one `●`, the rest `○`, each cut so the line
- * fits `width` and the short ones give their room to the long. The terminal opens no other
- * request, so no step here leads anywhere.
- */
-function stepLine(
-  request: Record<string, unknown>,
-  width: number,
-  kit: Pick<Toolkit, "visibleWidth" | "truncateToWidth">,
-  shade: { here(text: string): string; expected(text: string): string } = { here: (text) => text, expected: (text) => text },
-): string | undefined {
-  const steps = stepsOf(request);
-  const at = steps.findIndex((step) => step.id !== undefined && step.id === str(request.id));
-  if (at < 0) return undefined;
-  const lead = `Step ${at + 1}/${steps.length}  `;
-  // Each step takes its mark and a space, and " · " parts two.
-  let room = width - kit.visibleWidth(lead) - 2 * steps.length - 3 * (steps.length - 1);
-  const fits: number[] = [];
-  const shortest = steps
-    .map((step, index) => ({ index, wide: kit.visibleWidth(step.title) }))
-    .sort((a, b) => a.wide - b.wide);
-  for (const [taken, { index, wide }] of shortest.entries()) {
-    const fit = Math.max(0, Math.min(wide, Math.floor(room / (steps.length - taken))));
-    fits[index] = fit;
-    room -= fit;
-  }
-  const parts = steps.map((step, index) => {
-    const fit = fits[index] ?? 0;
-    const mark = index === at ? "●" : step.status !== undefined && step.status !== "open" ? "✓" : "○";
-    const part = fit > 0 ? `${mark} ${kit.truncateToWidth(step.title, fit)}` : mark;
-    if (index === at) return shade.here(part);
-    return step.id === undefined ? shade.expected(part) : part;
-  });
-  return kit.truncateToWidth(`${lead}${parts.join(" · ")}`, width);
-}
-
-/**
- * A card's text, without the rows the text form lists last (`command.rs` `rows_form`):
- * each opens with "▸ " and its choice's label. The card draws each row, detail and all,
- * in the choice's own field, and the widget previews the request's words, not its rows.
- */
-function withoutRows(card: Card): string[] {
-  const lines = card.text.split("\n");
-  const input = Array.isArray(card.request.input) ? (card.request.input as Control[]) : [];
-  const first = input.find(
-    (control) => control?.kind === "choice" && (control.rows ?? []).some((row) => str(row?.detail).trim()),
-  );
-  if (!first) return lines;
-  const cut = lines.lastIndexOf(`▸ ${str(first.label).trim() || str(first.name).trim()}`);
-  return cut < 0 ? lines : lines.slice(0, cut);
-}
-
-/**
- * A card's text under its title, as the widget previews it: the text form opens with the
- * title, then a blank line. A weave previews its gists, the lines at its left edge;
- * diagrams, tables and emphasis marks are left to the whole card (`/steery`, the page).
- */
-function underTitle(card: Card): string[] {
-  const lines = withoutRows(card);
-  if (lines[0]?.trim() === titleOf(card)) lines.shift();
-  const shown: string[] = [];
-  let fenced = false;
-  for (const line of lines) {
-    const bare = line.trim().replace(/^[-*] /, "");
-    if (bare.startsWith("```")) {
-      fenced = !fenced;
-      continue;
-    }
-    if (fenced || bare === "" || bare.startsWith("|")) continue;
-    shown.push(line.replace(/\*\*|__|`/g, ""));
-  }
-  const gists = shown.filter((line) => /^[-*] /.test(line));
-  return gists.length > 0 ? gists : shown;
-}
-
-/**
- * The lines the widget draws for the conversation's open requests: the first with its
- * step line where it is one of a series, the opening of its text and where to answer it,
- * then one line for each other. Where this Mac can sign, it is answered in the card here;
- * otherwise on the request's page or the person's phone. `width` is the terminal's.
- */
-function widget(
-  open: Card[],
-  reach: Reach,
-  kit: Pick<Toolkit, "visibleWidth" | "truncateToWidth">,
-  width: number,
-): string[] {
-  const [first, ...rest] = open;
-  if (!first) return [];
-  const heading = "◆ Steery — ";
-  const ways = waysOf(first.request);
-  const page = ways.find((way) => way.kind === "page" && way.url);
-  const signs = ways.some((way) => way.kind === "mac");
-  const where =
-    signs && reach === "here"
-      ? "Answer here: the card opens when you stop typing · /steery opens it again"
-      : page
-        ? `Answer: ${page.url}  · or on your phone`
-        : "Answer on your phone";
-  const steps = stepLine(first.request, width, kit);
-  const fixed = steps === undefined ? 2 : 3;
-  let others = rest.map((card) => `${heading}${titleOf(card)}`);
-  if (others.length > WIDGET_LINES - fixed) {
-    const shown = WIDGET_LINES - fixed - 1;
-    others = [...others.slice(0, shown), `… and ${others.length - shown} more`];
-  }
-  const room = Math.max(0, Math.min(CARD_TEXT_LINES, WIDGET_LINES - fixed - others.length));
-  return [
-    ...(steps === undefined ? [] : [steps]),
-    `${heading}${titleOf(first)}`,
-    ...underTitle(first).slice(0, room),
-    where,
-    ...others,
-  ];
-}
-
-/** What a settled request's notice says. */
-function settledNotice(one: unknown): string | undefined {
-  if (!one || typeof one !== "object") return undefined;
-  const settled = one as Record<string, unknown>;
-  const title = str(settled.title).trim() || "A request";
-  if (settled.status === "answered") {
-    const by = str(settled.by).trim();
-    return `Steery: ${title} — answered${by ? ` on ${by}` : ""}`;
-  }
-  if (settled.status === "withdrawn") {
-    const reason = str(settled.reason).trim();
-    return `Steery: ${title} — withdrawn${reason ? `: ${reason}` : ""}`;
-  }
-  return undefined;
-}
-
-/** How a value the person gave reads back to them before they sign it. */
-function shown(control: Control, value: unknown): string {
-  const label = (id: unknown) => control.options?.find((option) => option.id === id)?.label ?? String(id);
-  if (control.kind === "choice" && control.rows?.length) {
-    const picked = value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
-    const said = control.rows.flatMap((row) => {
-      const one = picked[row.id];
-      if (one === undefined) return [];
-      return [`${row.label} ${Array.isArray(one) ? one.map(label).join(", ") : label(one)}`];
-    });
-    return said.length ? said.join("; ") : "none";
-  }
-  if (Array.isArray(value)) return value.length ? value.map(label).join(", ") : "none";
-  if (control.kind === "choice") return label(value);
-  if (control.kind === "edit") return "edited payload";
-  const text = String(value);
-  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
-}
-
-// ── the card in the terminal ─────────────────────────────────────────────────
-
-/**
- * Where a request is answered from the session it was raised in: here, in the card the
- * terminal draws with the toolkit the loader hands over; or elsewhere only, as an RPC
- * client, or a harness whose toolkit would not load, draws no card.
- */
-type Reach = "here" | "elsewhere";
-
-/**
- * What of the harness's terminal toolkit the card draws and reads keys with: the package
- * each harness's extensions import as `@earendil-works/pi-tui`, which omp maps to its own.
- * The loader hands it over (`loader.ts`): a copy is loaded from outside the harness's
- * tree, where omp resolves no package of its own.
- */
-type Toolkit = {
-  matchesKey(data: string, key: string): boolean;
-  visibleWidth(text: string): number;
-  truncateToWidth(text: string, width: number): string;
-  wrapTextWithAnsi(text: string, width: number): string[];
-  decodeKittyPrintable?(data: string): string | undefined;
-};
-
-function isToolkit(value: unknown): value is Toolkit {
-  return (
-    !!value &&
-    typeof value === "object" &&
-    "matchesKey" in value &&
-    typeof value.matchesKey === "function" &&
-    "visibleWidth" in value &&
-    typeof value.visibleWidth === "function" &&
-    "truncateToWidth" in value &&
-    typeof value.truncateToWidth === "function" &&
-    "wrapTextWithAnsi" in value &&
-    typeof value.wrapTextWithAnsi === "function"
-  );
-}
-
-/** The harness's theme as the card colours with it: only names both harnesses define. */
-type Paint = {
-  fg(color: string, text: string): string;
-  bold?(text: string): string;
-  inverse?(text: string): string;
-};
-
-/** The screen the card is drawn on: asked to draw again after a change no key made. */
-type Screen = { requestRender(): void; terminal?: { rows?: number } };
-
-/** The card as the harness holds it: drawn line by line, and handed every key while it is open. */
-type View = {
-  render(width: number): string[];
-  handleInput(data: string): void;
-  /** omp hands a paste here where its terminal sends one whole. */
-  pasteText(text: string): void;
-  invalidate(): void;
-  dispose(): void;
-};
-
-/** How long its person's keys rest before a request's form opens by itself. */
-const QUIET_MS = 1500;
-
-/** How much of the terminal's height the card takes at most, as omp's own forms do. */
-const CARD_SHARE = 0.7;
-
-/** A place the focus rests in the card: the request's text, one field, or the row of presses. */
-type Stop = { kind: "body" } | { kind: "field"; at: number } | { kind: "actions" };
-
-/** A press that ends the form: a button of the request's, Submit, or a way to answer elsewhere. */
-type Action = { label: string; name?: string; id?: string; style?: string; url?: string };
-
-/** Lines of the card, and the one among them to keep in view. */
-type Block = { lines: string[]; cursor: number };
-
-type CardInput = {
-  kit: Toolkit;
-  screen: Screen;
-  paint: Paint;
-  card: Card;
-  /** The form rule, where this Mac can sign the request; without it the card offers its ways. */
-  rule: Form | undefined;
-  notify(words: string, type: "info" | "warning" | "error"): void;
-  /** Aborted once the request is answered or withdrawn elsewhere: the card closes. */
-  closedBy: AbortSignal;
-  close(): void;
-};
-
-/** "from 0 to 600 in steps of 1": a number's range, as its field says it. */
-function rangeOf(control: Control): string {
-  return [
-    control.min !== undefined ? `from ${control.min}` : "",
-    control.max !== undefined ? `to ${control.max}` : "",
-    control.step !== undefined ? `in steps of ${control.step}` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
-}
-
-/** Whether a number fits a control's range and its steps. */
-function fits(control: Control, value: number): boolean {
-  const base = control.min ?? 0;
-  return (
-    Number.isFinite(value) &&
-    (control.min === undefined || value >= control.min) &&
-    (control.max === undefined || value <= control.max) &&
-    (!control.step || Math.abs((value - base) / control.step - Math.round((value - base) / control.step)) < 1e-9)
-  );
-}
-
-/** A value moved onto a control's steps and inside its range. */
-function snapped(control: Control, value: number): number {
-  const base = control.min ?? 0;
-  const step = control.step || 1;
-  let next = base + Math.round((value - base) / step) * step;
-  if (control.min !== undefined) next = Math.max(control.min, next);
-  if (control.max !== undefined) next = Math.min(control.max, next);
-  return Number(next.toFixed(10));
-}
-
-/**
- * Hand a person's choice to this Mac's signer through the runtime's `/answer` door, which
- * asks for Touch ID and signs: the status, and why where it is not 200. `0` is a runtime
- * that took nothing.
- */
-async function handOver(body: string): Promise<{ status: number; said: string }> {
-  try {
-    const response = await fetch(`${RUNTIME}/answer`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-    });
-    const reply: unknown = await response.json().catch(() => undefined);
-    const said =
-      reply && typeof reply === "object" && "error" in reply && typeof reply.error === "string"
-        ? reply.error
-        : `the runtime answered ${response.status}`;
-    return { status: response.status, said };
-  } catch (error) {
-    return { status: 0, said: `the runtime did not take the answer: ${String(error)}` };
-  }
-}
-
-/**
- * One request as a card in the terminal, in place of the editor: its whole text in a
- * frame, then its form, every field answered in place. ↑/↓ run through the whole card —
- * the text line by line, then each field's options or lines, on to the next field where
- * one ends — and Tab and Shift+Tab jump field to field. A press shows what will be signed;
- * Enter there hands it to this Mac's signer ([`handOver`]). The card never signs, and Esc
- * closes it with nothing sent. Without a form rule it shows the text and the ways to
- * answer elsewhere.
- */
-function requestCard(input: CardInput): View {
-  const { kit, screen, paint, card, rule, notify, closedBy } = input;
-  const request = card.request;
-  const title = titleOf(card);
-  const is = (data: string, ...keys: string[]) => keys.some((key) => kit.matchesKey(data, key));
-  const bold = (text: string) => paint.bold?.(text) ?? text;
-  const inverse = (text: string) => paint.inverse?.(text) ?? text;
-  const multiline = (control: Control | undefined) =>
-    control?.kind === "edit" || (control?.kind === "text" && control.multiline === true);
-  const labelOf = (control: Control) =>
-    rule?.shownLabel(control, request.labels_said) || control.label || control.placeholder || control.name;
-
-  const drawn = rule
-    ? rule.drawnForm(Array.isArray(request.input) ? request.input : [])
-    : { controls: [] as Control[], submit: false };
-  const fields = drawn.controls.filter((control) => control.kind !== "buttons");
-  const actions: Action[] = rule
-    ? [
-        ...(drawn.submit ? [{ label: rule.SUBMIT }] : []),
-        ...drawn.controls
-          .filter((control) => control.kind === "buttons")
-          .flatMap((control) =>
-            (control.options ?? []).map((option) => ({
-              label: option.label,
-              name: control.name,
-              id: option.id,
-              style: option.style,
-            })),
-          ),
-      ]
-    : [
-        ...waysOf(request)
-          .filter((way) => way.kind !== "mac")
-          .map((way) => ({ label: way.label, url: way.url })),
-        { label: "Close" },
-      ];
-  const stops: Stop[] = [
-    { kind: "body" },
-    ...fields.map((_, at): Stop => ({ kind: "field", at })),
-    ...(actions.length ? [{ kind: "actions" } as const] : []),
-  ];
-
-  /** What the person chose so far; a text box's words go in when a press ends the form. */
-  const draft: Record<string, unknown> = {};
-  /** Each text box's words as typed, a number's among them, and where its caret is. */
-  const texts = new Map<string, string>();
-  const carets = new Map<string, number>();
-  /** Where each choice's cursor is: the row, and the option in it. */
-  const cursors = new Map<string, { row: number; at: number }>();
-  for (const control of fields) {
-    if (control.kind === "slider") draft[control.name] = control.default ?? control.min ?? 0;
-    if (control.kind === "edit") texts.set(control.name, JSON.stringify(request.payload ?? null, null, 2));
-    // A field opens holding its `default`; the person changes it or leaves it.
-    const started = rule ? rule.started(control) : undefined;
-    if (control.kind === "text" && typeof started === "string") texts.set(control.name, started);
-    if (control.kind === "choice" && started !== undefined) draft[control.name] = started;
-    cursors.set(control.name, { row: 0, at: 0 });
-  }
-
-  let phase: "form" | "review" | "sending" = "form";
-  let focus = 0;
-  let action = 0;
-  /** In review: 0 signs, 1 goes back to the form. */
-  let choice = 0;
-  let error: string | undefined;
-  let scroll = 0;
-  /** Whether the view follows the focus; paging lets the person look elsewhere. */
-  let follow = true;
-  /** How many rows the card's content had when last drawn: one page. */
-  let page = 1;
-  /** How many rows the request's text took when last drawn: ↓ leaves it once its end shows. */
-  let bodyRows = 0;
-  let chosen: Action | undefined;
-  let answer: { values: Record<string, unknown>; payload?: unknown } | undefined;
-  let closed = false;
-  let bodyWidth = -1;
-  let bodyLines: string[] = [];
-
-  const finish = () => {
-    if (closed) return;
-    closed = true;
-    input.close();
-  };
-  closedBy.addEventListener("abort", finish, { once: true });
-
-  /** Cells laid out in lines no wider than `width`, `gap` between two on one line. */
-  const pack = (cells: string[], width: number, gap: string): string[] => {
-    const out: string[] = [];
-    let line = "";
-    for (const cell of cells) {
-      const next = line ? `${line}${gap}${cell}` : cell;
-      if (line && kit.visibleWidth(next) > width) {
-        out.push(line);
-        line = cell;
-      } else line = next;
-    }
-    if (line) out.push(line);
-    return out;
-  };
-
-  /** The request's text broken to `width`: its title is the frame's, code stays as written. */
-  const body = (width: number): string[] => {
-    if (width === bodyWidth) return bodyLines;
-    // With a form, each row and its detail are drawn in their choice's field, not twice.
-    const source = rule ? withoutRows(card) : card.text.split("\n");
-    if (source[0]?.trim() === title) source.shift();
-    while (source[0]?.trim() === "") source.shift();
-    const out: string[] = [];
-    let fenced = false;
-    for (const raw of source) {
-      const line = raw.replaceAll("\t", "  ");
-      const bare = line.trimStart();
-      const indent = line.length - bare.length;
-      if (bare.startsWith("```")) {
-        fenced = !fenced;
-        out.push(paint.fg("dim", kit.truncateToWidth(line, width)));
-        continue;
-      }
-      if (!bare) {
-        if (out.length && out.at(-1) !== "") out.push("");
-        continue;
-      }
-      const bullet = !fenced && /^[-*] /.test(bare);
-      const hang = Math.min(indent + (bullet ? 2 : 0), Math.floor(width / 2));
-      const text = fenced
-        ? paint.fg("mdCodeBlock", bare)
-        : /^#{1,6} /.test(bare)
-          ? bold(paint.fg("mdHeading", bare.replace(/^#+ /, "")))
-          : (bullet ? `• ${bare.slice(2)}` : bare)
-              .replace(/\*\*(.+?)\*\*/g, (_, strong: string) => bold(strong))
-              .replace(/`([^`]+)`/g, (_, code: string) => paint.fg("mdCode", code));
-      for (const [at, piece] of kit.wrapTextWithAnsi(text, Math.max(8, width - hang)).entries()) {
-        out.push(`${" ".repeat(at === 0 ? Math.min(indent, hang) : hang)}${piece}`);
-      }
-    }
-    while (out.at(-1) === "") out.pop();
-    bodyWidth = width;
-    bodyLines = out;
-    return out;
-  };
-
-  /** A text box's words broken to `width`, the caret drawn where it is while the box has the focus. */
-  const typed = (control: Control, width: number, focused: boolean): Block => {
-    const words = Array.from(texts.get(control.name) ?? "");
-    const caret = Math.min(carets.get(control.name) ?? words.length, words.length);
-    const hint = labelOf(control) === control.placeholder ? undefined : control.placeholder;
-    if (!words.length && !focused) {
-      return { lines: [paint.fg("dim", kit.truncateToWidth(hint || "—", width))], cursor: 0 };
-    }
-    const lines: string[] = [];
-    let line = "";
-    let used = 0;
-    let cursor = 0;
-    for (let at = 0; at <= words.length; at++) {
-      const here = focused && at === caret;
-      const char = words[at];
-      if (char === undefined || char === "\n") {
-        if (here) {
-          line += inverse(" ");
-          cursor = lines.length;
-        }
-        lines.push(line);
-        line = "";
-        used = 0;
-        continue;
-      }
-      const wide = kit.visibleWidth(char);
-      if (used + wide > width - 1) {
-        lines.push(line);
-        line = "";
-        used = 0;
-      }
-      if (here) cursor = lines.length;
-      line += here ? inverse(char) : char;
-      used += wide;
-    }
-    if (!words.length && hint) lines[0] = `${lines[0] ?? ""}${paint.fg("dim", kit.truncateToWidth(hint, width - 1))}`;
-    return { lines, cursor };
-  };
-
-  /** One field: its label, then what answers it in place. */
-  const fieldBlock = (control: Control, focused: boolean, width: number): Block => {
-    const label = labelOf(control);
-    const lines = [
-      `${focused ? paint.fg("accent", "› ") : "  "}${focused ? bold(label) : label}${control.required ? paint.fg("warning", " *") : ""}`,
-    ];
-    let cursor = 0;
-    const pad = "    ";
-    const room = Math.max(8, width - pad.length);
-    switch (control.kind) {
-      case "choice": {
-        const options = control.options ?? [];
-        const spot = cursors.get(control.name) ?? { row: 0, at: 0 };
-        const several = control.pick === "several";
-        const mark = (on: boolean) => (several ? (on ? "■" : "□") : on ? "●" : "○");
-        const held = draft[control.name];
-        if (control.rows?.length && rule) {
-          const picks = rule.rowPicks(control, held);
-          for (const [row, each] of control.rows.entries()) {
-            lines.push(`${pad}${each.label}${each.description ? paint.fg("dim", ` — ${each.description}`) : ""}`);
-            const pick = picks[each.id];
-            const cells = options.map((option, at) => {
-              const cell = `${mark(Array.isArray(pick) ? pick.includes(option.id) : pick === option.id)} ${option.label}`;
-              return focused && row === spot.row && at === spot.at ? inverse(cell) : cell;
-            });
-            if (focused && row === spot.row) cursor = lines.length;
-            lines.push(...pack(cells, room - 2, "   ").map((one) => `${pad}  ${one}`));
-            const said = (each.detail ?? "").trim().split("\n");
-            if (said.length === 1 && !said[0]) continue;
-            for (const one of said.slice(0, ROW_DETAIL_LINES)) {
-              lines.push(`${pad}  ${paint.fg("dim", kit.truncateToWidth(one.trimEnd(), room - 2))}`);
-            }
-            if (said.length > ROW_DETAIL_LINES) lines.push(`${pad}  ${paint.fg("dim", "…")}`);
-          }
-          break;
-        }
-        for (const [at, option] of options.entries()) {
-          const here = focused && at === spot.at;
-          const text = `${mark(Array.isArray(held) ? held.includes(option.id) : held === option.id)} ${option.label}`;
-          if (here) cursor = lines.length;
-          lines.push(
-            `${pad}${here ? paint.fg("accent", "› ") : "  "}${here ? bold(text) : text}${option.description ? paint.fg("dim", ` — ${option.description}`) : ""}`,
-          );
-        }
-        break;
-      }
-      case "text":
-      case "edit":
-      case "number": {
-        const box = typed(control, room, focused);
-        cursor = lines.length + box.cursor;
-        lines.push(...box.lines.map((one) => `${pad}${one}`));
-        const range = control.kind === "number" ? [control.unit, rangeOf(control)].filter(Boolean).join(" · ") : "";
-        if (range) lines.push(`${pad}${paint.fg("dim", range)}`);
-        break;
-      }
-      case "slider": {
-        const min = control.min ?? 0;
-        const max = control.max ?? 100;
-        const value = Number(draft[control.name] ?? min);
-        const span = Math.max(4, Math.min(30, room - 20));
-        const at = max > min ? Math.round(((value - min) / (max - min)) * (span - 1)) : 0;
-        const bar = `${"━".repeat(at)}●${"─".repeat(Math.max(0, span - 1 - at))}`;
-        cursor = lines.length;
-        lines.push(
-          `${pad}${min} ${focused ? paint.fg("accent", bar) : bar} ${max}   ${bold(`${value}${control.unit ? ` ${control.unit}` : ""}`)}`,
-        );
-        break;
-      }
-    }
-    return { lines, cursor };
-  };
-
-  /** The row of presses that end the form, the focused one drawn inverse. */
-  const actionsBlock = (focused: boolean, width: number): Block => {
-    const cells = actions.map((one, at) => {
-      const text = ` ${one.label} `;
-      if (focused && at === action) return `[${inverse(text)}]`;
-      return `[${one.style === "danger" ? paint.fg("error", text) : one.style === "primary" ? paint.fg("accent", text) : text}]`;
-    });
-    return { lines: pack(cells, width - 2, "  ").map((one) => `  ${one}`), cursor: 0 };
-  };
-
-  /** What will be signed, and the press that signs it. */
-  const reviewBlock = (width: number): Block => {
-    const lines = [bold("Sign this answer with Touch ID?"), "", `  ${bold(chosen?.label ?? "")}`];
-    for (const control of fields) {
-      if (draft[control.name] === undefined) continue;
-      const said = `${labelOf(control)}: ${shown(control, draft[control.name]).replaceAll("\n", " ")}`;
-      for (const [at, piece] of kit.wrapTextWithAnsi(said, Math.max(8, width - 4)).entries()) {
-        lines.push(`${at === 0 ? "  " : "    "}${piece}`);
-      }
-    }
-    lines.push("");
-    if (phase === "sending") lines.push(paint.fg("accent", "  Touch ID: confirm on this Mac…"));
-    else {
-      const sign = ` ${error ? "Try again" : "Sign with Touch ID"} `;
-      const back = " Back ";
-      lines.push(`  [${choice === 0 ? inverse(sign) : paint.fg("accent", sign)}]  [${choice === 1 ? inverse(back) : back}]`);
-    }
-    return { lines, cursor: lines.length - 1 };
-  };
-
-  /** The keys that work where the focus is, said in the frame's last line. */
-  const hints = (): string => {
-    if (phase === "sending") return "Touch ID on this Mac · Esc hides the card";
-    if (phase === "review") return `Enter ${choice === 0 ? "signs" : "goes back"} · ←→ choose · Esc back`;
-    const stop = stops[focus];
-    if (stop?.kind === "body") return "↑↓ scroll · Tab next · Esc close";
-    if (stop?.kind === "actions") return "←→ choose · Enter press · ↑ back · Esc close";
-    const control = stop?.kind === "field" ? fields[stop.at] : undefined;
-    if (control?.kind === "choice") {
-      if (control.rows?.length) return "↑↓ move · ←→ option · Space pick · Tab next";
-      return control.pick === "several" ? "↑↓ move · Space tick · Tab next" : "↑↓ move · Enter pick · Tab next";
-    }
-    if (control?.kind === "slider") return "←→ adjust · ↑↓ move · Tab next";
-    if (control?.kind === "number") return "type a number · ↑↓ move · Tab next";
-    return multiline(control) ? "type · ↑↓ move · Enter new line · Tab next" : "type · ↑↓ move · Tab next";
-  };
-
-  const render = (width: number): string[] => {
-    if (width < 16) return [kit.truncateToWidth(`Steery: ${title}`, width)];
-    const steps = stepLine(request, width, kit, {
-      here: (text) => bold(paint.fg("accent", text)),
-      expected: (text) => paint.fg("dim", text),
-    });
-    const inner = width - 4;
-    const content: string[] = [];
-    let top = 0;
-    let bottom = 0;
-    let line = 0;
-    const put = (block: Block, focused: boolean) => {
-      if (focused) {
-        top = content.length;
-        line = top + block.cursor;
-        bottom = top + block.lines.length - 1;
-      }
-      content.push(...block.lines);
-    };
-    if (phase === "form") {
-      for (const [at, stop] of stops.entries()) {
-        if (at > 0) content.push("");
-        const here = at === focus;
-        if (stop.kind === "body") {
-          put({ lines: body(inner), cursor: 0 }, here);
-          bodyRows = content.length;
-        } else if (stop.kind === "actions") put(actionsBlock(here, inner), here);
-        else {
-          const control = fields[stop.at];
-          if (control) put(fieldBlock(control, here, inner), here);
-        }
-      }
-    } else put(reviewBlock(inner), true);
-
-    const rows = screen.terminal?.rows ?? 24;
-    const view = Math.min(
-      content.length,
-      Math.max(1, Math.max(8, Math.floor(rows * CARD_SHARE)) - 2 - (error ? 1 : 0) - (steps === undefined ? 0 : 1)),
-    );
-    page = Math.max(1, view);
-    if (follow) {
-      if (bottom - top + 1 <= view) {
-        if (top < scroll) scroll = top;
-        if (bottom >= scroll + view) scroll = bottom - view + 1;
-      }
-      if (line < scroll) scroll = line;
-      if (line >= scroll + view) scroll = line - view + 1;
-    }
-    scroll = Math.max(0, Math.min(scroll, content.length - view));
-
-    const edge = (text: string) => paint.fg("borderAccent", text);
-    const boxed = (text: string) => {
-      const cut = kit.truncateToWidth(text, inner);
-      return `${edge("│")} ${cut}${" ".repeat(Math.max(0, inner - kit.visibleWidth(cut)))} ${edge("│")}`;
-    };
-    const label = kit.truncateToWidth(` ◆ Steery · ${title} `, Math.max(4, width - 10));
-    const up = scroll > 0 ? " ↑ " : "";
-    const head = `${edge("╭─")}${bold(paint.fg("accent", label))}${edge("─".repeat(Math.max(0, width - 4 - kit.visibleWidth(label) - kit.visibleWidth(up))))}${paint.fg("dim", up)}${edge("─╮")}`;
-    const below = content.length - scroll - view;
-    const foot = kit.truncateToWidth(` ${hints()}${below > 0 ? ` · ↓ ${below} more` : ""} `, Math.max(4, width - 4));
-    const tail = `${edge("╰─")}${paint.fg("dim", foot)}${edge("─".repeat(Math.max(0, width - 4 - kit.visibleWidth(foot))))}${edge("─╯")}`;
-    return [
-      ...(steps === undefined ? [] : [steps]),
-      head,
-      ...content.slice(scroll, scroll + view).map(boxed),
-      ...(error ? [boxed(paint.fg("error", error))] : []),
-      tail,
-    ].map((one) => kit.truncateToWidth(one, width));
-  };
-
-  /**
-   * Put the focus on stop `at`. Come to by ↓ or ↑, it lands on the side the arrow came
-   * from — a choice's first or last option or row, a box's first or last line, the end of
-   * the request's text — so the next press reads on; by Tab, Shift+Tab or a check moving
-   * to it, on a choice's picked option, else its first, and its first row; a box's caret
-   * where it was.
-   */
-  const land = (at: number, from?: "above" | "below") => {
-    focus = at;
-    follow = true;
-    const stop = stops[at];
-    if (stop?.kind === "body") {
-      if (from === "below") {
-        scroll = Math.max(0, bodyRows - page);
-        follow = false;
-      }
-      return;
-    }
-    const control = stop?.kind === "field" ? fields[stop.at] : undefined;
-    if (control?.kind === "choice") {
-      const spot = cursors.get(control.name) ?? { row: 0, at: 0 };
-      const rows = control.rows?.length ?? 0;
-      const options = control.options ?? [];
-      if (rows) spot.row = from === "below" ? rows - 1 : 0;
-      else if (from) spot.at = from === "below" ? Math.max(0, options.length - 1) : 0;
-      else spot.at = Math.max(0, options.findIndex((option) => option.id === draft[control.name]));
-      cursors.set(control.name, spot);
-    } else if (control && multiline(control) && from) {
-      carets.set(control.name, from === "above" ? 0 : Array.from(texts.get(control.name) ?? "").length);
-    }
-  };
-  /** Tab and Shift+Tab: the next stop or the one before, round the card. */
-  const move = (by: number) => land((focus + by + stops.length) % stops.length);
-  /** ↑/↓ past the edge of where the focus is; the card's first and last stops are its ends. */
-  const flow = (by: 1 | -1) => {
-    const next = focus + by;
-    if (next >= 0 && next < stops.length) land(next, by > 0 ? "above" : "below");
-  };
-  const toField = (at: number) => {
-    const index = stops.findIndex((stop) => stop.kind === "field" && stop.at === at);
-    if (index >= 0) land(index);
-  };
-
-  /** Words put into a text box at its caret: a box of one line takes a new line as a space. */
-  const insert = (control: Control, added: string) => {
-    const words = Array.from(texts.get(control.name) ?? "");
-    const at = Math.min(carets.get(control.name) ?? words.length, words.length);
-    const chars = Array.from(multiline(control) ? added : added.replaceAll("\n", " "));
-    words.splice(at, 0, ...chars);
-    texts.set(control.name, words.join(""));
-    carets.set(control.name, at + chars.length);
-  };
-
-  /** The text a key types, a paste's whole; nothing for a key that types nothing. */
-  const printable = (data: string): string | undefined => {
-    if (data.startsWith("\x1b[200~")) {
-      return data
-        .slice(6)
-        .replace(/\x1b\[201~[\r\n]*$/, "")
-        .replace(/\r\n?/g, "\n");
-    }
-    const decoded = kit.decodeKittyPrintable?.(data);
-    if (decoded) return decoded;
-    return /^[^\u0000-\u001f\u007f]+$/u.test(data) ? data : undefined;
-  };
-
-  /** A key in a text box: moves its caret, takes words out, or types them. */
-  const typeInto = (control: Control, data: string) => {
-    const words = Array.from(texts.get(control.name) ?? "");
-    let at = Math.min(carets.get(control.name) ?? words.length, words.length);
-    const start = (from: number) => {
-      let i = from;
-      while (i > 0 && words[i - 1] !== "\n") i--;
-      return i;
-    };
-    const end = (from: number) => {
-      let i = from;
-      while (i < words.length && words[i] !== "\n") i++;
-      return i;
-    };
-    if (is(data, "left")) at = Math.max(0, at - 1);
-    else if (is(data, "right")) at = Math.min(words.length, at + 1);
-    else if (is(data, "home")) at = start(at);
-    else if (is(data, "end")) at = end(at);
-    else if (is(data, "backspace")) {
-      if (at > 0) words.splice(--at, 1);
-    } else if (is(data, "delete")) words.splice(at, 1);
-    else if (multiline(control) && is(data, "up")) {
-      const from = start(at);
-      if (from === 0) return flow(-1);
-      at = Math.min(start(from - 1) + (at - from), from - 1);
-    } else if (multiline(control) && is(data, "down")) {
-      const to = end(at);
-      if (to >= words.length) return flow(1);
-      at = Math.min(to + 1 + (at - start(at)), end(to + 1));
-    } else if (multiline(control) && is(data, "enter")) words.splice(at++, 0, "\n");
-    else {
-      const added = printable(data);
-      if (added !== undefined) insert(control, added);
-      return;
-    }
-    texts.set(control.name, words.join(""));
-    carets.set(control.name, at);
-  };
-
-  /** A slider moved by `by` of its steps. */
-  const step = (control: Control, by: number) => {
-    draft[control.name] = snapped(control, Number(draft[control.name] ?? control.min ?? 0) + by * (control.step || 1));
-  };
-
-  /** A key on a choice: moves its cursor, or presses the option under it ([`Form.press`]). */
-  const choose = (control: Control, data: string) => {
-    if (!rule) return;
-    const options = control.options ?? [];
-    const rows = control.rows ?? [];
-    const spot = cursors.get(control.name) ?? { row: 0, at: 0 };
-    const option = () => options[spot.at];
-    const press = (rowId: string | undefined) => {
-      const one = option();
-      if (!one) return;
-      const value = rule.press(control, draft[control.name], rowId, one.id);
-      if (value === undefined) delete draft[control.name];
-      else draft[control.name] = value;
-    };
-    if (rows.length) {
-      const row = rows[spot.row]?.id;
-      if (is(data, "up")) {
-        if (spot.row === 0) return flow(-1);
-        spot.row--;
-      } else if (is(data, "down")) {
-        if (spot.row >= rows.length - 1) return flow(1);
-        spot.row++;
-      } else if (is(data, "left")) spot.at = Math.max(0, spot.at - 1);
-      else if (is(data, "right")) spot.at = Math.min(options.length - 1, spot.at + 1);
-      else if (is(data, "space")) press(row);
-      else if (is(data, "enter") && row !== undefined) {
-        if (control.pick !== "several" && rule.rowPicks(control, draft[control.name])[row] !== option()?.id) press(row);
-        if (spot.row < rows.length - 1) spot.row++;
-        else move(1);
-      }
-    } else if (is(data, "up")) {
-      if (spot.at === 0) return flow(-1);
-      spot.at--;
-    } else if (is(data, "down")) {
-      if (spot.at >= options.length - 1) return flow(1);
-      spot.at++;
-    } else if (is(data, "space")) press(undefined);
-    else if (is(data, "enter")) {
-      if (control.pick !== "several" && draft[control.name] !== option()?.id) press(undefined);
-      move(1);
-    }
-    cursors.set(control.name, spot);
-  };
-
-  /**
-   * The focused press: a way to answer elsewhere says its link and closes; a press of the
-   * form puts the typed words in, checks the form as every surface does, and shows what
-   * will be signed — or says what is missing and moves to it.
-   */
-  const pressAction = () => {
-    const one = actions[action];
-    if (!one) return;
-    if (!rule) {
-      if (one.url) notify(`${one.label}: ${one.url}`, "info");
-      finish();
-      return;
-    }
-    for (const [at, control] of fields.entries()) {
-      const words = texts.get(control.name);
-      if (control.kind === "text") {
-        if (words?.trim()) draft[control.name] = words;
-        else delete draft[control.name];
-      } else if (control.kind === "edit") draft[control.name] = words ?? "";
-      else if (control.kind === "number") {
-        const said = (words ?? "").trim();
-        if (!said) {
-          delete draft[control.name];
-          continue;
-        }
-        const value = Number(said);
-        if (!fits(control, value)) {
-          error = `${labelOf(control)}: ${said} is not a number ${rangeOf(control)}`.trim();
-          toField(at);
-          return;
-        }
-        draft[control.name] = value;
-      }
-    }
-    const pressed = one.name && one.id ? { name: one.name, id: one.id } : null;
-    const values = { ...draft, ...(pressed ? { [pressed.name]: pressed.id } : {}) };
-    const missing = rule.missingRequired(drawn.controls, values, rule.stanceOf(drawn.controls, values));
-    if (missing) {
-      error = `${missing} is required`;
-      toField(fields.findIndex((control) => (control.label || control.name) === missing));
-      return;
-    }
-    try {
-      answer = rule.submission(drawn.controls, draft, pressed);
-    } catch (thrown) {
-      error = thrown instanceof Error ? thrown.message : String(thrown);
-      toField(fields.findIndex((control) => control.kind === "edit"));
-      return;
-    }
-    chosen = one;
-    error = undefined;
-    phase = "review";
-    choice = 0;
-    scroll = 0;
-    follow = true;
-  };
-
-  /** Hand what will be signed to this Mac's signer; the card closes once it is answered. */
-  const sign = () => {
-    if (!answer) return;
-    phase = "sending";
-    error = undefined;
-    const body = JSON.stringify({
-      request,
-      values: answer.values,
-      ...(answer.payload === undefined ? {} : { payload: answer.payload }),
-    });
-    void handOver(body).then(({ status, said }) => {
-      // 409: answered elsewhere, withdrawn, or nothing here enrolled — nothing more to do here.
-      if (status === 200 || status === 409) {
-        notify(status === 200 ? "Steery: answered" : `Steery: ${said}`, status === 200 ? "info" : "warning");
-        finish();
-        return;
-      }
-      if (closed) {
-        notify(`Steery: ${said}`, "error");
-        return;
-      }
-      // Signed and kept where the runtime answered 503: the same press sends it again.
-      phase = "review";
-      error = said;
-      screen.requestRender();
-    });
-  };
-
-  const handleInput = (data: string) => {
-    if (closed) return;
-    if (is(data, "ctrl+c")) return finish();
-    if (phase === "sending") {
-      if (is(data, "escape")) finish();
-      return;
-    }
-    if (phase === "review") {
-      if (is(data, "escape") || (is(data, "enter", "space") && choice === 1)) {
-        phase = "form";
-        follow = true;
-      } else if (is(data, "left", "right", "tab", "shift+tab")) choice = 1 - choice;
-      else if (is(data, "enter", "space")) sign();
-      return;
-    }
-    if (is(data, "escape")) return finish();
-    if (is(data, "pageUp", "pageDown")) {
-      scroll += (is(data, "pageUp") ? -1 : 1) * Math.max(1, page - 1);
-      follow = false;
-      return;
-    }
-    if (is(data, "shift+tab")) return move(-1);
-    if (is(data, "tab")) return move(1);
-    const stop = stops[focus];
-    if (stop?.kind === "body") {
-      if (is(data, "down") && scroll + page >= bodyRows) return flow(1);
-      if (is(data, "up", "down")) scroll += is(data, "up") ? -1 : 1;
-      else if (is(data, "home", "end")) scroll = is(data, "home") ? 0 : Number.MAX_SAFE_INTEGER;
-      else if (is(data, "enter", "space")) return move(1);
-      follow = false;
-      return;
-    }
-    if (stop?.kind === "actions") {
-      if (is(data, "up")) return flow(-1);
-      if (is(data, "left")) action = Math.max(0, action - 1);
-      else if (is(data, "right")) action = Math.min(actions.length - 1, action + 1);
-      else if (is(data, "enter", "space")) pressAction();
-      return;
-    }
-    const control = stop ? fields[stop.at] : undefined;
-    if (!control) return;
-    follow = true;
-    if (control.kind === "choice") return choose(control, data);
-    if (!multiline(control) && is(data, "up", "down")) return flow(is(data, "up") ? -1 : 1);
-    if (control.kind === "slider") {
-      if (is(data, "left")) step(control, -1);
-      else if (is(data, "right")) step(control, 1);
-      else if (is(data, "home", "end")) draft[control.name] = is(data, "home") ? (control.min ?? 0) : (control.max ?? 100);
-      else if (is(data, "enter")) move(1);
-      return;
-    }
-    if (!multiline(control) && is(data, "enter")) return move(1);
-    typeInto(control, data);
-  };
-
-  return {
-    render,
-    handleInput,
-    pasteText(text: string) {
-      const stop = stops[focus];
-      const control = stop?.kind === "field" ? fields[stop.at] : undefined;
-      if (phase !== "form" || !control || !["text", "edit", "number"].includes(control.kind)) return;
-      insert(control, text.replace(/\r\n?/g, "\n"));
-      screen.requestRender();
-    },
-    invalidate() {
-      bodyWidth = -1;
-    },
-    dispose() {
-      closedBy.removeEventListener("abort", finish);
-    },
-  };
 }
 
 export const surfaces = {
@@ -2370,8 +1238,6 @@ export const surfaces = {
           { name: "steery-thinking", description: "The thinking Steery's runtime picked", type: "string" as const },
         ]
       : [],
-  // In both: answer one of the conversation's open requests here ([`answering`]).
-  commands: [{ name: "steery", description: "Answer a Steery request here" }],
 };
 
 export default function steery(pi: Api, carried: Carried = {}): Running {
@@ -2538,26 +1404,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const calls = new Map<string, Call>(kept.calls.map((call) => [call.id, call]));
   /** The calls it was inside that ended lately, oldest first, at most [`ENDED_KEPT`]. */
   const ended: Ended[] = kept.ended;
-  /** A dialog of the harness's own waiting on its person, never one of the card's. */
+  /** A dialog of the harness's own waiting on its person. */
   let dialog: Dialog | null = kept.dialog;
-  /**
-   * The card open in the terminal now: the request it shows, and what closes it once that
-   * request is answered or withdrawn elsewhere.
-   */
-  let walking: Walk | undefined;
-  /**
-   * The requests the card opened in this process, by id, however it closed: one opens by
-   * itself only once, so a card its person closed stays closed ([`walkNext`]).
-   */
-  const walked = new Set<string>(kept.walked);
-  /** The harness's terminal toolkit, as the loader handed it: without it no card is drawn. */
-  const toolkit = isToolkit(carried.tui) ? carried.tui : undefined;
   /** The harness's own model calls, as the loader handed them: without them no recap is written here. */
   const models = carried.models && typeof carried.models === "object" ? (carried.models as Models) : undefined;
-  /** When its person last pressed a key, so the card waits for a pause in their typing. */
-  let pressedAt = 0;
-  /** How this copy stops hearing its person's keys. */
-  let unhear: (() => void) | undefined;
 
   /**
    * Whether the conversation can take words with no turn running and none waiting to go
@@ -2683,8 +1533,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let stateAt = 0;
   let stateTimer: NodeJS.Timeout | undefined;
   let looking: NodeJS.Timeout | undefined;
-  /** The conversation's open requests, as the runtime last pushed them. */
-  let open: Card[] = [];
 
   const send = (frame: Frame): boolean => {
     if (!door || door.readyState !== 1) return false;
@@ -2865,11 +1713,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     stateSent = "";
     sendState();
     clearInterval(looking);
-    // Each look also opens a request's form once its person is free for it ([`walkNext`]).
-    looking = setInterval(() => {
-      noteState();
-      walkNext();
-    }, LOOK_EVERY_MS);
+    looking = setInterval(noteState, LOOK_EVERY_MS);
     looking.unref?.();
     if (REGISTERS && missed && !reached(pi)) reconnect();
     missed = false;
@@ -2914,9 +1758,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         void addressed(id, said).then((reply) => send({ t: "answer", id, ...reply }));
         return;
       }
-      case "cards":
-        if (Array.isArray(said.open) && Array.isArray(said.settled)) drawCards(said);
-        return;
       default:
         return;
     }
@@ -3569,133 +2410,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     cut();
   };
 
-  /** Whether the cards are drawn here: a conversation's own copy whose person sees it (`tui`, `rpc`), in pi or omp. */
-  const draws = (ctx: Context | undefined): ctx is Context =>
-    !!ctx && ctx.hasUI !== false && (ctx.mode === "tui" || ctx.mode === "rpc") && !led(ctx);
-
-  /** Where a request raised here is answered from: the card here, or elsewhere. */
-  const reach = (ctx: Context): Reach => (ctx.mode === "tui" && ctx.ui?.custom && toolkit ? "here" : "elsewhere");
-
-  /** Draw the conversation's open requests as the runtime pushed them, and say the ones that settled. */
-  const drawCards = (frame: Frame) => {
-    open = cardsOf(frame.open);
-    // A request answered or withdrawn elsewhere closes its card.
-    const now = walking?.id;
-    if (now !== undefined && !open.some((card) => str(card.request.id) === now)) walking?.closed.abort();
-    const ctx = live;
-    if (!draws(ctx)) return;
-    try {
-      // The widget's lines are plain strings the harness draws whole: cut to the terminal, 80 where none says.
-      const lines = widget(open, reach(ctx), toolkit ?? PLAIN, process.stdout.columns || 80);
-      ctx.ui?.setWidget?.("steery", lines.length ? lines : undefined, { placement: "aboveEditor" });
-      ctx.ui?.setStatus?.("steery", open.length ? `${open.length} open` : undefined);
-      for (const one of Array.isArray(frame.settled) ? frame.settled : []) {
-        const notice = settledNotice(one);
-        if (notice) ctx.ui?.notify?.(notice, "info");
-      }
-    } catch {
-      // A session the harness already retired draws nothing more.
-    }
-    walkNext();
-  };
-
-  /**
-   * Open a request's card by itself in the terminal, where this Mac can sign it: the
-   * newest request not opened here yet, once its person is free for it — their keys at
-   * rest for [`QUIET_MS`], nothing typed at the input line, no dialog of the harness's own
-   * open, no card open — and the conversation idle or its turn raised or waits on a
-   * request itself. A turn busy with other work is left alone; its end opens the card.
-   * Each request opens once in a process, so one its person closed stays closed: the
-   * widget above the editor, `/steery` and the phone still answer it.
-   */
-  const walkNext = () => {
-    const ctx = live;
-    if (walking || dialog || !draws(ctx) || reach(ctx) !== "here" || typing(ctx) !== false) return;
-    if (Date.now() - pressedAt < QUIET_MS) return;
-    if (idle(ctx) === false && !asked) return;
-    const card = open.find((one) => {
-      const id = str(one.request.id);
-      return id !== "" && !walked.has(id) && waysOf(one.request).some((way) => way.kind === "mac");
-    });
-    if (card) void answering(ctx, card);
-  };
-
-  /**
-   * Answer one of the conversation's open requests here, in its card: `card`, opened by
-   * itself ([`walkNext`]), or with `/steery` the one open, chosen where several are. One
-   * card at a time: `/steery` closes one still open first, and nothing opens by itself
-   * while one is being chosen.
-   */
-  const answering = async (ctx: Context, given?: Card) => {
-    const ui = ctx.ui;
-    const notify = (words: string, type: "info" | "warning" | "error" = "info") => ui?.notify?.(words, type);
-    const kit = toolkit;
-    if (!ui?.custom || !kit || ctx.mode !== "tui") {
-      notify("Steery: answer this request on your phone or its page", "warning");
-      return;
-    }
-    walking?.closed.abort();
-    const walk: Walk = { closed: new AbortController() };
-    walking = walk;
-    try {
-      let card = given ?? open[0];
-      if (!card) {
-        notify("Steery: no request is open in this conversation");
-        return;
-      }
-      if (!given && open.length > 1 && ui.select) {
-        const labels = open.map((one, at) => `${at + 1}. ${titleOf(one)}`);
-        const picked = open[labels.indexOf((await ui.select("Steery requests", labels)) ?? "")];
-        if (!picked || walk.closed.signal.aborted) return;
-        card = picked;
-      }
-      const id = str(card.request.id);
-      walk.id = id;
-      walked.add(id);
-      // The request may have closed while one was chosen.
-      if (!open.some((one) => str(one.request.id) === id)) return;
-      const signs = waysOf(card.request).some((way) => way.kind === "mac");
-      const rule = signs ? form() : undefined;
-      if (signs && !rule) notify("Steery: this copy carries no form rule", "error");
-      const shown = card;
-      await ui.custom<void>((screen, paint, _keys, done) =>
-        requestCard({
-          kit,
-          screen,
-          paint,
-          card: shown,
-          rule,
-          notify,
-          closedBy: walk.closed.signal,
-          close: () => done(undefined),
-        }),
-      );
-    } catch {
-      // A card the harness could not draw leaves the request to the phone.
-    } finally {
-      if (walking === walk) walking = undefined;
-      noteState();
-    }
-  };
-
-  /**
-   * Hear its person's keys, so the card waits for a pause in their typing ([`walkNext`]).
-   * omp drops an extension's listeners when its person starts a new session, so each
-   * session the copy is in listens again.
-   */
-  const hear = (ctx: Context) => {
-    if (!toolkit || ctx.mode !== "tui") return;
-    unhear?.();
-    try {
-      unhear = ctx.ui?.onTerminalInput?.(() => {
-        pressedAt = Date.now();
-        return undefined;
-      });
-    } catch {
-      unhear = undefined;
-    }
-  };
-
   /**
    * Whether the conversation open here is another's sub-agent: omp says it runs one, its
    * process inherited a lead naming another conversation, another session in this process
@@ -3726,7 +2440,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     if (HARNESS === "pi") signals();
     register(ctx);
-    hear(ctx);
     if (wanted || (led(ctx) && !leadOf(ctx))) return;
     wanted = true;
     dial();
@@ -3807,8 +2520,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       ours = new Set(stood.ours);
       calls.clear();
       for (const call of stood.calls) calls.set(call.id, call);
-      walked.clear();
-      for (const id of stood.walked) walked.add(id);
     }
     begin(ctx);
     moved(event, ctx);
@@ -3829,7 +2540,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     sessionId = ctx.sessionManager.getSessionId();
     hold(ctx);
     if (leading === self) process.env[LEAD] = marker(ctx);
-    hear(ctx);
     const gone = typeof event.previousSessionFile === "string" ? basename(event.previousSessionFile, ".jsonl") : "";
     const at = gone.lastIndexOf("_");
     if (HARNESS === "omp" && event.reason === "new" && at >= 0) {
@@ -4013,17 +2723,14 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteState();
   });
   // A dialog of the harness's own waits on its person: a local dialog, never a request.
-  // The card's own picker is the person answering here, and is not said.
   pi.on("ui_prompt_start", (event, ctx) => {
     live = ctx;
-    if (walking) return;
     const kind = DIALOG_KINDS.find((one) => one === event.kind) ?? "custom";
     dialog = { kind, title: str(event.title), since: Date.now() };
     noteState();
   });
   pi.on("ui_prompt_end", (_event, ctx) => {
     live = ctx;
-    if (walking) return;
     dialog = null;
     noteState();
   });
@@ -4294,11 +3001,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   });
   /** Let go of all this session holds here: its door and the lead. */
   const letGo = async () => {
-    // A card still open belongs to the copy going: it closes, and the next opens it again.
-    walking?.closed.abort();
-    if (walking?.id) walked.delete(walking.id);
-    unhear?.();
-    unhear = undefined;
     await release();
     shut();
     unlead();
@@ -4338,11 +3040,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         calls: [...calls.values()],
         ended: [...ended],
         dialog,
-        walked: [...walked],
       };
-    },
-    async command(name, _args, ctx) {
-      if (name === "steery") await answering(ctx);
     },
   };
   // Both harnesses wait for this handler before tearing the session down, and pi's RPC
