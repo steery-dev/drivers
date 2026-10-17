@@ -42,8 +42,8 @@ const TASK: usize = 100;
 
 /// The harness's conversations here: its agent folder, the folder its environment told it
 /// to keep them in, and the folders outside it its moments named, remembered for as long
-/// as this driver runs; and the trees, titles and sub-agents' starts of the transcripts
-/// read.
+/// as this driver runs; every transcript the last `sessions/list` filed, by its id; and
+/// the trees, titles and sub-agents' starts of the transcripts read.
 pub struct Store {
     harness: Harness,
     home: PathBuf,
@@ -51,6 +51,7 @@ pub struct Store {
     /// `PI_CODING_AGENT_SESSION_DIR`, where this driver was started with it.
     chosen: Option<PathBuf>,
     named: Mutex<BTreeSet<PathBuf>>,
+    filing: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     trees: Trees<Entries>,
     quiet: Quiet,
     titles: Titles,
@@ -73,6 +74,7 @@ impl Store {
             root,
             chosen,
             named: Mutex::new(BTreeSet::new()),
+            filing: Mutex::new(BTreeMap::new()),
             trees: Trees::default(),
             quiet: Quiet::default(),
             titles: Titles::default(),
@@ -103,16 +105,22 @@ impl Store {
                 .get(id)
                 .is_some_and(|files| files.as_slice() == at)
         });
-        for (id, files) in filed.by_id {
+        for (id, files) in &filed.by_id {
             // Two transcripts answering to one id name it ambiguously: neither is read.
             let [file] = files.as_slice() else {
                 complete = false;
                 continue;
             };
-            if let Some(session) = self.session(&id, file, list.seen_since) {
+            if let Some(session) = self.session(id, file, list.seen_since) {
                 sessions.push(session);
             }
         }
+        // A filing that missed a folder stands for nothing: each lookup reads them all.
+        *self.filing.lock().unwrap_or_else(|e| e.into_inner()) = if filed.complete {
+            filed.by_id
+        } else {
+            BTreeMap::new()
+        };
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
             sessions,
@@ -243,11 +251,29 @@ impl Store {
     }
 
     /// Every transcript filed under `id`: one, where the harness's store is as it keeps it.
-    /// Looked up in each folder's listing as it stands, never by indexing every file: the
-    /// runtime asks this of every conversation on every sweep.
+    /// As the last `sessions/list` filed it while each of those files is still there: the
+    /// runtime lists before it asks anything of each conversation in a sweep, so a second
+    /// transcript under the same id is seen at the next list. Otherwise looked up in each
+    /// folder's listing as it stands, never by indexing every file. Measured 2026-10-17 on
+    /// a Mac with 413 omp conversations in 107 folders: `held` 1.5–2 ms a call looking in
+    /// every folder, almost all of a sweep's 2 s of `held` and `idle`.
     pub fn transcripts(&self, id: &str) -> Vec<PathBuf> {
         if id.is_empty() || id.chars().any(char::is_control) {
             return Vec::new();
+        }
+        if let Some(files) = self
+            .filing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            // A link is never read, as no folder's listing takes one.
+            .filter(|files| {
+                files
+                    .iter()
+                    .all(|file| std::fs::symlink_metadata(file).is_ok_and(|meta| meta.is_file()))
+            })
+        {
+            return files.clone();
         }
         let (folders, _) = self.folders();
         let mut found = Vec::new();
