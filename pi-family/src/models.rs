@@ -113,9 +113,7 @@ impl Catalog {
     /// whoever waits on it, within [`LISTED_WITHIN`], and a list it gives is kept.
     fn asking(&self, harness: Harness, root: &Path, afresh: bool) -> Asking {
         let mut asking = self.0.asking.lock().unwrap_or_else(|e| e.into_inner());
-        if !afresh
-            && let Some(running) = asking.as_ref().filter(|asked| asked.borrow().is_none())
-        {
+        if !afresh && let Some(running) = asking.as_ref().filter(|asked| asked.borrow().is_none()) {
             return running.clone();
         }
         let (give, asked) = watch::channel(None);
