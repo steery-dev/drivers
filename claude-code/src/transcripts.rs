@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, Metadata};
 use std::io::{BufReader, Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
@@ -49,11 +49,13 @@ const HEADLESS: &str = "sdk-cli";
 const CUSTOM_TITLE: &[u8] = br#"{"type":"custom-title""#;
 
 /// Claude Code's conversations here: its configuration root, the other `projects` folders
-/// its moments named, what each transcript's head says, kept while the file only grows,
-/// each transcript's tree as far as it was read, and the reads that said nothing.
+/// its moments named, each folder's listing, kept while the folder stands as it did, what
+/// each transcript's head says, kept while the file only grows, each transcript's tree as
+/// far as it was read, and the reads that said nothing.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
+    listings: Mutex<HashMap<PathBuf, Kept<Arc<[PathBuf]>>>>,
     heads: Mutex<HashMap<PathBuf, Kept<Head>>>,
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
     trees: Trees<Records>,
@@ -93,6 +95,7 @@ impl Store {
         Self {
             root,
             named: Mutex::new(BTreeSet::new()),
+            listings: Mutex::new(HashMap::new()),
             heads: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
             trees: Trees::default(),
@@ -107,7 +110,7 @@ impl Store {
     /// `sessions/list`: every conversation updated since `seen_since`.
     pub fn list(&self, list: List) -> Listed {
         self.remember(&list.transcripts);
-        let filed = self.filed();
+        let filed = self.filed(None);
         let mut complete = filed.complete;
         let mut sessions = Vec::new();
         let mut excluded = Vec::new();
@@ -136,6 +139,10 @@ impl Store {
             }
         }
         lock(&self.heads).retain(|file, _| walked.contains(file));
+        if let Some(folders) = &filed.folders {
+            let listed: HashSet<&PathBuf> = folders.iter().map(|(folder, _)| folder).collect();
+            lock(&self.listings).retain(|folder, _| listed.contains(folder));
+        }
         lock(&self.agents).retain(|file, _| regular(file));
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
@@ -156,6 +163,11 @@ impl Store {
     pub fn session(&self, id: &str) -> Result<Session, Error> {
         let (file, facts) = self.find(id)?;
         Ok(self.described(id, &file, &facts))
+    }
+
+    /// The transcript conversation `id` is.
+    pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
+        self.find(id).map(|(file, _)| file)
     }
 
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
@@ -182,7 +194,7 @@ impl Store {
         }
         let Filed {
             mut by_id, folders, ..
-        } = self.filed();
+        } = self.filed(Some(&read.external_id));
         let (file, facts) = self.person(
             &read.external_id,
             by_id.remove(&read.external_id).unwrap_or_default(),
@@ -236,7 +248,10 @@ impl Store {
     /// The one transcript conversation `id` is: of those filed under it, the one a person
     /// is in.
     fn find(&self, id: &str) -> Result<(PathBuf, Facts), Error> {
-        self.person(id, self.filed().by_id.remove(id).unwrap_or_default())
+        self.person(
+            id,
+            self.filed(Some(id)).by_id.remove(id).unwrap_or_default(),
+        )
     }
 
     /// Of `files`, those filed under conversation `id`, the one a person is in.
@@ -399,18 +414,14 @@ impl Store {
         let mut complete = true;
         let mut folders = Vec::new();
         for projects in std::iter::once(own).chain(named) {
-            stand(stands, &projects, Stamp::at(&projects));
-            match std::fs::read_dir(&projects) {
-                Ok(entries) => {
-                    for entry in entries {
-                        match entry {
-                            Ok(entry) if entry.file_type().is_ok_and(|kind| kind.is_dir()) => {
-                                folders.push(entry.path());
-                            }
-                            Ok(_) => {}
-                            Err(_) => complete = false,
-                        }
-                    }
+            let stamp = Stamp::at(&projects);
+            stand(stands, &projects, stamp);
+            match self.listing(&projects, stamp, |entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+            }) {
+                Ok((entries, whole)) => {
+                    folders.extend(entries.iter().cloned());
+                    complete &= whole;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => complete = false,
@@ -419,34 +430,32 @@ impl Store {
         (folders, complete)
     }
 
-    fn filed(&self) -> Filed {
+    /// The transcripts filed in every folder, those of conversation `only` where it is
+    /// given.
+    fn filed(&self, only: Option<&str>) -> Filed {
         let mut stands = Some(Vec::new());
         let (folders, mut complete) = self.folders(&mut stands);
         let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for folder in folders {
-            stand(&mut stands, &folder, Stamp::at(&folder));
-            let Ok(entries) = std::fs::read_dir(&folder) else {
+            let stamp = Stamp::at(&folder);
+            stand(&mut stands, &folder, stamp);
+            // A link is never read: it could name a file anywhere.
+            let Ok((files, whole)) = self.listing(&folder, stamp, |entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+            }) else {
                 complete = false;
                 continue;
             };
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    complete = false;
-                    continue;
-                };
-                let path = entry.path();
-                // A link is never read: it could name a file anywhere.
-                if !entry.file_type().is_ok_and(|kind| kind.is_file())
-                    || path.extension().is_none_or(|ext| ext != "jsonl")
-                {
-                    continue;
-                }
+            complete &= whole;
+            for path in files.iter() {
                 if let Some(id) = path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
                     .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
+                    .filter(|id| only.is_none_or(|only| only == *id))
                 {
-                    by_id.entry(id.to_owned()).or_default().push(path);
+                    by_id.entry(id.to_owned()).or_default().push(path.clone());
                 }
             }
         }
@@ -455,6 +464,46 @@ impl Store {
             complete,
             folders: stands,
         }
+    }
+
+    /// The entries of folder `dir` that `keep` takes, and whether every entry was read:
+    /// listed again only once the folder no longer stands as `stamp`, taken before it is
+    /// listed. Measured 2026-10-17 on a Mac with 118 folders holding 795 transcripts:
+    /// listing them all took 12 ms, on every `held` of each conversation.
+    fn listing(
+        &self,
+        dir: &Path,
+        stamp: Option<Stamp>,
+        keep: fn(&std::fs::DirEntry) -> bool,
+    ) -> std::io::Result<(Arc<[PathBuf]>, bool)> {
+        if let Some(stamp) = stamp
+            && let Some(kept) = lock(&self.listings).get(dir)
+            && kept.stamp == stamp
+        {
+            return Ok((kept.value.clone(), true));
+        }
+        let mut whole = true;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            match entry {
+                Ok(entry) if keep(&entry) => entries.push(entry.path()),
+                Ok(_) => {}
+                Err(_) => whole = false,
+            }
+        }
+        let entries: Arc<[PathBuf]> = entries.into();
+        if let Some(stamp) = stamp
+            && whole
+        {
+            lock(&self.listings).insert(
+                dir.to_owned(),
+                Kept {
+                    stamp,
+                    value: entries.clone(),
+                },
+            );
+        }
+        Ok((entries, whole))
     }
 }
 
