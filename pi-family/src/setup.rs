@@ -23,9 +23,6 @@ const EXTENSION: &str = include_str!("../plugin/extension.ts");
 /// The file the harness loads: it runs the copy of the extension named in one file of the
 /// runtime's, and moves every session onto a newer copy once one is named there.
 const LOADER: &str = include_str!("../plugin/loader.ts");
-/// The rule every surface draws a request's form by, carried whole into the extension
-/// because a copy loads nothing over the network.
-const FORM_JS: &str = include_str!("../plugin/form.js");
 
 /// Steery's MCP server, as the entries name it.
 const SERVER: &str = "steery";
@@ -183,23 +180,15 @@ fn pi_entry(setup: &Setup) -> Value {
     })
 }
 
-/// Steery's extension for the harness, its placeholders filled: the harness; the
-/// runtime's loopback address, where the card hands a person's answer to `/answer`, which
-/// is the MCP URL without its `/mcp`; the door's address; and the MCP entry the extension
-/// registers, none in omp, which reads Steery's from its own `mcp.json`.
+/// Steery's extension for the harness, its placeholders filled: the harness; the door's
+/// address; and the MCP entry the extension registers, none in omp, which reads Steery's
+/// from its own `mcp.json`.
 fn extension(harness: Harness, setup: &Setup) -> Result<String, Error> {
-    let runtime = setup.mcp_url.strip_suffix("/mcp").ok_or_else(|| {
-        Error::invalid(format!(
-            "the MCP URL does not end in /mcp: {}",
-            setup.mcp_url
-        ))
-    })?;
-    for (what, value) in [("MCP URL", runtime), ("door", setup.door.as_str())] {
-        if value.is_empty() || value.contains(['"', '\\', '\n', '\r']) {
-            return Err(Error::invalid(format!(
-                "this {what} cannot be written into a string literal: {value}"
-            )));
-        }
+    let door = setup.door.as_str();
+    if door.is_empty() || door.contains(['"', '\\', '\n', '\r']) {
+        return Err(Error::invalid(format!(
+            "this door cannot be written into a string literal: {door}"
+        )));
     }
     let mcp = match harness {
         Harness::Omp => "{}".to_owned(),
@@ -209,10 +198,8 @@ fn extension(harness: Harness, setup: &Setup) -> Result<String, Error> {
     let mcp = mcp.replace('\\', "\\\\").replace('"', "\\\"");
     Ok(EXTENSION
         .replace("__STEERY_HARNESS__", harness.id())
-        .replace("__STEERY_RUNTIME__", runtime)
-        .replace("__STEERY_DOOR__", &setup.door)
-        .replace("__STEERY_MCP__", &mcp)
-        .replace("/*__STEERY_FORM_JS__*/", FORM_JS))
+        .replace("__STEERY_DOOR__", door)
+        .replace("__STEERY_MCP__", &mcp))
 }
 
 /// The `mcp.json` files pi reads that hold a `steery` server of a person's own, which

@@ -88,6 +88,9 @@ impl Program for Driver {
                 transcripts::Store::new(harness, &params.home, root, chosen)
             }),
         });
+        if let Ok(store) = self.store() {
+            self.catalog.warm(harness, store.root());
+        }
         Ok(wire::Initialized {
             protocol: PROTOCOL,
             program: wire::ProgramInfo {

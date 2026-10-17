@@ -1,17 +1,14 @@
-//! A receipt read from a transcript the harness only appends to: where the transcript ends
-//! before words go ([`end`]), and whether exactly one whole record it gained since is a
-//! person's input carrying the words' delivery marker whole ([`found`], [`marked`]). What
-//! a person's input is, each driver says of its own harness's records.
+//! A receipt read from a transcript: where the transcript ends before words go ([`end`]),
+//! and whether exactly one whole record it gained since is a person's input carrying the
+//! words' delivery marker whole ([`found`], [`marked`]). What a person's input is, each
+//! driver says of its own harness's records.
 
 use std::fs::File;
-use std::io::{self, Read as _, Seek as _, SeekFrom};
+use std::io::{self, BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
 use serde_json::Value;
-
-/// The most a receipt reads past its mark.
-const RECEIPT_MOST: u64 = 64 * 1024 * 1024;
 
 /// The most of a transcript's end read back for its last whole record.
 const BOUNDARY_MOST: u64 = 1024 * 1024;
@@ -60,10 +57,13 @@ fn boundary(file: &mut File, len: u64) -> io::Result<u64> {
     Ok(0)
 }
 
-/// Whether exactly one whole record the transcript at `path` gained past `end` is a
-/// person's input carrying `steery-delivery:<delivery>`, as `input` reads a record and the
-/// marker. The line says why there is no answer: the file replaced or shrunk since, grown
-/// past what a receipt reads, unreadable, a malformed record, or two inputs carrying it.
+/// Whether exactly one whole record of the transcript at `path` past `end` is a person's
+/// input carrying `steery-delivery:<delivery>`, as `input` reads a record and the marker.
+/// A transcript replaced or shrunk since the mark is looked at whole: a harness that
+/// rewrites its file (omp does on some compactions) keeps its records, so words that went
+/// in before are found, and a look always concludes. A record not yet ended is left for the
+/// next look. The line says why there is no answer: unreadable, a malformed record, or two
+/// inputs carrying it.
 pub fn found(
     path: &Path,
     end: &End,
@@ -73,18 +73,22 @@ pub fn found(
     let unread = |e: io::Error| format!("{}: {e}", path.display());
     let mut file = File::open(path).map_err(unread)?;
     let meta = file.metadata().map_err(unread)?;
-    if meta.dev() != end.dev || meta.ino() != end.ino || meta.len() < end.bytes {
-        return Err("the transcript was replaced since the mark".into());
-    }
-    let gained = meta.len() - end.bytes;
-    if gained > RECEIPT_MOST {
-        return Err("the transcript grew past what a receipt reads".into());
-    }
-    let mut delta = Vec::new();
-    file.seek(SeekFrom::Start(end.bytes))
-        .and_then(|_| file.take(gained).read_to_end(&mut delta))
+    let same = meta.dev() == end.dev && meta.ino() == end.ino && meta.len() >= end.bytes;
+    file.seek(SeekFrom::Start(if same { end.bytes } else { 0 }))
         .map_err(unread)?;
-    carried(&delta, delivery, input)
+    let marker = format!("{DELIVERED}{delivery}");
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut matches = 0;
+    loop {
+        line.clear();
+        reader.read_until(b'\n', &mut line).map_err(unread)?;
+        if line.last() != Some(&b'\n') {
+            break;
+        }
+        matches += usize::from(carries(&line, &marker, &input)?);
+    }
+    once(matches)
 }
 
 /// Whether exactly one whole record of `delta` is a person's input carrying the marker
@@ -101,16 +105,30 @@ pub fn carried(
         .map_or(&[][..], |last| &delta[..=last]);
     let marker = format!("{DELIVERED}{delivery}");
     let mut matches = 0;
-    for line in whole
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let record: Value = serde_json::from_slice(line)
-            .map_err(|_| "the transcript has a malformed record".to_owned())?;
-        if input(&record, &marker) {
-            matches += 1;
-        }
+    for line in whole.split_inclusive(|byte| *byte == b'\n') {
+        matches += usize::from(carries(line, &marker, &input)?);
     }
+    once(matches)
+}
+
+/// Whether one whole record, its newline kept or not, is a person's input carrying
+/// `marker`; a blank line is none.
+fn carries(
+    line: &[u8],
+    marker: &str,
+    input: &impl Fn(&Value, &str) -> bool,
+) -> Result<bool, String> {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    if line.is_empty() {
+        return Ok(false);
+    }
+    let record: Value = serde_json::from_slice(line)
+        .map_err(|_| "the transcript has a malformed record".to_owned())?;
+    Ok(input(&record, marker))
+}
+
+/// Found once, not found, or found twice: an error.
+fn once(matches: usize) -> Result<bool, String> {
     match matches {
         0 | 1 => Ok(matches == 1),
         _ => Err("two inputs carry the delivery marker".into()),
