@@ -14,13 +14,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, Metadata};
 use std::io::{BufReader, Read as _, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 use steery_driver_common::lines::{Line, RECORD, capped, consumed, first_whole};
+use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
@@ -50,13 +50,14 @@ const CUSTOM_TITLE: &[u8] = br#"{"type":"custom-title""#;
 
 /// Claude Code's conversations here: its configuration root, the other `projects` folders
 /// its moments named, what each transcript's head says, kept while the file only grows,
-/// and each transcript's tree as far as it was read.
+/// each transcript's tree as far as it was read, and the reads that said nothing.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
     heads: Mutex<HashMap<PathBuf, Kept<Head>>>,
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
     trees: Trees<Records>,
+    quiet: Quiet,
 }
 
 /// What was read of one file, and the file as it was then.
@@ -65,32 +66,14 @@ struct Kept<T> {
     value: T,
 }
 
-/// A file as it stands: its device and inode, its length, and when it last changed, in
-/// nanoseconds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    device: u64,
-    inode: u64,
-    length: u64,
-    modified: i128,
-}
-
-impl Stamp {
-    fn of(meta: &Metadata) -> Self {
-        Self {
-            device: meta.dev(),
-            inode: meta.ino(),
-            length: meta.len(),
-            modified: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
-        }
-    }
-}
-
 /// Every transcript filed as a conversation, by the id it is filed under.
 struct Filed {
     by_id: BTreeMap<String, Vec<PathBuf>>,
     /// Every folder was read whole.
     complete: bool,
+    /// Each `projects` folder and each folder in them, stamped before it was listed: none
+    /// where one could not be.
+    folders: Option<Vec<(PathBuf, Stamp)>>,
 }
 
 /// What one transcript says of its conversation.
@@ -101,6 +84,8 @@ struct Facts {
     headless: bool,
     /// When it last changed, in milliseconds since 1970.
     updated_at: u64,
+    /// The transcript as it stood before its head was read.
+    stamp: Stamp,
 }
 
 impl Store {
@@ -111,6 +96,7 @@ impl Store {
             heads: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
             trees: Trees::default(),
+            quiet: Quiet::default(),
         }
     }
 
@@ -172,16 +158,45 @@ impl Store {
         Ok(self.described(id, &file, &facts))
     }
 
-    /// `sessions/read`: the events of a conversation, or of one of its sub-agents.
+    /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
+    /// same read that said nothing is answered again without finding or reading the
+    /// transcript ([`Quiet`]) while every file the answer stands on stands as it did: the
+    /// transcript read, the conversation's own where a sub-agent's is read (it decides
+    /// whether a person is in the conversation), and every folder transcripts are filed in
+    /// (a second transcript filed under the same id makes the conversation ambiguous). A
+    /// read from the end of a transcript reads no record, so nothing else, neither the
+    /// `subagents` folder nor the time, decides what it says.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
-        let (file, _) = self.find(&read.external_id)?;
+        if let Some(cursor) = read.cursor.as_deref()
+            && let Some(whole) =
+                self.quiet
+                    .again(&read.external_id, read.sub_agent.as_deref(), cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
+        let Filed {
+            mut by_id, folders, ..
+        } = self.filed();
+        let (file, facts) = self.person(
+            &read.external_id,
+            by_id.remove(&read.external_id).unwrap_or_default(),
+        )?;
+        let mut stands = folders;
+        stand(&mut stands, &file, Some(facts.stamp));
         let agents = file.with_extension("").join("subagents");
         let (file, own) = match &read.sub_agent {
             None => (file, false),
             Some(agent) => {
                 let path = agent_file(&agents, agent);
                 // A sub-agent's id becomes one component of a path: one, or nothing.
-                if !agent_id(agent) || !regular(&path) {
+                let stamp = agent_id(agent).then(|| Stamp::at(&path)).flatten();
+                if stamp.is_none() || !regular(&path) {
                     return Err(Error::refused(
                         refusal::NOT_FOUND,
                         format!(
@@ -190,22 +205,42 @@ impl Store {
                         ),
                     ));
                 }
+                stand(&mut stands, &path, stamp);
                 (path, true)
             }
         };
-        read_from(
+        let events = read_from(
             &self.trees,
             &file,
             &Reading { own, agents },
             read.cursor.as_deref(),
             read.tail,
-        )
+        )?;
+        if let (Some(cursor), Some(stands)) = (read.cursor.as_deref(), stands)
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+        {
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                stands,
+                cursor,
+                events.whole,
+            );
+        }
+        Ok(events)
     }
 
     /// The one transcript conversation `id` is: of those filed under it, the one a person
     /// is in.
     fn find(&self, id: &str) -> Result<(PathBuf, Facts), Error> {
-        let files = self.filed().by_id.remove(id).unwrap_or_default();
+        self.person(id, self.filed().by_id.remove(id).unwrap_or_default())
+    }
+
+    /// Of `files`, those filed under conversation `id`, the one a person is in.
+    fn person(&self, id: &str, files: Vec<PathBuf>) -> Result<(PathBuf, Facts), Error> {
         if files.is_empty() {
             return Err(Error::refused(
                 refusal::NOT_FOUND,
@@ -255,7 +290,7 @@ impl Store {
     fn facts(&self, file: &Path) -> Option<Facts> {
         let mut open = File::open(file).ok()?;
         let meta = open.metadata().ok()?;
-        let stamp = Stamp::of(&meta);
+        let stamp = Stamp::of(&meta)?;
         let updated_at = u64::try_from(
             meta.modified()
                 .ok()?
@@ -266,19 +301,19 @@ impl Store {
         .ok()?;
         let mut heads = lock(&self.heads);
         let kept = heads.remove(file).filter(|kept| {
-            (kept.stamp.device, kept.stamp.inode) == (stamp.device, stamp.inode)
-                && kept.value.through <= stamp.length
+            kept.stamp.file() == stamp.file() && kept.value.through <= stamp.length()
         });
         let changed = kept.as_ref().is_none_or(|kept| kept.stamp != stamp);
         let mut head = kept.map(|kept| kept.value).unwrap_or_default();
         if changed {
-            head.read(&mut open, stamp.length).ok()?;
-            head.headless = headless(&mut open, stamp.length, &head).ok()?;
+            head.read(&mut open, stamp.length()).ok()?;
+            head.headless = headless(&mut open, stamp.length(), &head).ok()?;
         }
         let facts = Facts {
             headless: head.headless,
             head: head.clone(),
             updated_at,
+            stamp,
         };
         heads.insert(file.to_owned(), Kept { stamp, value: head });
         Some(facts)
@@ -340,13 +375,20 @@ impl Store {
             .filter_map(Path::parent)
             .filter(|projects| projects.file_name().is_some_and(|name| name == "projects"))
             .filter_map(|projects| projects.canonicalize().ok());
-        lock(&self.named).extend(folders);
+        let mut kept = lock(&self.named);
+        let before = kept.len();
+        kept.extend(folders);
+        // A folder looked in now could file a second transcript under an id read before.
+        if kept.len() > before {
+            self.quiet.forget();
+        }
     }
 
     /// The folders conversations are filed in: each of `<root>/projects/*`, then each of
-    /// those of the `projects` folders Claude Code's moments named, each once. A folder
-    /// that is a link is never read: it could name one anywhere.
-    fn folders(&self) -> (Vec<PathBuf>, bool) {
+    /// those of the `projects` folders Claude Code's moments named, each once, with every
+    /// `projects` folder stamped into `stands` before it is listed. A folder that is a link
+    /// is never read: it could name one anywhere.
+    fn folders(&self, stands: &mut Option<Vec<(PathBuf, Stamp)>>) -> (Vec<PathBuf>, bool) {
         let own = self.root.join("projects");
         let mut seen: BTreeSet<PathBuf> = own.canonicalize().into_iter().collect();
         let named: Vec<PathBuf> = lock(&self.named)
@@ -357,6 +399,7 @@ impl Store {
         let mut complete = true;
         let mut folders = Vec::new();
         for projects in std::iter::once(own).chain(named) {
+            stand(stands, &projects, Stamp::at(&projects));
             match std::fs::read_dir(&projects) {
                 Ok(entries) => {
                     for entry in entries {
@@ -377,9 +420,11 @@ impl Store {
     }
 
     fn filed(&self) -> Filed {
-        let (folders, mut complete) = self.folders();
+        let mut stands = Some(Vec::new());
+        let (folders, mut complete) = self.folders(&mut stands);
         let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for folder in folders {
+            stand(&mut stands, &folder, Stamp::at(&folder));
             let Ok(entries) = std::fs::read_dir(&folder) else {
                 complete = false;
                 continue;
@@ -405,7 +450,11 @@ impl Store {
                 }
             }
         }
-        Filed { by_id, complete }
+        Filed {
+            by_id,
+            complete,
+            folders: stands,
+        }
     }
 }
 
@@ -416,6 +465,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Whether `path` is a regular file, not a link to one.
 fn regular(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
+/// `file` as `stamp` says it stood, kept in `stands`; where it could not be stamped,
+/// `stands` is none: what a read stood on is not all known.
+fn stand(stands: &mut Option<Vec<(PathBuf, Stamp)>>, file: &Path, stamp: Option<Stamp>) {
+    match (stands.as_mut(), stamp) {
+        (Some(stood), Some(stamp)) => stood.push((file.to_owned(), stamp)),
+        _ => *stands = None,
+    }
 }
 
 /// What the head of a conversation's transcript says, and how far it has been read.
@@ -574,11 +632,11 @@ struct Agent {
 impl Agent {
     /// What `file` and its `meta` say, read again only once either changed.
     fn kept(kept: &mut HashMap<PathBuf, Kept<Agent>>, file: &Path, meta: &Path) -> Option<Agent> {
-        let stamp = Stamp::of(&std::fs::metadata(file).ok()?);
+        let stamp = Stamp::of(&std::fs::metadata(file).ok()?)?;
         let beside = std::fs::symlink_metadata(meta)
             .ok()
             .filter(Metadata::is_file)
-            .map(|meta| Stamp::of(&meta));
+            .and_then(|meta| Stamp::of(&meta));
         if let Some(read) = kept
             .get(file)
             .filter(|read| read.stamp == stamp && read.value.meta == beside)
