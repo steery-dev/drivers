@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
     Act, Beyond, Door, Ended, Event, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look,
-    Looked, Marked, Model, Models, Pick, Picked, Read, ReadAs, Reader, ReaderPlan, ReaderRead,
+    Looked, Marked, Model, Models, Pick, Picked, ReadAs, Reader, ReaderPlan, ReaderRead,
     ReaderTools, Receipt, ReceiptFind, ReceiptMark, Said, Sample, Sampled, Say, SayMode, Start,
     Stdin, Stop, Stopped, Stream, Terminal, TerminalCommand, Text, TurnLine, TurnRead, TurnState,
 };
@@ -207,16 +207,18 @@ impl Drive {
                 });
             }
         }
-        let Ok(read) = self.store.read(Read {
-            external_id: thread.clone(),
-            sub_agent: None,
-            cursor: None,
-            tail: Some(LATEST),
-        }) else {
+        // What the rollout says is kept while it stands; when it was looked at is now.
+        let Ok(said) = self
+            .store
+            .latest(thread, LATEST, |events| stands(events, now))
+        else {
             return Ok(Sampled { sample: None });
         };
         Ok(Sampled {
-            sample: stands(&read.events, now),
+            sample: said.map(|sample| Sample {
+                observed_at: now,
+                ..sample
+            }),
         })
     }
 
