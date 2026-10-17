@@ -1,9 +1,13 @@
-//! Reads that said nothing new. The runtime reads every conversation on from its cursor
-//! on every sweep, and most of them nobody wrote to since: the same read of a transcript
-//! that still stands as it did says nothing again, so it is answered without walking it.
+//! Reads that said nothing new. The runtime reads every conversation and sub-agent on from
+//! its cursor on every sweep, and most of them nobody wrote to since: the same read of a
+//! transcript that still stands as it did says nothing again, so it is answered with one
+//! look at the file, neither finding it among every folder nor walking it.
 //! Measured 2026-10-17 on a Mac with 411 omp conversations holding 600,000 records, past
 //! the trees' bound (`steery_driver_common::tree`): every sweep walked each again from its
-//! start, and a sweep's 938 reads took 5.5 s; answered unwalked, 1.5 s.
+//! start, and a sweep's 938 reads took 5.5 s; answered unwalked, 1.8 s.
+//!
+//! The transcript a read found stands for its conversation while it stands as it did: a
+//! second transcript filed under the same id later is seen once the first one changes.
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt as _;
@@ -36,35 +40,46 @@ impl Stamp {
     }
 }
 
-/// By transcript: the read that said nothing — the cursor it went on from and handed
-/// back, and whether it read the conversation whole — and the file as it stood before it.
+/// By conversation and sub-agent: the read that said nothing — the transcript it read and
+/// how it stood before, the cursor it went on from and handed back, and whether it read
+/// the conversation whole.
 #[derive(Default)]
 pub struct Quiet {
-    kept: Mutex<HashMap<PathBuf, Said>>,
+    kept: Mutex<HashMap<(String, Option<String>), Said>>,
 }
 
 struct Said {
+    file: PathBuf,
     stamp: Stamp,
     cursor: String,
     whole: bool,
 }
 
 impl Quiet {
-    /// Whether the read of `file` on from `cursor` said nothing when it was last made and
-    /// the file, `stamp` now, stands as it did then: that read's `whole`.
-    pub fn again(&self, file: &Path, stamp: Stamp, cursor: &str) -> Option<bool> {
-        self.lock()
-            .get(file)
-            .filter(|said| said.stamp == stamp && said.cursor == cursor)
-            .map(|said| said.whole)
+    /// Whether the read of `external_id` (`sub_agent`'s) on from `cursor` said nothing when
+    /// it was last made, and its transcript stands as it did then: that read's `whole`.
+    pub fn again(&self, external_id: &str, sub_agent: Option<&str>, cursor: &str) -> Option<bool> {
+        let kept = self.lock();
+        let said = kept.get(&(external_id.to_owned(), sub_agent.map(str::to_owned)))?;
+        (said.cursor == cursor && Stamp::at(&said.file) == Some(said.stamp)).then_some(said.whole)
     }
 
-    /// The read of `file` on from `cursor` said nothing and handed `cursor` back: answered
-    /// again so while the file stands as `stamp`, taken before the read.
-    pub fn said_nothing(&self, file: &Path, stamp: Stamp, cursor: &str, whole: bool) {
+    /// The read of `external_id` (`sub_agent`'s) on from `cursor` said nothing and handed
+    /// `cursor` back: answered again so while `file` stands as `stamp`, taken before the
+    /// read.
+    pub fn said_nothing(
+        &self,
+        external_id: &str,
+        sub_agent: Option<&str>,
+        file: &Path,
+        stamp: Stamp,
+        cursor: &str,
+        whole: bool,
+    ) {
         self.lock().insert(
-            file.to_owned(),
+            (external_id.to_owned(), sub_agent.map(str::to_owned)),
             Said {
+                file: file.to_owned(),
                 stamp,
                 cursor: cursor.to_owned(),
                 whole,
@@ -72,7 +87,7 @@ impl Quiet {
         );
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<PathBuf, Said>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<(String, Option<String>), Said>> {
         self.kept.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }

@@ -131,9 +131,22 @@ impl Store {
     }
 
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
-    /// same read of a transcript that said nothing and still stands as it did is answered
-    /// again unread ([`Quiet`]).
+    /// same read that said nothing, of a transcript that still stands as it did, is
+    /// answered again without finding or reading the transcript ([`Quiet`]).
     pub fn read(&self, read: Read) -> Result<Events, Error> {
+        if let Some(cursor) = read.cursor.as_deref()
+            && let Some(whole) =
+                self.quiet
+                    .again(&read.external_id, read.sub_agent.as_deref(), cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
         let lead = self.find(&read.external_id)?;
         let file = match &read.sub_agent {
             None => lead.clone(),
@@ -158,17 +171,6 @@ impl Store {
             }
         };
         let stamp = Stamp::at(&file);
-        if let (Some(cursor), Some(stamp)) = (read.cursor.as_deref(), stamp)
-            && let Some(whole) = self.quiet.again(&file, stamp, cursor)
-        {
-            return Ok(Events {
-                cursor: cursor.to_owned(),
-                events: Vec::new(),
-                more: false,
-                reset: false,
-                whole,
-            });
-        }
         let head = head(&lead);
         let fork = match read.sub_agent {
             None => parent(&read.external_id, &head).zip(head.created_at),
@@ -198,8 +200,14 @@ impl Store {
             && !events.more
             && !events.reset
         {
-            self.quiet
-                .said_nothing(&reading.file, stamp, cursor, events.whole);
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                &reading.file,
+                stamp,
+                cursor,
+                events.whole,
+            );
         }
         Ok(events)
     }
