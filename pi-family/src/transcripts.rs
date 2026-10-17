@@ -187,11 +187,20 @@ impl Store {
     }
 
     /// Every transcript filed under `id`: one, where the harness's store is as it keeps it.
+    /// Looked up in each folder's listing as it stands, never by indexing every file: the
+    /// runtime asks this of every conversation on every sweep.
     pub fn transcripts(&self, id: &str) -> Vec<PathBuf> {
         if id.is_empty() || id.chars().any(char::is_control) {
             return Vec::new();
         }
-        self.filed().by_id.remove(id).unwrap_or_default()
+        let (folders, _) = self.folders();
+        let mut found = Vec::new();
+        for folder in folders {
+            if let Some((files, _)) = self.listings.files(&folder) {
+                found.extend(files.iter().filter(|path| id_of(path) == Some(id)).cloned());
+            }
+        }
+        found
     }
 
     /// Keep the folders of transcripts the harness's moments named.
@@ -230,9 +239,18 @@ impl Store {
             Err(_) => complete = false,
         }
         let own = sessions.canonicalize().ok();
-        // Resolved only once a folder outside the harness's own is to be told apart from
-        // them: a `realpath` of each of its folders cost every read 1 ms on a Mac with 104.
-        let mut seen: Option<BTreeSet<PathBuf>> = None;
+        // Each of the harness's own folders is a directory (never a link) right in
+        // `sessions`, so it resolves to `own/<name>`: a folder named elsewhere whose parent
+        // is not `own` is none of them, with no `realpath` of theirs. Resolving each of 107
+        // on every call made `held` 20 times slower (0.8 to 16.7 ms) once one folder outside
+        // was named, and a sweep's calls kept the driver busy (2026-10-17).
+        let mut seen: BTreeSet<PathBuf> = match &own {
+            Some(_) => BTreeSet::new(),
+            None => folders
+                .iter()
+                .filter_map(|folder| folder.canonicalize().ok())
+                .collect(),
+        };
         let chosen = self
             .chosen
             .clone()
@@ -243,16 +261,7 @@ impl Store {
         let named = self.named.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for folder in chosen.chain(named) {
             let filed_by_harness = own.is_some() && folder.parent() == own.as_deref();
-            if filed_by_harness || companion(&folder).is_file() {
-                continue;
-            }
-            let seen = seen.get_or_insert_with(|| {
-                folders
-                    .iter()
-                    .filter_map(|folder| folder.canonicalize().ok())
-                    .collect()
-            });
-            if !seen.insert(folder.clone()) {
+            if filed_by_harness || companion(&folder).is_file() || !seen.insert(folder.clone()) {
                 continue;
             }
             folders.push(folder);
@@ -1454,7 +1463,9 @@ pub(crate) mod tests {
             found.sessions[0].title.as_deref(),
             Some("where pi keeps it")
         );
-        assert_eq!(pi.find("p1").unwrap(), file);
+        // Found where the folder resolves: on a Mac the temporary folder is behind `/var`,
+        // a link to `/private/var`.
+        assert_eq!(pi.find("p1").unwrap(), file.canonicalize().unwrap());
 
         std::fs::remove_file(&file).unwrap();
         let own = transcript(".pi/agent/sessions/--tmp-pi--", "p1");
