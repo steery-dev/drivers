@@ -197,7 +197,8 @@ What each driver does:
   - `turn/read`: the harness's own refusals on standard error; its standard output is
     discarded, and its door says what it does.
   - `receipt/mark`, `receipt/find`: the person's message carrying the delivery marker, in
-    the transcript past a mark; words the door hands over mid-turn go in at the next tool.
+    the transcript past a mark, or in all of it where the harness rewrote the file since
+    (some omp compactions do); words the door hands over mid-turn go in at the next tool.
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
