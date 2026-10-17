@@ -8,6 +8,9 @@ use crate::lines::bytes;
 
 /// How much of what was read last is read again to know the file was only appended to.
 const SEAL: u64 = 64;
+/// How much is read at once: a file read from its start may be hundreds of megabytes, and
+/// small reads made each one a system call per 8 KiB.
+const CHUNK: usize = 1 << 20;
 
 /// How far one file has been read: which file it was, how long, and the last bytes read.
 #[derive(Default)]
@@ -67,7 +70,7 @@ impl Followed {
         }
         self.len = len;
         open.seek(SeekFrom::Start(self.through))?;
-        let mut lines = BufReader::new(open.take(len - self.through));
+        let mut lines = BufReader::with_capacity(CHUNK, open.take(len - self.through));
         let mut read = Vec::new();
         loop {
             read.clear();
