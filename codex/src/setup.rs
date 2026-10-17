@@ -63,9 +63,8 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
     let hooks_file = root.join("hooks.json");
     let config = root.join("config.toml");
     let mut entries = vec![
-        // Codex ends a tool call at 300 seconds unless the server's entry says otherwise,
-        // and a wait for a person is longer. A Codex table is a URL and has nowhere to put
-        // a transport.
+        // Codex ends a tool call at 300 seconds unless the server's entry says otherwise.
+        // A Codex table is a URL and has nowhere to put a transport.
         Entry {
             path: config.clone(),
             format: Format::Toml,

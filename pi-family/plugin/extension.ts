@@ -11,9 +11,9 @@
 // copy says what the conversation is doing as it changes (`state`, a LiveState) and the
 // harness's moments as they happen (`moment`, the hook document the driver's `hook/read`
 // reads); at each turn the person starts the runtime answers the one paragraph Steery has
-// for its agent (`say`), and at a turn's end (`settle`) the words that keep it going. Over
-// the same door the runtime asks the copy to hand words to the conversation (`say`),
-// switch its model (`pick`), stop a turn (`stop`) and recap it (`recap`). In both
+// for its agent (`say`), and at a turn's end (`settle`) the words that keep it going. In a
+// conversation Steery started, the runtime asks the copy over the same door to hand words
+// to it (`say`), switch its model (`pick`), stop a turn (`stop`) and recap it (`recap`). In both
 // harnesses the copy draws the conversation's open requests where its person is
 // (`cards`), and `/steery` hands an answer to this machine's signer through the runtime's
 // `/answer` door. pi's copy also carries Steery's MCP entry, registering it for each
