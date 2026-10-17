@@ -226,6 +226,7 @@ name = "steery-driver-pi-family"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "memchr",
  "serde",
  "serde_json",
  "sha2",

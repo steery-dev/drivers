@@ -17,6 +17,7 @@ path = "src/bin/pi.rs"
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.6.0" }
 steery-driver-common = { path = "../common" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+memchr = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

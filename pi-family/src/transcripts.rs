@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use memchr::memmem;
 use serde_json::Value;
 use steery_driver_common::follow::Followed;
 use steery_driver_common::lines::{Line, RECORD, capped};
@@ -100,13 +101,7 @@ impl Store {
                 complete = false;
                 continue;
             };
-            let Some(session) = self.session(&id, file) else {
-                continue;
-            };
-            if list
-                .seen_since
-                .is_none_or(|since| session.updated_at >= since)
-            {
+            if let Some(session) = self.session(&id, file, list.seen_since) {
                 sessions.push(session);
             }
         }
@@ -121,12 +116,14 @@ impl Store {
     /// `sessions/locate`.
     pub fn locate(&self, locate: Locate) -> Result<Located, Error> {
         let file = self.find(&locate.external_id)?;
-        let session = self.session(&locate.external_id, &file).ok_or_else(|| {
-            Error::refused(
-                refusal::REFUSED,
-                format!("{} cannot be read", file.display()),
-            )
-        })?;
+        let session = self
+            .session(&locate.external_id, &file, None)
+            .ok_or_else(|| {
+                Error::refused(
+                    refusal::REFUSED,
+                    format!("{} cannot be read", file.display()),
+                )
+            })?;
         Ok(Located { session })
     }
 
@@ -348,9 +345,10 @@ impl Store {
         })
     }
 
-    /// A conversation as `sessions/list` says it.
-    fn session(&self, id: &str, file: &Path) -> Option<Session> {
-        let updated_at = modified(file)?;
+    /// A conversation as `sessions/list` says it, where it changed at or after `since`:
+    /// one that did not is never read.
+    fn session(&self, id: &str, file: &Path, since: Option<u64>) -> Option<Session> {
+        let updated_at = modified(file).filter(|at| since.is_none_or(|since| *at >= since))?;
         let head = head(file);
         let parent = parent(id, &head);
         let title = match self.harness {
@@ -731,7 +729,7 @@ impl Started {
         let mut messages = Vec::new();
         self.followed.read_on(&open, |line, _, _| {
             if line.len() <= RECORD
-                && line.windows(6).any(|bytes| bytes == b"\"task\"")
+                && memmem::find(line, b"\"task\"").is_some()
                 && let Ok(mut record) = serde_json::from_slice::<Value>(line)
                 && text(&record, "type") == Some("message")
                 && let Some(message) = record.get_mut("message")
