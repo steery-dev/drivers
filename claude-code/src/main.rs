@@ -34,7 +34,10 @@ fn main() -> std::process::ExitCode {
     if args.next().as_deref() == Some(turn::MODE) {
         return turn::run(args);
     }
-    let served = tokio::runtime::Builder::new_current_thread()
+    // Many threads: most calls read files without yielding, and on one thread a slow one
+    // stops standard input being read; the runtime then kills the driver with every call in
+    // flight.
+    let served = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .and_then(|runtime| runtime.block_on(steery_sdk::serve(|_notifier| ClaudeCode::default())));

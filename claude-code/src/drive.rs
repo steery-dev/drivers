@@ -70,8 +70,8 @@ pub fn held(root: &Path, store: &Store, held: Held) -> HeldBy {
         None => HeldBy::Look(Looked {
             look: Look {
                 transcripts: store
-                    .session(&held.external_id)
-                    .map(|session| session.transcripts)
+                    .transcript(&held.external_id)
+                    .map(|file| vec![file])
                     .unwrap_or_default(),
                 strays: false,
                 beyond: vec![Beyond {

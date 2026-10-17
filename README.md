@@ -49,7 +49,7 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.0.0" }`, and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.6.0" }`, and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
@@ -120,7 +120,9 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
   `pick`, `stop` and `recap` in its driver, as `claude-code` and `codex` do. omp and pi have
   none, so their door is `plugin`: Steery's plugin, which this repository keeps in
   `pi-family/plugin/` and `setup/plan` installs, speaks the plugin door, version 1 (§4.4),
-  to the runtime itself, and the driver has no live methods.
+  to the runtime itself, and the driver has no live methods. The runtime uses the live
+  methods only on conversations Steery started; a conversation a person started is never
+  steered.
 
 ## Adding a driver
 
@@ -153,7 +155,7 @@ driver reads nothing it needs from its environment.
 ## omp and pi: `pi-family/`
 
 omp is a fork of pi. Both write the same transcript, load the same plugin, read the same
-`PI_*` variables for their folders and speak the same JSON lines in a print run, so one
+`PI_*` variables for their folders and run kept in their RPC mode, so one
 crate holds both drivers: a library, and two binaries, `steery-driver-omp` and
 `steery-driver-pi`, each one line that serves the library for its harness. Neither driver
 has settings.
@@ -186,18 +188,22 @@ What each driver does:
     stray process, since a pi without the plugin holds no file open.
   - `models`: omp's comes from `omp models --json`, with its default from `config.yml`.
     pi's comes from `pi --list-models` and its RPC mode's `get_available_models`.
-  - `start`: a turn is `-p --mode json`. omp continues by id (`--resume`) and checks a
-    model against its catalog first. pi continues by transcript (`--session <file>`) and
-    passes a model to the plugin as well (`--steery-model`), which refuses one pi does not
-    run exactly.
-  - `turn/read`: reads the run's JSON lines and the harness's own refusals.
+  - `start`: a turn is a kept process, `--mode rpc` (omp's with `--no-ui`) with its
+    standard input held: it stays up between turns and takes every turn's words, the first
+    included, through the plugin door. omp continues by id (`--resume`) and checks a model
+    against its catalog first. pi continues by transcript (`--session <file>`) and passes a
+    model to the plugin as well (`--steery-model`), which ends the process with a refusal
+    where pi does not run it exactly.
+  - `turn/read`: the harness's own refusals on standard error; its standard output is
+    discarded, and its door says what it does.
   - `receipt/mark`, `receipt/find`: the person's message carrying the delivery marker, in
     the transcript past a mark; words the door hands over mid-turn go in at the next tool.
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
 The live methods (`say`, `pick`, `stop`, `recap`) are the plugin door's (PROTOCOL.md
-§4.4), which the runtime speaks itself, so the drivers have none.
+§4.4), which the runtime speaks itself, so the drivers have none. The runtime uses them
+only on conversations Steery started.
 
 ### Layout: a template for a harness Steery does not ship
 
@@ -275,8 +281,8 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
     kept.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session
     holds it, and the Claude app's link for a conversation it started.
-- **Live** (`say`). Words go into the inbox socket the registered session opens, after its
-  peer token; the socket says nothing back, so they are unconfirmed and the runtime finds
+- **Live** (`say`), for a conversation Steery started that a Claude Code session holds.
+  Words go into the inbox socket the registered session opens, after its peer token; the socket says nothing back, so they are unconfirmed and the runtime finds
   them with `receipt/find`. The session keeps its own model, so `pick` is unsupported, and
   there is no `recap`.
 
@@ -341,7 +347,7 @@ app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`
     and feature it can do without taken away, and a read-only sandbox; `reader/read` takes
     its last agent message.
   - `terminal`: `codex resume <thread>`, and the app's `codex://threads/<thread>`.
-- **Live** (`say`, `pick`, and `session/changed`). Words go to the window that owns the
+- **Live** (`say`, `pick`, and `session/changed`), for a conversation Steery started. Words go to the window that owns the
   thread, as typed in its composer, else into the running app server's queue, whose
   acknowledgement is not delivery (`took: false`). A pick is checked against the owner's
   own model list and set as the thread's settings. The windows' own state of each thread

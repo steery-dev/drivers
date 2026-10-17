@@ -17,9 +17,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use memchr::memmem;
 use serde_json::Value;
 use steery_driver_common::follow::Followed;
 use steery_driver_common::lines::{Line, RECORD, capped};
+use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
@@ -40,8 +42,8 @@ const TASK: usize = 100;
 
 /// The harness's conversations here: its agent folder, the folder its environment told it
 /// to keep them in, and the folders outside it its moments named, remembered for as long
-/// as this driver runs; and the trees, titles and sub-agents' starts of the transcripts
-/// read.
+/// as this driver runs; every transcript the last `sessions/list` filed, by its id; and
+/// the trees, titles and sub-agents' starts of the transcripts read.
 pub struct Store {
     harness: Harness,
     home: PathBuf,
@@ -49,7 +51,9 @@ pub struct Store {
     /// `PI_CODING_AGENT_SESSION_DIR`, where this driver was started with it.
     chosen: Option<PathBuf>,
     named: Mutex<BTreeSet<PathBuf>>,
+    filing: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     trees: Trees<Entries>,
+    quiet: Quiet,
     titles: Titles,
     starts: Starts,
     listings: Listings,
@@ -70,7 +74,9 @@ impl Store {
             root,
             chosen,
             named: Mutex::new(BTreeSet::new()),
+            filing: Mutex::new(BTreeMap::new()),
             trees: Trees::default(),
+            quiet: Quiet::default(),
             titles: Titles::default(),
             starts: Starts::default(),
             listings: Listings::default(),
@@ -91,22 +97,30 @@ impl Store {
         let filed = self.filed();
         let mut complete = filed.complete;
         let mut sessions = Vec::new();
-        for (id, files) in filed.by_id {
+        // A read that said nothing is answered again only while its conversation is still
+        // filed once, at the transcript it was read from.
+        self.quiet.keep(|id, _, at| {
+            filed
+                .by_id
+                .get(id)
+                .is_some_and(|files| files.as_slice() == at)
+        });
+        for (id, files) in &filed.by_id {
             // Two transcripts answering to one id name it ambiguously: neither is read.
             let [file] = files.as_slice() else {
                 complete = false;
                 continue;
             };
-            let Some(session) = self.session(&id, file) else {
-                continue;
-            };
-            if list
-                .seen_since
-                .is_none_or(|since| session.updated_at >= since)
-            {
+            if let Some(session) = self.session(id, file, list.seen_since) {
                 sessions.push(session);
             }
         }
+        // A filing that missed a folder stands for nothing: each lookup reads them all.
+        *self.filing.lock().unwrap_or_else(|e| e.into_inner()) = if filed.complete {
+            filed.by_id
+        } else {
+            BTreeMap::new()
+        };
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
             sessions,
@@ -118,27 +132,46 @@ impl Store {
     /// `sessions/locate`.
     pub fn locate(&self, locate: Locate) -> Result<Located, Error> {
         let file = self.find(&locate.external_id)?;
-        let session = self.session(&locate.external_id, &file).ok_or_else(|| {
-            Error::refused(
-                refusal::REFUSED,
-                format!("{} cannot be read", file.display()),
-            )
-        })?;
+        let session = self
+            .session(&locate.external_id, &file, None)
+            .ok_or_else(|| {
+                Error::refused(
+                    refusal::REFUSED,
+                    format!("{} cannot be read", file.display()),
+                )
+            })?;
         Ok(Located { session })
     }
 
-    /// `sessions/read`: the events of a conversation, or of one of its sub-agents.
+    /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
+    /// same read that said nothing, of a transcript that still stands as it did, is
+    /// answered again without finding or reading the transcript ([`Quiet`]). Measured
+    /// 2026-10-17 on a Mac with 411 omp conversations holding 600,000 records, past the
+    /// trees' bound: a sweep's 938 reads took 5.5 s walked, 0.37 s answered so.
+    ///
+    /// Only the transcript read is stamped; a second transcript filed under the same id is
+    /// seen at the next `sessions/list`, which lets go of a read no longer filed once
+    /// ([`Quiet::keep`]).
     pub fn read(&self, read: Read) -> Result<Events, Error> {
-        let file = self.find(&read.external_id)?;
-        let head = head(&file);
-        let (file, fork) = match &read.sub_agent {
-            None => {
-                let fork = parent(&read.external_id, &head).zip(head.created_at);
-                (file, fork)
-            }
+        if let Some(cursor) = read.cursor.as_deref()
+            && let Some(whole) =
+                self.quiet
+                    .again(&read.external_id, read.sub_agent.as_deref(), cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
+        let lead = self.find(&read.external_id)?;
+        let file = match &read.sub_agent {
+            None => lead.clone(),
             Some(agent) => {
                 let found = self
-                    .sub_agents(&file)
+                    .sub_agents(&lead)
                     .into_iter()
                     .find(|found| {
                         found.external_id == *agent || found.name.as_deref() == Some(agent)
@@ -153,8 +186,14 @@ impl Store {
                             ),
                         )
                     })?;
-                (found.transcripts.into_iter().next().unwrap_or(file), None)
+                found.transcripts.into_iter().next().unwrap_or(lead.clone())
             }
+        };
+        let stamp = Stamp::at(&file);
+        let head = head(&lead);
+        let fork = match read.sub_agent {
+            None => parent(&read.external_id, &head).zip(head.created_at),
+            Some(_) => None,
         };
         let reading = Reading {
             harness: self.harness,
@@ -164,7 +203,32 @@ impl Store {
             fork,
             file,
         };
-        read_from(&self.trees, &reading, read.cursor.as_deref(), read.tail)
+        let events = read_from(
+            &self.trees,
+            &reading,
+            stamp,
+            read.cursor.as_deref(),
+            read.tail,
+        )?;
+        // Only a transcript still for `SETTLE` says the same again: before that, a failure
+        // held back is decided by time alone.
+        if let (Some(cursor), Some(stamp)) = (read.cursor.as_deref(), stamp)
+            && still(stamp)
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+        {
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                vec![(reading.file.clone(), stamp)],
+                vec![lead],
+                cursor,
+                events.whole,
+            );
+        }
+        Ok(events)
     }
 
     /// The one transcript of conversation `id`.
@@ -187,11 +251,38 @@ impl Store {
     }
 
     /// Every transcript filed under `id`: one, where the harness's store is as it keeps it.
+    /// As the last `sessions/list` filed it while each of those files is still there: the
+    /// runtime lists before it asks anything of each conversation in a sweep, so a second
+    /// transcript under the same id is seen at the next list. Otherwise looked up in each
+    /// folder's listing as it stands, never by indexing every file. Measured 2026-10-17 on
+    /// a Mac with 413 omp conversations in 107 folders: `held` 1.5–2 ms a call looking in
+    /// every folder, almost all of a sweep's 2 s of `held` and `idle`.
     pub fn transcripts(&self, id: &str) -> Vec<PathBuf> {
         if id.is_empty() || id.chars().any(char::is_control) {
             return Vec::new();
         }
-        self.filed().by_id.remove(id).unwrap_or_default()
+        if let Some(files) = self
+            .filing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            // A link is never read, as no folder's listing takes one.
+            .filter(|files| {
+                files
+                    .iter()
+                    .all(|file| std::fs::symlink_metadata(file).is_ok_and(|meta| meta.is_file()))
+            })
+        {
+            return files.clone();
+        }
+        let (folders, _) = self.folders();
+        let mut found = Vec::new();
+        for folder in folders {
+            if let Some((files, _)) = self.listings.files(&folder) {
+                found.extend(files.iter().filter(|path| id_of(path) == Some(id)).cloned());
+            }
+        }
+        found
     }
 
     /// Keep the folders of transcripts the harness's moments named.
@@ -230,9 +321,18 @@ impl Store {
             Err(_) => complete = false,
         }
         let own = sessions.canonicalize().ok();
-        // Resolved only once a folder outside the harness's own is to be told apart from
-        // them: a `realpath` of each of its folders cost every read 1 ms on a Mac with 104.
-        let mut seen: Option<BTreeSet<PathBuf>> = None;
+        // Each of the harness's own folders is a directory (never a link) right in
+        // `sessions`, so it resolves to `own/<name>`: a folder named elsewhere whose parent
+        // is not `own` is none of them, with no `realpath` of theirs. Resolving each of 107
+        // on every call made `held` 20 times slower (0.8 to 16.7 ms) once one folder outside
+        // was named, and a sweep's calls kept the driver busy (2026-10-17).
+        let mut seen: BTreeSet<PathBuf> = match &own {
+            Some(_) => BTreeSet::new(),
+            None => folders
+                .iter()
+                .filter_map(|folder| folder.canonicalize().ok())
+                .collect(),
+        };
         let chosen = self
             .chosen
             .clone()
@@ -243,16 +343,7 @@ impl Store {
         let named = self.named.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for folder in chosen.chain(named) {
             let filed_by_harness = own.is_some() && folder.parent() == own.as_deref();
-            if filed_by_harness || companion(&folder).is_file() {
-                continue;
-            }
-            let seen = seen.get_or_insert_with(|| {
-                folders
-                    .iter()
-                    .filter_map(|folder| folder.canonicalize().ok())
-                    .collect()
-            });
-            if !seen.insert(folder.clone()) {
+            if filed_by_harness || companion(&folder).is_file() || !seen.insert(folder.clone()) {
                 continue;
             }
             folders.push(folder);
@@ -294,9 +385,10 @@ impl Store {
         })
     }
 
-    /// A conversation as `sessions/list` says it.
-    fn session(&self, id: &str, file: &Path) -> Option<Session> {
-        let updated_at = modified(file)?;
+    /// A conversation as `sessions/list` says it, where it changed at or after `since`:
+    /// one that did not is never read.
+    fn session(&self, id: &str, file: &Path, since: Option<u64>) -> Option<Session> {
+        let updated_at = modified(file).filter(|at| since.is_none_or(|since| *at >= since))?;
         let head = head(file);
         let parent = parent(id, &head);
         let title = match self.harness {
@@ -677,7 +769,7 @@ impl Started {
         let mut messages = Vec::new();
         self.followed.read_on(&open, |line, _, _| {
             if line.len() <= RECORD
-                && line.windows(6).any(|bytes| bytes == b"\"task\"")
+                && memmem::find(line, b"\"task\"").is_some()
                 && let Ok(mut record) = serde_json::from_slice::<Value>(line)
                 && text(&record, "type") == Some("message")
                 && let Some(message) = record.get_mut("message")
@@ -854,15 +946,12 @@ fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
 fn read_from(
     trees: &Trees<Entries>,
     reading: &Reading,
+    stamp: Option<Stamp>,
     cursor: Option<&str>,
     tail: Option<u64>,
 ) -> Result<Events, Error> {
     let given = cursor.map(parse_cursor).transpose()?;
-    let still = std::fs::metadata(&reading.file)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|at| SystemTime::now().duration_since(at).ok())
-        .is_some_and(|still| still >= events::SETTLE);
+    let still = stamp.is_some_and(still);
     trees
         .walk(&reading.file, Entries::default(), |walk| {
             let path = walk.tree.path()?;
@@ -913,6 +1002,13 @@ fn read_from(
             })
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))
+}
+
+/// Whether the transcript stamped `stamp` stood still for [`events::SETTLE`].
+fn still(stamp: Stamp) -> bool {
+    SystemTime::now()
+        .duration_since(stamp.modified())
+        .is_ok_and(|still| still >= events::SETTLE)
 }
 
 #[cfg(test)]
@@ -1454,7 +1550,9 @@ pub(crate) mod tests {
             found.sessions[0].title.as_deref(),
             Some("where pi keeps it")
         );
-        assert_eq!(pi.find("p1").unwrap(), file);
+        // Found where the folder resolves: on a Mac the temporary folder is behind `/var`,
+        // a link to `/private/var`.
+        assert_eq!(pi.find("p1").unwrap(), file.canonicalize().unwrap());
 
         std::fs::remove_file(&file).unwrap();
         let own = transcript(".pi/agent/sessions/--tmp-pi--", "p1");

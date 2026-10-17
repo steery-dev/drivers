@@ -14,13 +14,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, Metadata};
 use std::io::{BufReader, Read as _, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 use steery_driver_common::lines::{Line, RECORD, capped, consumed, first_whole};
+use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
@@ -49,14 +49,20 @@ const HEADLESS: &str = "sdk-cli";
 const CUSTOM_TITLE: &[u8] = br#"{"type":"custom-title""#;
 
 /// Claude Code's conversations here: its configuration root, the other `projects` folders
-/// its moments named, what each transcript's head says, kept while the file only grows,
-/// and each transcript's tree as far as it was read.
+/// its moments named, each folder's listing, kept while the folder stands as it did, what
+/// each transcript's head says, kept while the file only grows, each transcript's tree as
+/// far as it was read, and the reads that said nothing.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
+    listings: Mutex<HashMap<PathBuf, Kept<Arc<[PathBuf]>>>>,
+    /// Every transcript the last `sessions/list` filed, by its id: none where it missed a
+    /// folder.
+    filing: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     heads: Mutex<HashMap<PathBuf, Kept<Head>>>,
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
     trees: Trees<Records>,
+    quiet: Quiet,
 }
 
 /// What was read of one file, and the file as it was then.
@@ -65,32 +71,13 @@ struct Kept<T> {
     value: T,
 }
 
-/// A file as it stands: its device and inode, its length, and when it last changed, in
-/// nanoseconds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    device: u64,
-    inode: u64,
-    length: u64,
-    modified: i128,
-}
-
-impl Stamp {
-    fn of(meta: &Metadata) -> Self {
-        Self {
-            device: meta.dev(),
-            inode: meta.ino(),
-            length: meta.len(),
-            modified: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
-        }
-    }
-}
-
 /// Every transcript filed as a conversation, by the id it is filed under.
 struct Filed {
     by_id: BTreeMap<String, Vec<PathBuf>>,
     /// Every folder was read whole.
     complete: bool,
+    /// Each `projects` folder and each folder in them.
+    listed: Vec<PathBuf>,
 }
 
 /// What one transcript says of its conversation.
@@ -101,6 +88,8 @@ struct Facts {
     headless: bool,
     /// When it last changed, in milliseconds since 1970.
     updated_at: u64,
+    /// The transcript as it stood before its head was read.
+    stamp: Stamp,
 }
 
 impl Store {
@@ -108,9 +97,12 @@ impl Store {
         Self {
             root,
             named: Mutex::new(BTreeSet::new()),
+            listings: Mutex::new(HashMap::new()),
+            filing: Mutex::new(BTreeMap::new()),
             heads: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
             trees: Trees::default(),
+            quiet: Quiet::default(),
         }
     }
 
@@ -121,11 +113,24 @@ impl Store {
     /// `sessions/list`: every conversation updated since `seen_since`.
     pub fn list(&self, list: List) -> Listed {
         self.remember(&list.transcripts);
-        let filed = self.filed();
+        let filed = self.filed(None);
         let mut complete = filed.complete;
         let mut sessions = Vec::new();
         let mut excluded = Vec::new();
         let walked: HashSet<PathBuf> = filed.by_id.values().flatten().cloned().collect();
+        // A read that said nothing is answered again only while its conversation is still
+        // filed once, at the transcript it was read from.
+        self.quiet.keep(|id, _, at| {
+            filed
+                .by_id
+                .get(id)
+                .is_some_and(|files| files.as_slice() == at)
+        });
+        *lock(&self.filing) = if filed.complete {
+            filed.by_id.clone()
+        } else {
+            BTreeMap::new()
+        };
         for (id, files) in filed.by_id {
             let mut read = Vec::new();
             for file in files {
@@ -150,6 +155,8 @@ impl Store {
             }
         }
         lock(&self.heads).retain(|file, _| walked.contains(file));
+        let listed: HashSet<&PathBuf> = filed.listed.iter().collect();
+        lock(&self.listings).retain(|folder, _| listed.contains(folder));
         lock(&self.agents).retain(|file, _| regular(file));
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
@@ -172,16 +179,42 @@ impl Store {
         Ok(self.described(id, &file, &facts))
     }
 
-    /// `sessions/read`: the events of a conversation, or of one of its sub-agents.
+    /// The transcript conversation `id` is.
+    pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
+        self.find(id).map(|(file, _)| file)
+    }
+
+    /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
+    /// same read that said nothing is answered again without finding or reading the
+    /// transcript ([`Quiet`]) while the transcript read stands as it did, and the
+    /// conversation's own where a sub-agent's is read (it decides whether a person is in
+    /// the conversation); and while `sessions/list` still files the conversation once, at
+    /// the same transcript. A read from the end of a transcript reads no record, so
+    /// nothing else, neither the `subagents` folder nor the time, decides what it says.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
-        let (file, _) = self.find(&read.external_id)?;
+        if let Some(cursor) = read.cursor.as_deref()
+            && let Some(whole) =
+                self.quiet
+                    .again(&read.external_id, read.sub_agent.as_deref(), cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
+        let (file, facts) = self.find(&read.external_id)?;
+        let mut stands = vec![(file.clone(), facts.stamp)];
         let agents = file.with_extension("").join("subagents");
         let (file, own) = match &read.sub_agent {
             None => (file, false),
             Some(agent) => {
                 let path = agent_file(&agents, agent);
                 // A sub-agent's id becomes one component of a path: one, or nothing.
-                if !agent_id(agent) || !regular(&path) {
+                let stamp = agent_id(agent).then(|| Stamp::at(&path)).flatten();
+                let Some(stamp) = stamp.filter(|_| regular(&path)) else {
                     return Err(Error::refused(
                         refusal::NOT_FOUND,
                         format!(
@@ -189,23 +222,55 @@ impl Store {
                             read.external_id
                         ),
                     ));
-                }
+                };
+                stands.push((path.clone(), stamp));
                 (path, true)
             }
         };
-        read_from(
+        let events = read_from(
             &self.trees,
             &file,
             &Reading { own, agents },
             read.cursor.as_deref(),
             read.tail,
-        )
+        )?;
+        if let Some(cursor) = read.cursor.as_deref()
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+        {
+            let filed = vec![stands[0].0.clone()];
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                stands,
+                filed,
+                cursor,
+                events.whole,
+            );
+        }
+        Ok(events)
     }
 
     /// The one transcript conversation `id` is: of those filed under it, the one a person
-    /// is in.
+    /// is in. Those the last `sessions/list` filed while each is still there: the runtime
+    /// lists before it asks anything of each conversation in a sweep, so a second
+    /// transcript under the same id is seen at the next list. Else every folder is looked
+    /// in. Measured 2026-10-17 on a Mac with 795 transcripts in 118 folders: looking in
+    /// every folder was 3.5 ms of each `held`.
     fn find(&self, id: &str) -> Result<(PathBuf, Facts), Error> {
-        let files = self.filed().by_id.remove(id).unwrap_or_default();
+        let filed = lock(&self.filing)
+            .get(id)
+            .filter(|files| files.iter().all(|file| regular(file)))
+            .cloned();
+        let files =
+            filed.unwrap_or_else(|| self.filed(Some(id)).by_id.remove(id).unwrap_or_default());
+        self.person(id, files)
+    }
+
+    /// Of `files`, those filed under conversation `id`, the one a person is in.
+    fn person(&self, id: &str, files: Vec<PathBuf>) -> Result<(PathBuf, Facts), Error> {
         if files.is_empty() {
             return Err(Error::refused(
                 refusal::NOT_FOUND,
@@ -255,7 +320,7 @@ impl Store {
     fn facts(&self, file: &Path) -> Option<Facts> {
         let mut open = File::open(file).ok()?;
         let meta = open.metadata().ok()?;
-        let stamp = Stamp::of(&meta);
+        let stamp = Stamp::of(&meta)?;
         let updated_at = u64::try_from(
             meta.modified()
                 .ok()?
@@ -266,19 +331,19 @@ impl Store {
         .ok()?;
         let mut heads = lock(&self.heads);
         let kept = heads.remove(file).filter(|kept| {
-            (kept.stamp.device, kept.stamp.inode) == (stamp.device, stamp.inode)
-                && kept.value.through <= stamp.length
+            kept.stamp.file() == stamp.file() && kept.value.through <= stamp.length()
         });
         let changed = kept.as_ref().is_none_or(|kept| kept.stamp != stamp);
         let mut head = kept.map(|kept| kept.value).unwrap_or_default();
         if changed {
-            head.read(&mut open, stamp.length).ok()?;
-            head.headless = headless(&mut open, stamp.length, &head).ok()?;
+            head.read(&mut open, stamp.length()).ok()?;
+            head.headless = headless(&mut open, stamp.length(), &head).ok()?;
         }
         let facts = Facts {
             headless: head.headless,
             head: head.clone(),
             updated_at,
+            stamp,
         };
         heads.insert(file.to_owned(), Kept { stamp, value: head });
         Some(facts)
@@ -344,9 +409,10 @@ impl Store {
     }
 
     /// The folders conversations are filed in: each of `<root>/projects/*`, then each of
-    /// those of the `projects` folders Claude Code's moments named, each once. A folder
-    /// that is a link is never read: it could name one anywhere.
-    fn folders(&self) -> (Vec<PathBuf>, bool) {
+    /// those of the `projects` folders Claude Code's moments named, each once, with each
+    /// `projects` folder kept in `listed`. A folder that is a link is never read: it could
+    /// name one anywhere.
+    fn folders(&self, listed: &mut Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
         let own = self.root.join("projects");
         let mut seen: BTreeSet<PathBuf> = own.canonicalize().into_iter().collect();
         let named: Vec<PathBuf> = lock(&self.named)
@@ -357,55 +423,96 @@ impl Store {
         let mut complete = true;
         let mut folders = Vec::new();
         for projects in std::iter::once(own).chain(named) {
-            match std::fs::read_dir(&projects) {
-                Ok(entries) => {
-                    for entry in entries {
-                        match entry {
-                            Ok(entry) if entry.file_type().is_ok_and(|kind| kind.is_dir()) => {
-                                folders.push(entry.path());
-                            }
-                            Ok(_) => {}
-                            Err(_) => complete = false,
-                        }
-                    }
+            let stamp = Stamp::at(&projects);
+            match self.listing(&projects, stamp, |entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_dir())
+            }) {
+                Ok((entries, whole)) => {
+                    folders.extend(entries.iter().cloned());
+                    complete &= whole;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => complete = false,
             }
+            listed.push(projects);
         }
         (folders, complete)
     }
 
-    fn filed(&self) -> Filed {
-        let (folders, mut complete) = self.folders();
+    /// The transcripts filed in every folder, those of conversation `only` where it is
+    /// given.
+    fn filed(&self, only: Option<&str>) -> Filed {
+        let mut listed = Vec::new();
+        let (folders, mut complete) = self.folders(&mut listed);
         let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-        for folder in folders {
-            let Ok(entries) = std::fs::read_dir(&folder) else {
+        for folder in &folders {
+            let stamp = Stamp::at(folder);
+            // A link is never read: it could name a file anywhere.
+            let Ok((files, whole)) = self.listing(folder, stamp, |entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+            }) else {
                 complete = false;
                 continue;
             };
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    complete = false;
-                    continue;
-                };
-                let path = entry.path();
-                // A link is never read: it could name a file anywhere.
-                if !entry.file_type().is_ok_and(|kind| kind.is_file())
-                    || path.extension().is_none_or(|ext| ext != "jsonl")
-                {
-                    continue;
-                }
+            complete &= whole;
+            for path in files.iter() {
                 if let Some(id) = path
                     .file_stem()
                     .and_then(|stem| stem.to_str())
                     .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
+                    .filter(|id| only.is_none_or(|only| only == *id))
                 {
-                    by_id.entry(id.to_owned()).or_default().push(path);
+                    by_id.entry(id.to_owned()).or_default().push(path.clone());
                 }
             }
         }
-        Filed { by_id, complete }
+        listed.extend(folders);
+        Filed {
+            by_id,
+            complete,
+            listed,
+        }
+    }
+
+    /// The entries of folder `dir` that `keep` takes, and whether every entry was read:
+    /// listed again only once the folder no longer stands as `stamp`, taken before it is
+    /// listed. Measured 2026-10-17 on a Mac with 118 folders holding 795 transcripts:
+    /// listing them all took 12 ms, on every `held` of each conversation.
+    fn listing(
+        &self,
+        dir: &Path,
+        stamp: Option<Stamp>,
+        keep: fn(&std::fs::DirEntry) -> bool,
+    ) -> std::io::Result<(Arc<[PathBuf]>, bool)> {
+        if let Some(stamp) = stamp
+            && let Some(kept) = lock(&self.listings).get(dir)
+            && kept.stamp == stamp
+        {
+            return Ok((kept.value.clone(), true));
+        }
+        let mut whole = true;
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            match entry {
+                Ok(entry) if keep(&entry) => entries.push(entry.path()),
+                Ok(_) => {}
+                Err(_) => whole = false,
+            }
+        }
+        let entries: Arc<[PathBuf]> = entries.into();
+        if let Some(stamp) = stamp
+            && whole
+        {
+            lock(&self.listings).insert(
+                dir.to_owned(),
+                Kept {
+                    stamp,
+                    value: entries.clone(),
+                },
+            );
+        }
+        Ok((entries, whole))
     }
 }
 
@@ -574,11 +681,11 @@ struct Agent {
 impl Agent {
     /// What `file` and its `meta` say, read again only once either changed.
     fn kept(kept: &mut HashMap<PathBuf, Kept<Agent>>, file: &Path, meta: &Path) -> Option<Agent> {
-        let stamp = Stamp::of(&std::fs::metadata(file).ok()?);
+        let stamp = Stamp::of(&std::fs::metadata(file).ok()?)?;
         let beside = std::fs::symlink_metadata(meta)
             .ok()
             .filter(Metadata::is_file)
-            .map(|meta| Stamp::of(&meta));
+            .and_then(|meta| Stamp::of(&meta));
         if let Some(read) = kept
             .get(file)
             .filter(|read| read.stamp == stamp && read.value.meta == beside)

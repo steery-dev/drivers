@@ -9,20 +9,21 @@
 //! another file is a shard of the same thread whose `history_base` names the thread itself.
 //! A sub-agent's rollout is filed beside its lead's, under the same name pattern.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read as _, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_driver_common::lines::{BATCH, Line, RECORD, capped, consumed, first_whole};
+use steery_driver_common::quiet::{Memo, Quiet, Stamp};
 use steery_sdk::wire::harness::{
-    Event, Events, List, Listed, Locate, Located, Read, Session, SubAgent,
+    Event, Events, List, Listed, Locate, Located, Read, Sample, Session, SubAgent,
 };
 use steery_sdk::{Error, refusal};
 
@@ -36,11 +37,39 @@ const DEPTH: usize = 8;
 /// The longest title and sub-agent task said.
 const TASK: usize = 200;
 
-/// Codex's conversations here: its home, and the rollouts its moments named.
+/// Codex's conversations here: its home, the rollouts its moments named, every rollout
+/// by the thread it is, and the index the last `sessions/list` filed them by; each
+/// rollout's opening; the reads that said nothing, and where each thread's newest records
+/// say it stands.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
+    index: Mutex<Option<Arc<Index>>>,
+    listed: Mutex<Option<Arc<Index>>>,
     heads: Mutex<HashMap<PathBuf, Kept>>,
+    quiet: Quiet,
+    latest: Memo<String, Option<Sample>>,
+}
+
+/// Every rollout here, in the order the folders listed them, and the thread each is:
+/// kept while every folder below `sessions`, and the folder of each rollout named outside
+/// it, stands as stamped, so a call about one thread looks at that thread's rollouts
+/// alone. A rollout's thread is its first record's, which Codex never rewrites; one whose
+/// first record is not yet whole is looked at again on every call, and the index is made
+/// again once it changed. Measured 2026-10-17 on a Mac with 915 rollouts: listing them all
+/// took 12 ms, and `held` did it three times.
+struct Index {
+    files: Vec<PathBuf>,
+    /// Each thread's rollouts, by where they are in `files`.
+    by_id: HashMap<String, Vec<usize>>,
+    /// Rollouts whose thread is not known for good, by where they are in `files`, each as
+    /// it stood before it was read.
+    unsettled: Vec<(usize, Option<Stamp>)>,
+    /// Each folder rollouts were listed or named in, stamped before it was listed: none
+    /// where one could not be, and the index is then made again on every call.
+    folders: Option<Vec<(PathBuf, Stamp)>>,
+    /// Every folder was read whole.
+    complete: bool,
 }
 
 /// A rollout's opening as last read: the file it was read from, by its device and inode,
@@ -54,11 +83,13 @@ struct Kept {
 
 /// What a rollout's opening says, and whether more of the file could change it: an
 /// opening is whole once it found the first thing a person asked, or read every record
-/// of the opening ([`OPENING`]) without reaching the end of the file.
+/// of the opening ([`OPENING`]) without reaching the end of the file. Once its first
+/// record is read (`settled`), the thread it says the rollout is never changes.
 #[derive(Clone)]
 struct Opening {
     head: Head,
     whole: bool,
+    settled: bool,
 }
 
 /// What a rollout's opening says.
@@ -107,15 +138,19 @@ impl Head {
     }
 }
 
-/// One rollout as filed: its path, when it last changed, and its opening.
+/// One rollout as filed: its path, when it last changed, its opening, and the file as it
+/// stood before its opening was read.
 #[derive(Clone)]
 struct Filed {
     file: PathBuf,
     modified: u64,
     head: Head,
+    /// Its first record is read: the thread it is is known for good.
+    settled: bool,
+    stamp: Option<Stamp>,
 }
 
-/// Every rollout here by the thread it is, and whether every folder was read whole.
+/// Every rollout here by the thread it is, and whether every rollout was read.
 struct Threads {
     by_id: BTreeMap<String, Vec<Filed>>,
     complete: bool,
@@ -126,7 +161,11 @@ impl Store {
         Self {
             root,
             named: Mutex::new(BTreeSet::new()),
+            index: Mutex::new(None),
+            listed: Mutex::new(None),
             heads: Mutex::new(HashMap::new()),
+            quiet: Quiet::default(),
+            latest: Memo::default(),
         }
     }
 
@@ -137,11 +176,24 @@ impl Store {
     /// `sessions/list`.
     pub fn list(&self, list: List) -> Listed {
         self.remember(&list.transcripts);
-        let threads = self.threads();
+        let index = self.index();
+        let threads = self.threads_in(&index);
         let mut complete = threads.complete;
         let mut excluded = Vec::new();
         let mut subs: BTreeMap<String, Vec<SubAgent>> = BTreeMap::new();
         let mut sessions = Vec::new();
+        // An answer kept is given again only while the rollouts it stood on are still those
+        // its thread and its history's threads are filed at.
+        self.quiet.keep(|external_id, sub_agent, at| {
+            stood_at(
+                &threads,
+                sub_agent.unwrap_or(external_id),
+                sub_agent.is_none(),
+            )
+            .is_some_and(|stood| stood == at)
+        });
+        self.latest
+            .keep(|id, at| stood_at(&threads, id, true).is_some_and(|stood| stood == at));
         for (id, filed) in &threads.by_id {
             let head = &newest(filed).head;
             if head.sub_agent() {
@@ -177,6 +229,8 @@ impl Store {
                 .is_none_or(|since| session.updated_at >= since)
         });
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        *self.listed.lock().unwrap_or_else(|e| e.into_inner()) =
+            (index.complete && threads.complete).then_some(index);
         Listed {
             sessions,
             excluded,
@@ -186,8 +240,8 @@ impl Store {
 
     /// `sessions/locate`.
     pub fn locate(&self, locate: Locate) -> Result<Located, Error> {
-        let threads = self.threads();
-        let filed = self.family(&threads, &locate.external_id)?;
+        let threads = self.threads_in(&self.index());
+        let filed = family_in(&threads, &locate.external_id)?;
         let head = &newest(filed).head;
         if head.sub_agent() || headless(head) {
             return Err(Error::refused(
@@ -219,12 +273,87 @@ impl Store {
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents, after a
     /// cursor. The history a thread was forked from is read first, cut where the fork
     /// took it, and a `fork` event marks where its own begins.
+    ///
+    /// The same read that said nothing is answered again without listing or reading a
+    /// rollout ([`Quiet`]) while every rollout the answer stands on stands as it did: each
+    /// rollout of the thread (the newest is the one read, and says whose sub-agent it is),
+    /// each rollout of every thread its history was taken from, and each rollout whose
+    /// thread is not yet known; and while `sessions/list` still files the thread and its
+    /// history's threads at those rollouts, so a shard or a fork parent added anywhere lets
+    /// it go. Nothing else, the time included, decides what it says.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
-        let threads = self.threads();
+        if let Some(cursor) = read.cursor.as_deref()
+            && let Some(whole) =
+                self.quiet
+                    .again(&read.external_id, read.sub_agent.as_deref(), cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
+        let (events, stood) = self.reading(&read)?;
+        if let Some(cursor) = read.cursor.as_deref()
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+            && let Some((stands, filed)) = stood
+        {
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                stands,
+                filed,
+                cursor,
+                events.whole,
+            );
+        }
+        Ok(events)
+    }
+
+    /// What `says` makes of the events within `tail` bytes of the end of conversation
+    /// `id`'s history, kept as a quiet read is ([`Store::read`]) and made again only once
+    /// one of the rollouts it stood on changed. Measured 2026-10-17 on a Mac with 146
+    /// conversations: `idle` read each one's tail on every call, 7 ms a call, and a sweep
+    /// waited 1 s on them.
+    pub fn latest(
+        &self,
+        id: &str,
+        tail: u64,
+        says: impl FnOnce(&[Event]) -> Option<Sample>,
+    ) -> Result<Option<Sample>, Error> {
+        if let Some(said) = self.latest.get(id, |said| Some(said.clone())) {
+            return Ok(said);
+        }
+        let (events, stood) = self.reading(&Read {
+            external_id: id.to_owned(),
+            sub_agent: None,
+            cursor: None,
+            tail: Some(tail),
+        })?;
+        let said = says(&events.events);
+        if let Some((stands, filed)) = stood {
+            self.latest.put(id.to_owned(), stands, filed, said.clone());
+        }
+        Ok(said)
+    }
+
+    /// [`Store::read`] made: its events, and the rollouts they stood on, each stamped before
+    /// it was read, with those the conversation was filed at; none where one could not be
+    /// stamped.
+    #[allow(clippy::type_complexity)]
+    fn reading(
+        &self,
+        read: &Read,
+    ) -> Result<(Events, Option<(Vec<(PathBuf, Stamp)>, Vec<PathBuf>)>), Error> {
         let id = read.sub_agent.as_deref().unwrap_or(&read.external_id);
-        let filed = self.family(&threads, id)?;
+        let (index, filed) = self.family_of(id)?;
         if let Some(agent) = &read.sub_agent {
-            let head = &newest(filed).head;
+            let head = &newest(&filed).head;
             if head.session_id.as_deref() != Some(read.external_id.as_str()) {
                 return Err(Error::refused(
                     refusal::NOT_FOUND,
@@ -232,31 +361,101 @@ impl Store {
                 ));
             }
         }
-        let segments = segments(&threads, newest(filed), read.sub_agent.is_none());
-        read_from(&segments, read.cursor.as_deref(), read.tail)
+        let mut stood = Vec::new();
+        let segments = segments(
+            |thread| self.family(&index, thread).unwrap_or_default(),
+            newest(&filed),
+            read.sub_agent.is_none(),
+            &mut stood,
+        );
+        stood.extend(filed);
+        let events = read_from(&segments, read.cursor.as_deref(), read.tail)?;
+        let stands = stood
+            .iter()
+            .map(|filed| Some((filed.file.clone(), filed.stamp?)))
+            .chain(
+                index
+                    .unsettled
+                    .iter()
+                    .map(|(at, stamp)| Some((index.files[*at].clone(), (*stamp)?))),
+            )
+            .collect::<Option<Vec<_>>>();
+        Ok((events, stands.map(|stands| (stands, paths(&stood)))))
+    }
+
+    /// Every rollout of thread `id` and the index it was found in: the last list's, while
+    /// each rollout it files under `id` is still there and still that thread's, as the
+    /// runtime lists before it asks anything of each conversation in a sweep; else one as
+    /// the folders stand. Measured 2026-10-17 on a Mac with 915 rollouts in 45 folders:
+    /// stamping every folder was a fifth of each `idle`.
+    fn family_of(&self, id: &str) -> Result<(Arc<Index>, Vec<Filed>), Error> {
+        let listed = self
+            .listed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(index) = listed
+            && let Some(filed) = self.filed_as(&index, id)
+        {
+            return Ok((index, filed));
+        }
+        let index = self.index();
+        let filed = self.family(&index, id)?;
+        Ok((index, filed))
+    }
+
+    /// [`Store::family`] in `index`, where every rollout it files under `id` is still that
+    /// thread's; none where one is gone or another's, or `index` files none under `id`.
+    fn filed_as(&self, index: &Index, id: &str) -> Option<Vec<Filed>> {
+        let settled = index.by_id.get(id)?;
+        let mut at: Vec<(usize, bool)> = settled
+            .iter()
+            .map(|at| (*at, true))
+            .chain(index.unsettled.iter().map(|(at, _)| (*at, false)))
+            .collect();
+        at.sort_unstable();
+        let mut filed = Vec::new();
+        for (at, settled) in at {
+            match self.filed(&index.files[at]) {
+                Some(Some((thread, found))) if thread == id => filed.push(found),
+                _ if settled => return None,
+                _ => {}
+            }
+        }
+        Some(filed)
     }
 
     /// Every rollout of thread `id`, or why there is none.
-    fn family<'a>(&self, threads: &'a Threads, id: &str) -> Result<&'a [Filed], Error> {
-        threads
+    fn family(&self, index: &Index, id: &str) -> Result<Vec<Filed>, Error> {
+        let mut at: Vec<usize> = index
             .by_id
             .get(id)
-            .map(Vec::as_slice)
-            .filter(|filed| !filed.is_empty())
-            .ok_or_else(|| {
-                Error::refused(
-                    refusal::NOT_FOUND,
-                    format!("Codex has no conversation {id} here"),
-                )
-            })
+            .into_iter()
+            .flatten()
+            .chain(index.unsettled.iter().map(|(at, _)| at))
+            .copied()
+            .collect();
+        at.sort_unstable();
+        let filed: Vec<Filed> = at
+            .into_iter()
+            .filter_map(|at| self.filed(&index.files[at]).flatten())
+            .filter(|(thread, _)| thread == id)
+            .map(|(_, filed)| filed)
+            .collect();
+        if filed.is_empty() {
+            return Err(Error::refused(
+                refusal::NOT_FOUND,
+                format!("Codex has no conversation {id} here"),
+            ));
+        }
+        Ok(filed)
     }
 
     /// The newest rollout of a conversation, which a turn continues and a holder holds.
     pub fn current(&self, id: &str) -> Result<PathBuf, Error> {
-        let threads = self.threads();
-        let filed = self.family(&threads, id)?;
-        if !equally_current(filed) {
-            Ok(newest(filed).file.clone())
+        let (_, filed) = self.family_of(id)?;
+        if !equally_current(&filed) {
+            Ok(newest(&filed).file.clone())
         } else {
             Err(Error::refused(
                 refusal::REFUSED,
@@ -267,8 +466,7 @@ impl Store {
 
     /// The conversation's rollouts, oldest first.
     pub fn transcripts(&self, id: &str) -> Result<Vec<PathBuf>, Error> {
-        let threads = self.threads();
-        let mut filed = self.family(&threads, id)?.to_vec();
+        let (_, mut filed) = self.family_of(id)?;
         filed.sort_by_key(|filed| filed.modified);
         Ok(filed.into_iter().map(|filed| filed.file).collect())
     }
@@ -279,64 +477,137 @@ impl Store {
             .iter()
             .filter(|file| file.is_absolute() && is_rollout(file))
             .filter_map(|file| file.canonicalize().ok());
-        self.named
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(files);
+        let mut kept = self.named.lock().unwrap_or_else(|e| e.into_inner());
+        let before = kept.len();
+        kept.extend(files);
+        // A rollout named now could be a shard, or the parent, of a thread read before.
+        if kept.len() > before {
+            drop(kept);
+            *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
     }
 
-    /// Every rollout here, read for its opening.
-    fn threads(&self) -> Threads {
+    /// Every rollout `index` files, read for its opening.
+    fn threads_in(&self, index: &Index) -> Threads {
+        let mut complete = index.complete;
+        let mut by_id: BTreeMap<String, Vec<Filed>> = BTreeMap::new();
+        for file in &index.files {
+            match self.filed(file) {
+                Some(Some((id, filed))) => by_id.entry(id).or_default().push(filed),
+                Some(None) => {}
+                None => complete = false,
+            }
+        }
+        Threads { by_id, complete }
+    }
+
+    /// The index of every rollout here, listed again only once a folder changed.
+    fn index(&self) -> Arc<Index> {
+        let mut kept = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = kept.as_ref()
+            && index.folders.as_ref().is_some_and(|folders| {
+                folders
+                    .iter()
+                    .all(|(folder, stamp)| Stamp::at(folder) == Some(*stamp))
+            })
+            && index
+                .unsettled
+                .iter()
+                .all(|(at, stamp)| Stamp::at(&index.files[*at]) == *stamp)
+        {
+            return index.clone();
+        }
+        let index = Arc::new(self.listed());
+        *kept = (index.complete && index.folders.is_some()).then(|| index.clone());
+        index
+    }
+
+    /// Every rollout here, each read for the thread it is.
+    fn listed(&self) -> Index {
         let mut complete = true;
         let mut files = Vec::new();
+        let mut folders = Some(Vec::new());
         let sessions = self.root.join("sessions");
-        walk(&sessions, 3, &mut files, &mut complete);
+        walk(&sessions, 3, &mut files, &mut folders, &mut complete);
         // A rollout named outside the walk joins it unless the walk found it too; the walk's
         // own paths are resolved only then, which costs a lookup of every rollout here.
         let named = self.named.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if !named.is_empty() {
             let own: BTreeSet<PathBuf> =
                 files.iter().filter_map(|f| f.canonicalize().ok()).collect();
-            files.extend(named.into_iter().filter(|file| !own.contains(file)));
-        }
-        let mut by_id: BTreeMap<String, Vec<Filed>> = BTreeMap::new();
-        let mut kept = HashMap::new();
-        for file in files {
-            let Ok(meta) = std::fs::symlink_metadata(&file) else {
-                complete = false;
-                continue;
-            };
-            if !meta.file_type().is_file() {
-                continue;
+            for file in named.into_iter().filter(|file| !own.contains(file)) {
+                // Its folder says when it is replaced, or once gone, back.
+                if let Some(folder) = file.parent()
+                    && folders
+                        .as_ref()
+                        .is_some_and(|stood| stood.iter().all(|(listed, _)| listed != folder))
+                {
+                    match (folders.as_mut(), Stamp::at(folder)) {
+                        (Some(stood), Some(stamp)) => stood.push((folder.to_owned(), stamp)),
+                        _ => folders = None,
+                    }
+                }
+                files.push(file);
             }
-            let Some(named) = named_id(&file) else {
-                continue;
-            };
-            let opening = self.opening(&file, &meta);
-            let head = opening.head.clone();
-            let id = head.id.clone().unwrap_or(named);
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |at| at.as_millis() as u64);
-            kept.insert(
-                file.clone(),
-                Kept {
-                    dev: meta.dev(),
-                    ino: meta.ino(),
-                    len: meta.len(),
-                    opening,
-                },
-            );
-            by_id.entry(id).or_default().push(Filed {
-                file,
-                modified,
-                head,
-            });
         }
-        *self.heads.lock().unwrap_or_else(|e| e.into_inner()) = kept;
-        Threads { by_id, complete }
+        let mut by_id: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut unsettled = Vec::new();
+        for (at, file) in files.iter().enumerate() {
+            match self.filed(file) {
+                Some(Some((id, filed))) if filed.settled => by_id.entry(id).or_default().push(at),
+                Some(Some((_, filed))) => unsettled.push((at, filed.stamp)),
+                // Gone, or no rollout: one put there later changes its folder.
+                Some(None) | None => {}
+            }
+        }
+        let listed: HashSet<&PathBuf> = files.iter().collect();
+        self.heads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|file, _| listed.contains(file));
+        Index {
+            files,
+            by_id,
+            unsettled,
+            folders,
+            complete,
+        }
+    }
+
+    /// Rollout `file` as it stands, and the thread it is: none where it is no rollout,
+    /// and nothing where it cannot be looked at.
+    fn filed(&self, file: &Path) -> Option<Option<(String, Filed)>> {
+        let meta = std::fs::symlink_metadata(file).ok()?;
+        if !meta.file_type().is_file() {
+            return Some(None);
+        }
+        let Some(named) = named_id(file) else {
+            return Some(None);
+        };
+        let opening = self.opening(file, &meta);
+        let id = opening.head.id.clone().unwrap_or(named);
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |at| at.as_millis() as u64);
+        let filed = Filed {
+            file: file.to_owned(),
+            modified,
+            head: opening.head.clone(),
+            settled: opening.settled,
+            stamp: Stamp::of(&meta),
+        };
+        self.heads.lock().unwrap_or_else(|e| e.into_inner()).insert(
+            file.to_owned(),
+            Kept {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                len: meta.len(),
+                opening,
+            },
+        );
+        Some(Some((id, filed)))
     }
 
     /// A rollout's opening, read again only where the file could say more of it: Codex
@@ -360,8 +631,19 @@ impl Store {
     }
 }
 
-/// Every `rollout-*.jsonl` `depth` folders below `dir`, a link never followed.
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, complete: &mut bool) {
+/// Every `rollout-*.jsonl` `depth` folders below `dir`, a link never followed, each folder
+/// stamped into `folders` before it is listed.
+fn walk(
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+    folders: &mut Option<Vec<(PathBuf, Stamp)>>,
+    complete: &mut bool,
+) {
+    match (folders.as_mut(), Stamp::at(dir)) {
+        (Some(stood), Some(stamp)) => stood.push((dir.to_owned(), stamp)),
+        _ => *folders = None,
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -381,7 +663,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, complete: &mut bool) {
         };
         let path = entry.path();
         if depth > 0 && kind.is_dir() {
-            walk(&path, depth - 1, out, complete);
+            walk(&path, depth - 1, out, folders, complete);
         } else if depth == 0 && kind.is_file() && is_rollout(&path) {
             out.push(path);
         }
@@ -400,6 +682,21 @@ fn named_id(file: &Path) -> Option<String> {
     let id = stem.get(stem.len().checked_sub(36)?..)?;
     uuid::Uuid::parse_str(id).ok()?;
     Some(id.to_owned())
+}
+
+/// Every rollout of thread `id` among `threads`, or why there is none.
+fn family_in<'a>(threads: &'a Threads, id: &str) -> Result<&'a [Filed], Error> {
+    threads
+        .by_id
+        .get(id)
+        .map(Vec::as_slice)
+        .filter(|filed| !filed.is_empty())
+        .ok_or_else(|| {
+            Error::refused(
+                refusal::NOT_FOUND,
+                format!("Codex has no conversation {id} here"),
+            )
+        })
 }
 
 /// The rollout last written of a family.
@@ -478,15 +775,20 @@ fn opening(file: &Path) -> Opening {
         return Opening {
             head: found,
             whole: false,
+            settled: false,
         };
     };
     let mut reader = BufReader::new(open);
     let mut line = Vec::new();
     let mut whole = true;
+    let mut settled = false;
     for n in 0..OPENING {
         match capped(&mut reader, &mut line, RECORD) {
-            Ok(Line::Whole) => {}
-            Ok(Line::Long) => continue,
+            Ok(Line::Whole) => settled = true,
+            Ok(Line::Long) => {
+                settled = true;
+                continue;
+            }
             Ok(Line::Partial) | Err(_) => {
                 whole = false;
                 break;
@@ -522,7 +824,11 @@ fn opening(file: &Path) -> Opening {
             _ => {}
         }
     }
-    Opening { head: found, whole }
+    Opening {
+        head: found,
+        whole,
+        settled,
+    }
 }
 
 fn meta(payload: &Value, found: &mut Head) {
@@ -564,16 +870,46 @@ struct Segment {
     fork: Option<(String, u64)>,
 }
 
+/// The rollouts a read of thread `id` stands on as `threads` files them: its own, and
+/// with `ancestry` those of every thread its history was taken from; none where `id` is
+/// not filed.
+fn stood_at(threads: &Threads, id: &str, ancestry: bool) -> Option<Vec<PathBuf>> {
+    let filed = threads.by_id.get(id)?;
+    let mut stood = Vec::new();
+    segments(
+        |thread| threads.by_id.get(thread).cloned().unwrap_or_default(),
+        newest(filed),
+        ancestry,
+        &mut stood,
+    );
+    stood.extend(filed.iter().cloned());
+    Some(paths(&stood))
+}
+
+/// The files of `stood`, in order, each once: what a read was filed at.
+fn paths(stood: &[Filed]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = stood.iter().map(|filed| filed.file.clone()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
 /// The stretches a thread's history is read from, oldest first: the rollouts its
 /// `history_base` names, each cut where it was taken, then its own. With `ancestry`
-/// false a fork's parent is not read (a sub-agent's own work).
-fn segments(threads: &Threads, current: &Filed, ancestry: bool) -> Vec<Segment> {
+/// false a fork's parent is not read (a sub-agent's own work). Every rollout of each
+/// thread it was taken from, as `family` finds them, joins `stood`.
+fn segments(
+    family: impl Fn(&str) -> Vec<Filed>,
+    current: &Filed,
+    ancestry: bool,
+    stood: &mut Vec<Filed>,
+) -> Vec<Segment> {
     let mut chain = vec![Segment {
         file: current.file.clone(),
         end: None,
         fork: None,
     }];
-    let mut at = current;
+    let mut at = current.clone();
     for _ in 0..DEPTH {
         let Some((thread, end)) = at.head.base.clone() else {
             break;
@@ -583,13 +919,17 @@ fn segments(threads: &Threads, current: &Filed, ancestry: bool) -> Vec<Segment> 
         if forked && !ancestry {
             break;
         }
-        let Some(base) = threads.by_id.get(&thread).and_then(|filed| {
-            filed
-                .iter()
-                .filter(|filed| filed.file != at.file && filed.modified <= at.modified)
-                .max_by_key(|filed| filed.modified)
-                .or_else(|| filed.iter().find(|filed| filed.file != at.file))
-        }) else {
+        let filed = family(&thread);
+        let base = filed
+            .iter()
+            .filter(|filed| filed.file != at.file && filed.modified <= at.modified)
+            .max_by_key(|filed| filed.modified)
+            .or_else(|| filed.iter().find(|filed| filed.file != at.file))
+            .cloned();
+        if forked {
+            stood.extend(filed);
+        }
+        let Some(base) = base else {
             break;
         };
         if chain.iter().any(|segment| segment.file == base.file) {

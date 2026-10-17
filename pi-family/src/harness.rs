@@ -2,8 +2,8 @@
 //! where each keeps its files, and what Steery reads of each.
 //!
 //! omp is a fork of pi. Both write the same transcript tree, run the same plugin, read
-//! the same `PI_*` variables for their folders and speak the same JSON lines in a print
-//! run; what differs is said here once, and every other module asks.
+//! the same `PI_*` variables for their folders and run kept in their RPC mode; what differs
+//! is said here once, and every other module asks.
 
 use std::path::{Path, PathBuf};
 
@@ -73,8 +73,7 @@ impl Harness {
                  names it instead, when the connection names the conversation: the instructions\n\
                  it announces carry that `harness` and `external_id`. Read them there and send\n\
                  exactly those. Instructions that named no conversation mean this connection\n\
-                 named none: describe nothing and raise your requests without a `session` —\n\
-                 they are first-class requests and your person reads every one of them."
+                 named none: describe nothing."
             }
             Self::Pi => {
                 "Steery's paragraph, added each time your person writes to you, names it, as `harness` and `external_id`,\n\

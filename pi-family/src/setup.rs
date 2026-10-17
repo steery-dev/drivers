@@ -94,10 +94,8 @@ pub async fn plan(
         .join(format!("{}-{}.ts", harness.id(), &digest[..16]));
     let mut entries = Vec::new();
     if harness == Harness::Omp {
-        // omp documents `timeout: 0` as turning its client's MCP timeout off, which a call
-        // that waits for a person needs; a process-wide `OMP_MCP_TIMEOUT_MS` still takes
-        // precedence, and Steery sets that for nobody. omp has no way to hide a tool from
-        // its model, so the card's own tools stay listed.
+        // omp documents `timeout: 0` as turning its client's MCP timeout off; a process-wide
+        // `OMP_MCP_TIMEOUT_MS` still takes precedence, and Steery sets that for nobody.
         entries.push(Entry {
             path: root.join("mcp.json"),
             format: Format::Json,
@@ -175,25 +173,14 @@ pub async fn plan(
 /// seconds, 60 unless the entry says otherwise, and refuses anything but a positive
 /// number. Its default exposure, `codemode`, declares a server's tools to the model only
 /// inside scripts and keeps the server's instructions out of every prompt; `direct`
-/// declares them as tools, the way every other harness holds them. A tool for the card
-/// alone is `hidden`: the card Steery's plugin draws answers through the runtime's
-/// `/answer`, and pi's model must not reach it.
+/// declares them as tools, the way every other harness holds them.
 fn pi_entry(setup: &Setup) -> Value {
-    let mut entry = json!({
+    json!({
         "url": setup.mcp_url,
         "type": "http",
         "timeout": setup.timeout,
         "exposure": "direct",
-    });
-    if !setup.card_tools.is_empty() {
-        entry["toolExposure"] = setup
-            .card_tools
-            .iter()
-            .map(|tool| (tool.clone(), json!("hidden")))
-            .collect::<serde_json::Map<_, _>>()
-            .into();
-    }
-    entry
+    })
 }
 
 /// Steery's extension for the harness, its placeholders filled: the harness; the
@@ -296,8 +283,7 @@ mod tests {
             hook: "/usr/local/bin/steery hook omp".into(),
             door: "ws://127.0.0.1:7777/door".into(),
             release: "1.0.0".into(),
-            timeout: 3630,
-            card_tools: Vec::new(),
+            timeout: 120,
         }
     }
 

@@ -2,8 +2,8 @@
 //! where it is one, and what a call that waits on the person puts to them.
 //!
 //! Codex files a tool an MCP server offers under the server (`"namespace":
-//! "mcp__steery"`, `"name": "requests_get"`), where its hooks write
-//! `mcp__steery__requests_get`. Its own namespaces (`multi_agent_v1`, `collaboration`,
+//! "mcp__steery"`, `"name": "sessions_describe"`), where its hooks write
+//! `mcp__steery__sessions_describe`. Its own namespaces (`multi_agent_v1`, `collaboration`,
 //! `clock`) file its built-in tools and are no part of their names; its hooks glue them on
 //! (`multi_agent_v1wait_agent`, `clock.sleep`). The groups are Steery's, read off a tool's
 //! name alone, never its arguments.
@@ -270,12 +270,12 @@ mod tests {
     fn codex_tools_are_named_and_grouped_as_steery_reads_them() {
         let steery = call(
             "c1",
-            &spelled("requests_get", Some("mcp__steery")),
+            &spelled("sessions_describe", Some("mcp__steery")),
             json!("{\"id\":\"r\"}"),
         );
-        assert_eq!(steery.tool, "mcp__steery__requests_get");
+        assert_eq!(steery.tool, "mcp__steery__sessions_describe");
         assert_eq!(steery.group, Group::Steery);
-        assert_eq!(steery.steery.as_deref(), Some("requests_get"));
+        assert_eq!(steery.steery.as_deref(), Some("sessions_describe"));
         assert_eq!(steery.input, json!({"id": "r"}));
 
         let shell = call(
