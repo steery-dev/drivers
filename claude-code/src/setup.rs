@@ -53,12 +53,9 @@ fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
         root.join(".claude.json")
     };
     let mut entries = vec![
-        // Claude Code's bound on a call is over a day unless `MCP_TOOL_TIMEOUT` says
-        // otherwise, but it aborts a call to an `http` server that sends nothing for five
-        // minutes, and a wait for a person is silent for longer. A per-server `timeout`, in
-        // milliseconds, is at once the call's bound and the floor of that idle watchdog.
-        // Claude Code reads no per-conversation headers from this file, and has no way to
-        // hide one server's tool from its model, so the card's own tools stay listed.
+        // A per-server `timeout`, in milliseconds, is at once the bound on one call and the
+        // floor of Claude Code's idle watchdog on an `http` server. Claude Code reads no
+        // per-conversation headers from this file.
         Entry {
             path: servers,
             format: Format::Json,
@@ -116,8 +113,7 @@ mod tests {
             hook: "/usr/local/bin/steery hook claude-code".into(),
             door: "ws://127.0.0.1:7777/door".into(),
             release: "1.0.0".into(),
-            timeout: 3630,
-            card_tools: vec!["requests_answer".into()],
+            timeout: 120,
         }
     }
 
@@ -139,7 +135,7 @@ mod tests {
         assert_eq!(mcp.at.as_deref(), Some("/mcpServers/steery"));
         assert_eq!(
             mcp.value,
-            json!({"type": "http", "url": "http://127.0.0.1:7777/mcp", "timeout": 3_630_000})
+            json!({"type": "http", "url": "http://127.0.0.1:7777/mcp", "timeout": 120_000})
         );
         let moved = super::entries(home, Path::new("/srv/claude"), &setup());
         assert_eq!(moved[0].path, Path::new("/srv/claude/.claude.json"));

@@ -61,7 +61,7 @@ pub(crate) const EVENTS: [Event; 11] = [
         says: &[],
         waits: ASKS_WAITS,
     },
-    // Words a person threw reach a conversation deep in a tool loop at a call come back.
+    // Words for a conversation Steery started reach it deep in a tool loop as a call comes back.
     Event {
         name: "PostToolUse",
         kind: HookKind::AfterCall,
