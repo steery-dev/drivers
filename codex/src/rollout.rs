@@ -21,6 +21,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_driver_common::lines::{BATCH, Line, RECORD, capped, consumed, first_whole};
+use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_sdk::wire::harness::{
     Event, Events, List, Listed, Locate, Located, Read, Session, SubAgent,
 };
@@ -36,11 +37,13 @@ const DEPTH: usize = 8;
 /// The longest title and sub-agent task said.
 const TASK: usize = 200;
 
-/// Codex's conversations here: its home, and the rollouts its moments named.
+/// Codex's conversations here: its home, the rollouts its moments named, each rollout's
+/// opening, and the reads that said nothing.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
     heads: Mutex<HashMap<PathBuf, Kept>>,
+    quiet: Quiet,
 }
 
 /// A rollout's opening as last read: the file it was read from, by its device and inode,
@@ -107,18 +110,22 @@ impl Head {
     }
 }
 
-/// One rollout as filed: its path, when it last changed, and its opening.
+/// One rollout as filed: its path, when it last changed, its opening, and the file as it
+/// stood before its opening was read.
 #[derive(Clone)]
 struct Filed {
     file: PathBuf,
     modified: u64,
     head: Head,
+    stamp: Option<Stamp>,
 }
 
-/// Every rollout here by the thread it is, and whether every folder was read whole.
+/// Every rollout here by the thread it is, whether every folder was read whole, and each
+/// folder below `sessions` stamped before it was listed: none where one could not be.
 struct Threads {
     by_id: BTreeMap<String, Vec<Filed>>,
     complete: bool,
+    folders: Option<Vec<(PathBuf, Stamp)>>,
 }
 
 impl Store {
@@ -127,6 +134,7 @@ impl Store {
             root,
             named: Mutex::new(BTreeSet::new()),
             heads: Mutex::new(HashMap::new()),
+            quiet: Quiet::default(),
         }
     }
 
@@ -219,8 +227,29 @@ impl Store {
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents, after a
     /// cursor. The history a thread was forked from is read first, cut where the fork
     /// took it, and a `fork` event marks where its own begins.
+    ///
+    /// The same read that said nothing is answered again without listing or reading a
+    /// rollout ([`Quiet`]) while every file the answer stands on stands as it did: each
+    /// rollout of the thread (the newest is the one read, and says whose sub-agent it is),
+    /// each rollout of every thread its history was taken from, and every folder below
+    /// `sessions` (a rollout added anywhere could be a new shard of the thread, or the
+    /// parent its history names). Nothing else, the time included, decides what it says.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
-        let threads = self.threads();
+        if let Some(cursor) = read.cursor.as_deref()
+            && let Some(whole) =
+                self.quiet
+                    .again(&read.external_id, read.sub_agent.as_deref(), cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
+        let mut threads = self.threads();
+        let folders = threads.folders.take();
         let id = read.sub_agent.as_deref().unwrap_or(&read.external_id);
         let filed = self.family(&threads, id)?;
         if let Some(agent) = &read.sub_agent {
@@ -232,8 +261,35 @@ impl Store {
                 ));
             }
         }
-        let segments = segments(&threads, newest(filed), read.sub_agent.is_none());
-        read_from(&segments, read.cursor.as_deref(), read.tail)
+        let mut families = vec![filed];
+        let segments = segments(
+            &threads,
+            newest(filed),
+            read.sub_agent.is_none(),
+            &mut families,
+        );
+        let events = read_from(&segments, read.cursor.as_deref(), read.tail)?;
+        if let Some(cursor) = read.cursor.as_deref()
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+            && let Some(stands) = folders.and_then(|mut stands| {
+                for filed in families.into_iter().flatten() {
+                    stands.push((filed.file.clone(), filed.stamp?));
+                }
+                Some(stands)
+            })
+        {
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                stands,
+                cursor,
+                events.whole,
+            );
+        }
+        Ok(events)
     }
 
     /// Every rollout of thread `id`, or why there is none.
@@ -279,18 +335,22 @@ impl Store {
             .iter()
             .filter(|file| file.is_absolute() && is_rollout(file))
             .filter_map(|file| file.canonicalize().ok());
-        self.named
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .extend(files);
+        let mut kept = self.named.lock().unwrap_or_else(|e| e.into_inner());
+        let before = kept.len();
+        kept.extend(files);
+        // A rollout named now could be a shard, or the parent, of a thread read before.
+        if kept.len() > before {
+            self.quiet.forget();
+        }
     }
 
     /// Every rollout here, read for its opening.
     fn threads(&self) -> Threads {
         let mut complete = true;
         let mut files = Vec::new();
+        let mut folders = Some(Vec::new());
         let sessions = self.root.join("sessions");
-        walk(&sessions, 3, &mut files, &mut complete);
+        walk(&sessions, 3, &mut files, &mut folders, &mut complete);
         // A rollout named outside the walk joins it unless the walk found it too; the walk's
         // own paths are resolved only then, which costs a lookup of every rollout here.
         let named = self.named.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -333,10 +393,15 @@ impl Store {
                 file,
                 modified,
                 head,
+                stamp: Stamp::of(&meta),
             });
         }
         *self.heads.lock().unwrap_or_else(|e| e.into_inner()) = kept;
-        Threads { by_id, complete }
+        Threads {
+            by_id,
+            complete,
+            folders,
+        }
     }
 
     /// A rollout's opening, read again only where the file could say more of it: Codex
@@ -360,8 +425,19 @@ impl Store {
     }
 }
 
-/// Every `rollout-*.jsonl` `depth` folders below `dir`, a link never followed.
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, complete: &mut bool) {
+/// Every `rollout-*.jsonl` `depth` folders below `dir`, a link never followed, each folder
+/// stamped into `folders` before it is listed.
+fn walk(
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+    folders: &mut Option<Vec<(PathBuf, Stamp)>>,
+    complete: &mut bool,
+) {
+    match (folders.as_mut(), Stamp::at(dir)) {
+        (Some(stood), Some(stamp)) => stood.push((dir.to_owned(), stamp)),
+        _ => *folders = None,
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -381,7 +457,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, complete: &mut bool) {
         };
         let path = entry.path();
         if depth > 0 && kind.is_dir() {
-            walk(&path, depth - 1, out, complete);
+            walk(&path, depth - 1, out, folders, complete);
         } else if depth == 0 && kind.is_file() && is_rollout(&path) {
             out.push(path);
         }
@@ -566,8 +642,14 @@ struct Segment {
 
 /// The stretches a thread's history is read from, oldest first: the rollouts its
 /// `history_base` names, each cut where it was taken, then its own. With `ancestry`
-/// false a fork's parent is not read (a sub-agent's own work).
-fn segments(threads: &Threads, current: &Filed, ancestry: bool) -> Vec<Segment> {
+/// false a fork's parent is not read (a sub-agent's own work). Every rollout of each
+/// thread it was taken from joins `families`.
+fn segments<'a>(
+    threads: &'a Threads,
+    current: &'a Filed,
+    ancestry: bool,
+    families: &mut Vec<&'a [Filed]>,
+) -> Vec<Segment> {
     let mut chain = vec![Segment {
         file: current.file.clone(),
         end: None,
@@ -583,7 +665,11 @@ fn segments(threads: &Threads, current: &Filed, ancestry: bool) -> Vec<Segment> 
         if forked && !ancestry {
             break;
         }
-        let Some(base) = threads.by_id.get(&thread).and_then(|filed| {
+        let family = threads.by_id.get(&thread);
+        if forked && let Some(family) = family {
+            families.push(family);
+        }
+        let Some(base) = family.and_then(|filed| {
             filed
                 .iter()
                 .filter(|filed| filed.file != at.file && filed.modified <= at.modified)
