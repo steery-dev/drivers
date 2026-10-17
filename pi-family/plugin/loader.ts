@@ -10,13 +10,9 @@
 // door its person's words come in by above all, without a restart. The harness holds
 // this file's handlers, one per place a copy gave one, and each hands its event to
 // whichever copy runs now. What the harness keeps for the life of its runtime — the
-// command-line flags and slash commands a copy names in its `surfaces` — is registered
-// here, once, and a command hands its call to whichever copy runs now, so a newer copy
-// never registers anything twice. The harness's terminal toolkit is imported here and
-// handed to every copy: each harness resolves its own for the file it loads as an
-// extension, and omp for no file outside its tree, which is where a copy is. A copy that
-// will not load leaves the one that runs; with none named, the harness runs as it would
-// without this file.
+// command-line flags a copy names in its `surfaces` — is registered here, once, so a newer
+// copy never registers anything twice. A copy that will not load leaves the one that runs;
+// with none named, the harness runs as it would without this file.
 
 import { readFileSync } from "node:fs";
 
@@ -34,32 +30,25 @@ type Handler = (event: unknown, ctx: unknown) => unknown;
 /** A command-line flag a copy names, registered by this file for the harness's runtime. */
 type Flag = { name: string; description?: string; type: "string" | "boolean" };
 
-/** A slash command a copy names, registered by this file for the harness's runtime. */
-type Command = { name: string; description?: string };
-
 /** The harness's API for one session, as far as this file reads it. */
 type Api = {
   on(event: string, handler: Handler): void;
   registerFlag?(name: string, options: { description?: string; type: "string" | "boolean" }): void;
-  registerCommand?(name: string, options: { description?: string; handler(args: string, ctx: unknown): Promise<void> }): void;
 };
 
-/**
- * A copy running in one session: stopped, it says what the next copy carries on from;
- * given one of its commands, it runs it.
- */
-type Running = { stop(): unknown; command?(name: string, args: string, ctx: unknown): Promise<void> };
+/** A copy running in one session: stopped, it says what the next copy carries on from. */
+type Running = { stop(): unknown };
 
 /**
  * Steery's extension: its default export starts a copy in a session, one under way when
- * `ctx` is given; `surfaces` names the flags and commands it needs the harness to hold.
+ * `ctx` is given; `surfaces` names the flags it needs the harness to hold.
  */
 type Extension = {
   default(
     pi: Api,
-    carried: { ctx?: unknown; kept?: unknown; tui?: unknown; models?: unknown },
+    carried: { ctx?: unknown; kept?: unknown; models?: unknown },
   ): Running | undefined | Promise<Running | undefined>;
-  surfaces?: { flags?: Flag[]; commands?: Command[] };
+  surfaces?: { flags?: Flag[] };
 };
 
 /** One session of this process, in the order the harness started them: a lead before its sub-agents. */
@@ -84,14 +73,12 @@ let refused: string | undefined;
 let moving: Promise<void> = Promise.resolve();
 let shifting = false;
 let watching: NodeJS.Timeout | undefined;
-/** The harness's terminal toolkit, imported once, or nothing where this harness has none. */
-let toolkit: unknown;
 /** The harness's own model calls, imported once ([`harnessModels`]). */
 let models: unknown;
 
 /**
- * Not static imports, as with the toolkit: a harness that cannot resolve one would refuse
- * this whole file, and Steery fails open.
+ * Not static imports: a harness that cannot resolve one would refuse this whole file, and
+ * Steery fails open.
  *
  * What of the harness's own packages a conversation's recap is written with, by the names
  * both harnesses resolve for an extension: `convertToLlm` from its coding agent and
@@ -111,20 +98,6 @@ async function harnessModels(): Promise<unknown> {
     // pi's registry makes the request itself.
   }
   return loaded;
-}
-
-/**
- * The toolkit the harness's own extensions draw with, by the name both harnesses resolve
- * for an extension: pi's own package, and omp's in its place.
- */
-async function terminalToolkit(): Promise<unknown> {
-  try {
-    // Not a static import: a harness that cannot resolve it would refuse this whole file,
-    // and Steery fails open. Without it, the copy draws no card.
-    return await import("@earendil-works/pi-tui");
-  } catch {
-    return undefined;
-  }
 }
 
 function named(): string | undefined {
@@ -183,7 +156,7 @@ async function start(session: Session, kept: unknown): Promise<void> {
   if (!running) return;
   try {
     session.running =
-      (await running.module.default(api(session), { ctx: session.ctx, kept, tui: toolkit, models })) ?? undefined;
+      (await running.module.default(api(session), { ctx: session.ctx, kept, models })) ?? undefined;
     session.started = true;
   } catch {
     session.handlers = new Map();
@@ -255,7 +228,6 @@ export default async function steery(pi: Api): Promise<void> {
   if (startedForNothing()) return;
   const session: Session = { pi, handlers: new Map(), places: new Map(), started: false };
   sessions.push(session);
-  toolkit ??= await terminalToolkit();
   models ??= await harnessModels();
   // Where a copy started after the session did takes it up. The name is watched only
   // while a session runs here: a harness may load this file and start none — pi does to
@@ -279,25 +251,10 @@ export default async function steery(pi: Api): Promise<void> {
   await queued(follow);
   // What the copy running now needs the harness to hold for this runtime's life. pi
   // refuses a flag nobody registered before anything starts, and waits for this factory,
-  // so a flag registered here is one a run may be given. A command finds whichever copy
-  // runs when it is called, once any move under way is done.
-  const surfaces = running?.module.surfaces;
-  for (const flag of surfaces?.flags ?? []) {
+  // so a flag registered here is one a run may be given.
+  for (const flag of running?.module.surfaces?.flags ?? []) {
     try {
       pi.registerFlag?.(flag.name, { description: flag.description, type: flag.type });
-    } catch {
-      // The harness runs without it, as without Steery.
-    }
-  }
-  for (const command of surfaces?.commands ?? []) {
-    try {
-      pi.registerCommand?.(command.name, {
-        description: command.description,
-        handler: async (args, ctx) => {
-          if (shifting) await moving;
-          await session.running?.command?.(command.name, args, ctx);
-        },
-      });
     } catch {
       // The harness runs without it, as without Steery.
     }

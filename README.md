@@ -201,7 +201,7 @@ What each driver does:
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
-The live methods (`say`, `pick`, `stop`, `recap`) are the plugin door's (PROTOCOL.md
+The live methods (`say`, `pick`, `stop`, `recap`, `compact`) are the plugin door's (PROTOCOL.md
 §4.4), which the runtime speaks itself, so the drivers have none. The runtime uses them
 only on conversations Steery started.
 
@@ -222,17 +222,17 @@ To connect another harness, copy `pi-family/` and keep its shape:
 | `src/models.rs` | `models`: what the harness lists and the files whose change changes it. |
 | `src/drive.rs` | `held`, `idle`, `start`, `turn/read`, `receipt/*`, `reader`, `terminal`. |
 | `src/setup.rs` | `setup/plan`: the entries, each with what it carries. |
-| `plugin/` | Steery's plugin for harnesses whose door is `plugin`: the extension, its loader and the form rule, embedded in the binary at build time. |
+| `plugin/` | Steery's plugin for harnesses whose door is `plugin`: the extension and its loader, embedded in the binary at build time. |
 
 A harness with its own door (`picks`, `keeps`) has no `plugin/` and answers `say`, `pick`
 and `recap` instead. One whose moments are hook commands answers `hook/answer` too.
 
 ### The plugin
 
-`pi-family/plugin/extension.ts` speaks the plugin door, version 1. `loader.ts` is the file
-the harness loads: it runs the copy of the extension the runtime's config folder names,
-and moves every session onto a newer copy once one is named. `form.js` is the rule every
-surface draws a request by. Typecheck them against pi's published types:
+`pi-family/plugin/extension.ts` speaks the plugin door, version 2. It draws nothing in the
+harness and takes no answer there. `loader.ts` is the file the harness loads: it runs the
+copy of the extension the runtime's config folder names, and moves every session onto a
+newer copy once one is named. Typecheck them against pi's published types:
 
 ```sh
 cd pi-family/plugin && npm i && npm run check
