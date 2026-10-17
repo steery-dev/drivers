@@ -56,6 +56,9 @@ pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
     listings: Mutex<HashMap<PathBuf, Kept<Arc<[PathBuf]>>>>,
+    /// Every transcript the last `sessions/list` filed, by its id: none where it missed a
+    /// folder.
+    filing: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     heads: Mutex<HashMap<PathBuf, Kept<Head>>>,
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
     trees: Trees<Records>,
@@ -95,6 +98,7 @@ impl Store {
             root,
             named: Mutex::new(BTreeSet::new()),
             listings: Mutex::new(HashMap::new()),
+            filing: Mutex::new(BTreeMap::new()),
             heads: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
             trees: Trees::default(),
@@ -122,6 +126,11 @@ impl Store {
                 .get(id)
                 .is_some_and(|files| files.as_slice() == at)
         });
+        *lock(&self.filing) = if filed.complete {
+            filed.by_id.clone()
+        } else {
+            BTreeMap::new()
+        };
         for (id, files) in filed.by_id {
             let mut read = Vec::new();
             for file in files {
@@ -245,12 +254,19 @@ impl Store {
     }
 
     /// The one transcript conversation `id` is: of those filed under it, the one a person
-    /// is in.
+    /// is in. Those the last `sessions/list` filed while each is still there: the runtime
+    /// lists before it asks anything of each conversation in a sweep, so a second
+    /// transcript under the same id is seen at the next list. Else every folder is looked
+    /// in. Measured 2026-10-17 on a Mac with 795 transcripts in 118 folders: looking in
+    /// every folder was 3.5 ms of each `held`.
     fn find(&self, id: &str) -> Result<(PathBuf, Facts), Error> {
-        self.person(
-            id,
-            self.filed(Some(id)).by_id.remove(id).unwrap_or_default(),
-        )
+        let filed = lock(&self.filing)
+            .get(id)
+            .filter(|files| files.iter().all(|file| regular(file)))
+            .cloned();
+        let files =
+            filed.unwrap_or_else(|| self.filed(Some(id)).by_id.remove(id).unwrap_or_default());
+        self.person(id, files)
     }
 
     /// Of `files`, those filed under conversation `id`, the one a person is in.

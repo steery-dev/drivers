@@ -21,9 +21,9 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_driver_common::lines::{BATCH, Line, RECORD, capped, consumed, first_whole};
-use steery_driver_common::quiet::{Quiet, Stamp};
+use steery_driver_common::quiet::{Memo, Quiet, Stamp};
 use steery_sdk::wire::harness::{
-    Event, Events, List, Listed, Locate, Located, Read, Session, SubAgent,
+    Event, Events, List, Listed, Locate, Located, Read, Sample, Session, SubAgent,
 };
 use steery_sdk::{Error, refusal};
 
@@ -38,13 +38,17 @@ const DEPTH: usize = 8;
 const TASK: usize = 200;
 
 /// Codex's conversations here: its home, the rollouts its moments named, every rollout
-/// by the thread it is, each rollout's opening, and the reads that said nothing.
+/// by the thread it is, and the index the last `sessions/list` filed them by; each
+/// rollout's opening; the reads that said nothing, and where each thread's newest records
+/// say it stands.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
     index: Mutex<Option<Arc<Index>>>,
+    listed: Mutex<Option<Arc<Index>>>,
     heads: Mutex<HashMap<PathBuf, Kept>>,
     quiet: Quiet,
+    latest: Memo<String, Option<Sample>>,
 }
 
 /// Every rollout here, in the order the folders listed them, and the thread each is:
@@ -158,8 +162,10 @@ impl Store {
             root,
             named: Mutex::new(BTreeSet::new()),
             index: Mutex::new(None),
+            listed: Mutex::new(None),
             heads: Mutex::new(HashMap::new()),
             quiet: Quiet::default(),
+            latest: Memo::default(),
         }
     }
 
@@ -170,27 +176,24 @@ impl Store {
     /// `sessions/list`.
     pub fn list(&self, list: List) -> Listed {
         self.remember(&list.transcripts);
-        let threads = self.threads();
+        let index = self.index();
+        let threads = self.threads_in(&index);
         let mut complete = threads.complete;
         let mut excluded = Vec::new();
         let mut subs: BTreeMap<String, Vec<SubAgent>> = BTreeMap::new();
         let mut sessions = Vec::new();
-        // A read that said nothing is answered again only while the rollouts it stood on are
-        // still those its thread and its history's threads are filed at.
+        // An answer kept is given again only while the rollouts it stood on are still those
+        // its thread and its history's threads are filed at.
         self.quiet.keep(|external_id, sub_agent, at| {
-            let Some(filed) = threads.by_id.get(sub_agent.unwrap_or(external_id)) else {
-                return false;
-            };
-            let mut stood = Vec::new();
-            segments(
-                |thread| threads.by_id.get(thread).cloned().unwrap_or_default(),
-                newest(filed),
+            stood_at(
+                &threads,
+                sub_agent.unwrap_or(external_id),
                 sub_agent.is_none(),
-                &mut stood,
-            );
-            stood.extend(filed.iter().cloned());
-            paths(&stood) == at
+            )
+            .is_some_and(|stood| stood == at)
         });
+        self.latest
+            .keep(|id, at| stood_at(&threads, id, true).is_some_and(|stood| stood == at));
         for (id, filed) in &threads.by_id {
             let head = &newest(filed).head;
             if head.sub_agent() {
@@ -226,6 +229,8 @@ impl Store {
                 .is_none_or(|since| session.updated_at >= since)
         });
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
+        *self.listed.lock().unwrap_or_else(|e| e.into_inner()) =
+            (index.complete && threads.complete).then_some(index);
         Listed {
             sessions,
             excluded,
@@ -235,7 +240,7 @@ impl Store {
 
     /// `sessions/locate`.
     pub fn locate(&self, locate: Locate) -> Result<Located, Error> {
-        let threads = self.threads();
+        let threads = self.threads_in(&self.index());
         let filed = family_in(&threads, &locate.external_id)?;
         let head = &newest(filed).head;
         if head.sub_agent() || headless(head) {
@@ -290,9 +295,63 @@ impl Store {
                 whole,
             });
         }
-        let index = self.index();
+        let (events, stood) = self.reading(&read)?;
+        if let Some(cursor) = read.cursor.as_deref()
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+            && let Some((stands, filed)) = stood
+        {
+            self.quiet.said_nothing(
+                &read.external_id,
+                read.sub_agent.as_deref(),
+                stands,
+                filed,
+                cursor,
+                events.whole,
+            );
+        }
+        Ok(events)
+    }
+
+    /// What `says` makes of the events within `tail` bytes of the end of conversation
+    /// `id`'s history, kept as a quiet read is ([`Store::read`]) and made again only once
+    /// one of the rollouts it stood on changed. Measured 2026-10-17 on a Mac with 146
+    /// conversations: `idle` read each one's tail on every call, 7 ms a call, and a sweep
+    /// waited 1 s on them.
+    pub fn latest(
+        &self,
+        id: &str,
+        tail: u64,
+        says: impl FnOnce(&[Event]) -> Option<Sample>,
+    ) -> Result<Option<Sample>, Error> {
+        if let Some(said) = self.latest.get(id, |said| Some(said.clone())) {
+            return Ok(said);
+        }
+        let (events, stood) = self.reading(&Read {
+            external_id: id.to_owned(),
+            sub_agent: None,
+            cursor: None,
+            tail: Some(tail),
+        })?;
+        let said = says(&events.events);
+        if let Some((stands, filed)) = stood {
+            self.latest.put(id.to_owned(), stands, filed, said.clone());
+        }
+        Ok(said)
+    }
+
+    /// [`Store::read`] made: its events, and the rollouts they stood on, each stamped before
+    /// it was read, with those the conversation was filed at; none where one could not be
+    /// stamped.
+    #[allow(clippy::type_complexity)]
+    fn reading(
+        &self,
+        read: &Read,
+    ) -> Result<(Events, Option<(Vec<(PathBuf, Stamp)>, Vec<PathBuf>)>), Error> {
         let id = read.sub_agent.as_deref().unwrap_or(&read.external_id);
-        let filed = self.family(&index, id)?;
+        let (index, filed) = self.family_of(id)?;
         if let Some(agent) = &read.sub_agent {
             let head = &newest(&filed).head;
             if head.session_id.as_deref() != Some(read.external_id.as_str()) {
@@ -311,32 +370,59 @@ impl Store {
         );
         stood.extend(filed);
         let events = read_from(&segments, read.cursor.as_deref(), read.tail)?;
-        if let Some(cursor) = read.cursor.as_deref()
-            && events.cursor == cursor
-            && events.events.is_empty()
-            && !events.more
-            && !events.reset
-            && let Some(stands) = stood
-                .iter()
-                .map(|filed| Some((filed.file.clone(), filed.stamp?)))
-                .chain(
-                    index
-                        .unsettled
-                        .iter()
-                        .map(|(at, stamp)| Some((index.files[*at].clone(), (*stamp)?))),
-                )
-                .collect::<Option<Vec<_>>>()
+        let stands = stood
+            .iter()
+            .map(|filed| Some((filed.file.clone(), filed.stamp?)))
+            .chain(
+                index
+                    .unsettled
+                    .iter()
+                    .map(|(at, stamp)| Some((index.files[*at].clone(), (*stamp)?))),
+            )
+            .collect::<Option<Vec<_>>>();
+        Ok((events, stands.map(|stands| (stands, paths(&stood)))))
+    }
+
+    /// Every rollout of thread `id` and the index it was found in: the last list's, while
+    /// each rollout it files under `id` is still there and still that thread's, as the
+    /// runtime lists before it asks anything of each conversation in a sweep; else one as
+    /// the folders stand. Measured 2026-10-17 on a Mac with 915 rollouts in 45 folders:
+    /// stamping every folder was a fifth of each `idle`.
+    fn family_of(&self, id: &str) -> Result<(Arc<Index>, Vec<Filed>), Error> {
+        let listed = self
+            .listed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(index) = listed
+            && let Some(filed) = self.filed_as(&index, id)
         {
-            self.quiet.said_nothing(
-                &read.external_id,
-                read.sub_agent.as_deref(),
-                stands,
-                paths(&stood),
-                cursor,
-                events.whole,
-            );
+            return Ok((index, filed));
         }
-        Ok(events)
+        let index = self.index();
+        let filed = self.family(&index, id)?;
+        Ok((index, filed))
+    }
+
+    /// [`Store::family`] in `index`, where every rollout it files under `id` is still that
+    /// thread's; none where one is gone or another's, or `index` files none under `id`.
+    fn filed_as(&self, index: &Index, id: &str) -> Option<Vec<Filed>> {
+        let settled = index.by_id.get(id)?;
+        let mut at: Vec<(usize, bool)> = settled
+            .iter()
+            .map(|at| (*at, true))
+            .chain(index.unsettled.iter().map(|(at, _)| (*at, false)))
+            .collect();
+        at.sort_unstable();
+        let mut filed = Vec::new();
+        for (at, settled) in at {
+            match self.filed(&index.files[at]) {
+                Some(Some((thread, found))) if thread == id => filed.push(found),
+                _ if settled => return None,
+                _ => {}
+            }
+        }
+        Some(filed)
     }
 
     /// Every rollout of thread `id`, or why there is none.
@@ -367,7 +453,7 @@ impl Store {
 
     /// The newest rollout of a conversation, which a turn continues and a holder holds.
     pub fn current(&self, id: &str) -> Result<PathBuf, Error> {
-        let filed = self.family(&self.index(), id)?;
+        let (_, filed) = self.family_of(id)?;
         if !equally_current(&filed) {
             Ok(newest(&filed).file.clone())
         } else {
@@ -380,7 +466,7 @@ impl Store {
 
     /// The conversation's rollouts, oldest first.
     pub fn transcripts(&self, id: &str) -> Result<Vec<PathBuf>, Error> {
-        let mut filed = self.family(&self.index(), id)?;
+        let (_, mut filed) = self.family_of(id)?;
         filed.sort_by_key(|filed| filed.modified);
         Ok(filed.into_iter().map(|filed| filed.file).collect())
     }
@@ -401,9 +487,8 @@ impl Store {
         }
     }
 
-    /// Every rollout here, read for its opening.
-    fn threads(&self) -> Threads {
-        let index = self.index();
+    /// Every rollout `index` files, read for its opening.
+    fn threads_in(&self, index: &Index) -> Threads {
         let mut complete = index.complete;
         let mut by_id: BTreeMap<String, Vec<Filed>> = BTreeMap::new();
         for file in &index.files {
@@ -783,6 +868,22 @@ struct Segment {
     file: PathBuf,
     end: Option<u64>,
     fork: Option<(String, u64)>,
+}
+
+/// The rollouts a read of thread `id` stands on as `threads` files them: its own, and
+/// with `ancestry` those of every thread its history was taken from; none where `id` is
+/// not filed.
+fn stood_at(threads: &Threads, id: &str, ancestry: bool) -> Option<Vec<PathBuf>> {
+    let filed = threads.by_id.get(id)?;
+    let mut stood = Vec::new();
+    segments(
+        |thread| threads.by_id.get(thread).cloned().unwrap_or_default(),
+        newest(filed),
+        ancestry,
+        &mut stood,
+    );
+    stood.extend(filed.iter().cloned());
+    Some(paths(&stood))
 }
 
 /// The files of `stood`, in order, each once: what a read was filed at.
