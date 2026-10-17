@@ -153,11 +153,12 @@ const PROMPT_MS = 1500;
 const CALL_MS = 500;
 
 /**
- * How long a call to one of Steery's own tools waits for the runtime to have written down
- * which conversation makes it, where the MCP connection names none. The runtime answers a
- * moment once it has, and a call sent before that is made as nobody's: in the machine's
- * Personal workspace, where a read of this conversation's data is 404 or empty. Under a
- * busy runtime the answer was measured 1.3–6.5 s late on 2026-10-15.
+ * How long a call to one of Steery's own tools waits for the runtime to have written it
+ * down: which conversation makes it, where the MCP connection names none, and its place
+ * among the calls of its message. The runtime answers a moment once it has; a call sent
+ * before that is made as nobody's where no connection names it, in the machine's
+ * Personal workspace, and may be applied out of its order. Under a busy runtime the answer
+ * was measured 1.3–6.5 s late on 2026-10-15.
  */
 const STAMP_MS = 15_000;
 
@@ -4207,9 +4208,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       "PreToolUse",
       document(ctx, { tool_name: event.toolName, tool_use_id: event.toolCallId, tool_input: event.input ?? null }),
     );
-    // A call to Steery's own tools, where the MCP connection names no conversation, goes
-    // once the runtime wrote down whose it is: the runtime answers this moment only then.
-    if (tool !== undefined && !REGISTERS) {
+    // A call to Steery's own tools goes once the runtime wrote it down: the runtime
+    // answers this moment only then. Where the MCP connection names no conversation, that
+    // word says whose the call is. Everywhere, it says the order: pi sends one message's
+    // calls at once, each on its own request, and they reach the runtime in any order; it
+    // applies them in the order their words were written, which is the message's, as pi
+    // asks this handler about each call in turn before it sends any.
+    if (tool !== undefined) {
       await awaited(id, STAMP_MS);
       return undefined;
     }
