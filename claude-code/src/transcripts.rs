@@ -73,9 +73,8 @@ struct Filed {
     by_id: BTreeMap<String, Vec<PathBuf>>,
     /// Every folder was read whole.
     complete: bool,
-    /// Each `projects` folder and each folder in them, stamped before it was listed: none
-    /// where one could not be.
-    folders: Option<Vec<(PathBuf, Stamp)>>,
+    /// Each `projects` folder and each folder in them.
+    listed: Vec<PathBuf>,
 }
 
 /// What one transcript says of its conversation.
@@ -115,6 +114,14 @@ impl Store {
         let mut sessions = Vec::new();
         let mut excluded = Vec::new();
         let walked: HashSet<PathBuf> = filed.by_id.values().flatten().cloned().collect();
+        // A read that said nothing is answered again only while its conversation is still
+        // filed once, at the transcript it was read from.
+        self.quiet.keep(|id, _, at| {
+            filed
+                .by_id
+                .get(id)
+                .is_some_and(|files| files.as_slice() == at)
+        });
         for (id, files) in filed.by_id {
             let mut read = Vec::new();
             for file in files {
@@ -139,10 +146,8 @@ impl Store {
             }
         }
         lock(&self.heads).retain(|file, _| walked.contains(file));
-        if let Some(folders) = &filed.folders {
-            let listed: HashSet<&PathBuf> = folders.iter().map(|(folder, _)| folder).collect();
-            lock(&self.listings).retain(|folder, _| listed.contains(folder));
-        }
+        let listed: HashSet<&PathBuf> = filed.listed.iter().collect();
+        lock(&self.listings).retain(|folder, _| listed.contains(folder));
         lock(&self.agents).retain(|file, _| regular(file));
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
@@ -172,12 +177,11 @@ impl Store {
 
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
     /// same read that said nothing is answered again without finding or reading the
-    /// transcript ([`Quiet`]) while every file the answer stands on stands as it did: the
-    /// transcript read, the conversation's own where a sub-agent's is read (it decides
-    /// whether a person is in the conversation), and every folder transcripts are filed in
-    /// (a second transcript filed under the same id makes the conversation ambiguous). A
-    /// read from the end of a transcript reads no record, so nothing else, neither the
-    /// `subagents` folder nor the time, decides what it says.
+    /// transcript ([`Quiet`]) while the transcript read stands as it did, and the
+    /// conversation's own where a sub-agent's is read (it decides whether a person is in
+    /// the conversation); and while `sessions/list` still files the conversation once, at
+    /// the same transcript. A read from the end of a transcript reads no record, so
+    /// nothing else, neither the `subagents` folder nor the time, decides what it says.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
         if let Some(cursor) = read.cursor.as_deref()
             && let Some(whole) =
@@ -192,15 +196,8 @@ impl Store {
                 whole,
             });
         }
-        let Filed {
-            mut by_id, folders, ..
-        } = self.filed(Some(&read.external_id));
-        let (file, facts) = self.person(
-            &read.external_id,
-            by_id.remove(&read.external_id).unwrap_or_default(),
-        )?;
-        let mut stands = folders;
-        stand(&mut stands, &file, Some(facts.stamp));
+        let (file, facts) = self.find(&read.external_id)?;
+        let mut stands = vec![(file.clone(), facts.stamp)];
         let agents = file.with_extension("").join("subagents");
         let (file, own) = match &read.sub_agent {
             None => (file, false),
@@ -208,7 +205,7 @@ impl Store {
                 let path = agent_file(&agents, agent);
                 // A sub-agent's id becomes one component of a path: one, or nothing.
                 let stamp = agent_id(agent).then(|| Stamp::at(&path)).flatten();
-                if stamp.is_none() || !regular(&path) {
+                let Some(stamp) = stamp.filter(|_| regular(&path)) else {
                     return Err(Error::refused(
                         refusal::NOT_FOUND,
                         format!(
@@ -216,8 +213,8 @@ impl Store {
                             read.external_id
                         ),
                     ));
-                }
-                stand(&mut stands, &path, stamp);
+                };
+                stands.push((path.clone(), stamp));
                 (path, true)
             }
         };
@@ -228,16 +225,18 @@ impl Store {
             read.cursor.as_deref(),
             read.tail,
         )?;
-        if let (Some(cursor), Some(stands)) = (read.cursor.as_deref(), stands)
+        if let Some(cursor) = read.cursor.as_deref()
             && events.cursor == cursor
             && events.events.is_empty()
             && !events.more
             && !events.reset
         {
+            let filed = vec![stands[0].0.clone()];
             self.quiet.said_nothing(
                 &read.external_id,
                 read.sub_agent.as_deref(),
                 stands,
+                filed,
                 cursor,
                 events.whole,
             );
@@ -390,20 +389,14 @@ impl Store {
             .filter_map(Path::parent)
             .filter(|projects| projects.file_name().is_some_and(|name| name == "projects"))
             .filter_map(|projects| projects.canonicalize().ok());
-        let mut kept = lock(&self.named);
-        let before = kept.len();
-        kept.extend(folders);
-        // A folder looked in now could file a second transcript under an id read before.
-        if kept.len() > before {
-            self.quiet.forget();
-        }
+        lock(&self.named).extend(folders);
     }
 
     /// The folders conversations are filed in: each of `<root>/projects/*`, then each of
-    /// those of the `projects` folders Claude Code's moments named, each once, with every
-    /// `projects` folder stamped into `stands` before it is listed. A folder that is a link
-    /// is never read: it could name one anywhere.
-    fn folders(&self, stands: &mut Option<Vec<(PathBuf, Stamp)>>) -> (Vec<PathBuf>, bool) {
+    /// those of the `projects` folders Claude Code's moments named, each once, with each
+    /// `projects` folder kept in `listed`. A folder that is a link is never read: it could
+    /// name one anywhere.
+    fn folders(&self, listed: &mut Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
         let own = self.root.join("projects");
         let mut seen: BTreeSet<PathBuf> = own.canonicalize().into_iter().collect();
         let named: Vec<PathBuf> = lock(&self.named)
@@ -415,7 +408,6 @@ impl Store {
         let mut folders = Vec::new();
         for projects in std::iter::once(own).chain(named) {
             let stamp = Stamp::at(&projects);
-            stand(stands, &projects, stamp);
             match self.listing(&projects, stamp, |entry| {
                 entry.file_type().is_ok_and(|kind| kind.is_dir())
             }) {
@@ -426,6 +418,7 @@ impl Store {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => complete = false,
             }
+            listed.push(projects);
         }
         (folders, complete)
     }
@@ -433,14 +426,13 @@ impl Store {
     /// The transcripts filed in every folder, those of conversation `only` where it is
     /// given.
     fn filed(&self, only: Option<&str>) -> Filed {
-        let mut stands = Some(Vec::new());
-        let (folders, mut complete) = self.folders(&mut stands);
+        let mut listed = Vec::new();
+        let (folders, mut complete) = self.folders(&mut listed);
         let mut by_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-        for folder in folders {
-            let stamp = Stamp::at(&folder);
-            stand(&mut stands, &folder, stamp);
+        for folder in &folders {
+            let stamp = Stamp::at(folder);
             // A link is never read: it could name a file anywhere.
-            let Ok((files, whole)) = self.listing(&folder, stamp, |entry| {
+            let Ok((files, whole)) = self.listing(folder, stamp, |entry| {
                 entry.file_type().is_ok_and(|kind| kind.is_file())
                     && entry.path().extension().is_some_and(|ext| ext == "jsonl")
             }) else {
@@ -459,10 +451,11 @@ impl Store {
                 }
             }
         }
+        listed.extend(folders);
         Filed {
             by_id,
             complete,
-            folders: stands,
+            listed,
         }
     }
 
@@ -514,15 +507,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// Whether `path` is a regular file, not a link to one.
 fn regular(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
-}
-
-/// `file` as `stamp` says it stood, kept in `stands`; where it could not be stamped,
-/// `stands` is none: what a read stood on is not all known.
-fn stand(stands: &mut Option<Vec<(PathBuf, Stamp)>>, file: &Path, stamp: Option<Stamp>) {
-    match (stands.as_mut(), stamp) {
-        (Some(stood), Some(stamp)) => stood.push((file.to_owned(), stamp)),
-        _ => *stands = None,
-    }
 }
 
 /// What the head of a conversation's transcript says, and how far it has been read.

@@ -94,6 +94,14 @@ impl Store {
         let filed = self.filed();
         let mut complete = filed.complete;
         let mut sessions = Vec::new();
+        // A read that said nothing is answered again only while its conversation is still
+        // filed once, at the transcript it was read from.
+        self.quiet.keep(|id, _, at| {
+            filed
+                .by_id
+                .get(id)
+                .is_some_and(|files| files.as_slice() == at)
+        });
         for (id, files) in filed.by_id {
             // Two transcripts answering to one id name it ambiguously: neither is read.
             let [file] = files.as_slice() else {
@@ -136,9 +144,9 @@ impl Store {
     /// 2026-10-17 on a Mac with 411 omp conversations holding 600,000 records, past the
     /// trees' bound: a sweep's 938 reads took 5.5 s walked, 0.37 s answered so.
     ///
-    /// Only the transcript read is stamped: it stands for its conversation while it stands
-    /// as it did, and a second transcript filed under the same id later is seen once the
-    /// first one changes.
+    /// Only the transcript read is stamped; a second transcript filed under the same id is
+    /// seen at the next `sessions/list`, which lets go of a read no longer filed once
+    /// ([`Quiet::keep`]).
     pub fn read(&self, read: Read) -> Result<Events, Error> {
         if let Some(cursor) = read.cursor.as_deref()
             && let Some(whole) =
@@ -210,6 +218,7 @@ impl Store {
                 &read.external_id,
                 read.sub_agent.as_deref(),
                 vec![(reading.file.clone(), stamp)],
+                vec![lead],
                 cursor,
                 events.whole,
             );

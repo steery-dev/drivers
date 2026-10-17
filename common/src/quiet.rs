@@ -1,9 +1,11 @@
 //! Reads that said nothing new. The runtime reads every conversation and sub-agent on from
 //! its cursor on every sweep, and most of them nobody wrote to since: a read that said
-//! nothing says nothing again while every file its answer stands on stands as it did, so
-//! it is answered with one look at each of them, neither finding the transcript nor
-//! walking it. Which files those are is each driver's to say: its transcript, and whatever
-//! else decides which transcript it is or what it says.
+//! nothing says nothing again while every file its answer read stands as it did, and the
+//! driver's latest whole listing still files the conversation where it was then. So it is
+//! answered with one look at each of those files, neither finding the transcript nor
+//! walking it. Which files a read stands on and where a conversation is filed are each
+//! driver's to say; every `sessions/list` comes before the reads of its sweep, and says
+//! which reads are still filed as they were ([`Quiet::keep`]).
 
 use std::collections::HashMap;
 use std::fs::Metadata;
@@ -52,8 +54,8 @@ impl Stamp {
 }
 
 /// By conversation and sub-agent: the read that said nothing — the files its answer stood
-/// on and how each stood before it, the cursor it went on from and handed back, and
-/// whether it read the conversation whole.
+/// on and how each stood before it, the transcripts the conversation was filed at, the
+/// cursor it went on from and handed back, and whether it read the conversation whole.
 #[derive(Default)]
 pub struct Quiet {
     kept: Mutex<HashMap<(String, Option<String>), Said>>,
@@ -61,6 +63,7 @@ pub struct Quiet {
 
 struct Said {
     files: Vec<(PathBuf, Stamp)>,
+    filed: Vec<PathBuf>,
     cursor: String,
     whole: bool,
 }
@@ -82,12 +85,13 @@ impl Quiet {
 
     /// The read of `external_id` (`sub_agent`'s) on from `cursor` said nothing and handed
     /// `cursor` back: answered again so while each of `files` stands as stamped, each
-    /// stamped before the read.
+    /// stamped before the read, and the conversation stays filed at `filed`.
     pub fn said_nothing(
         &self,
         external_id: &str,
         sub_agent: Option<&str>,
         files: Vec<(PathBuf, Stamp)>,
+        filed: Vec<PathBuf>,
         cursor: &str,
         whole: bool,
     ) {
@@ -95,15 +99,19 @@ impl Quiet {
             (external_id.to_owned(), sub_agent.map(str::to_owned)),
             Said {
                 files,
+                filed,
                 cursor: cursor.to_owned(),
                 whole,
             },
         );
     }
 
-    /// Every read is made again: where conversations are looked for changed.
-    pub fn forget(&self) {
-        self.lock().clear();
+    /// Keep the reads whose conversation a whole listing still files where it was:
+    /// `still(external_id, sub_agent, filed)` for each. What is no longer filed is let go.
+    pub fn keep(&self, mut still: impl FnMut(&str, Option<&str>, &[PathBuf]) -> bool) {
+        self.lock().retain(|(external_id, sub_agent), said| {
+            still(external_id, sub_agent.as_deref(), &said.filed)
+        });
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<(String, Option<String>), Said>> {

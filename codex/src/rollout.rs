@@ -48,19 +48,21 @@ pub struct Store {
 }
 
 /// Every rollout here, in the order the folders listed them, and the thread each is:
-/// kept while every folder below `sessions` stands as stamped, so a call about one thread
-/// looks at that thread's rollouts alone. A rollout's thread is its first record's, which
-/// Codex never rewrites; one whose first record is not yet whole is looked at again on
-/// every call. Measured 2026-10-17 on a Mac with 915 rollouts: listing them all took
-/// 12 ms, and `held` did it three times.
+/// kept while every folder below `sessions`, and the folder of each rollout named outside
+/// it, stands as stamped, so a call about one thread looks at that thread's rollouts
+/// alone. A rollout's thread is its first record's, which Codex never rewrites; one whose
+/// first record is not yet whole is looked at again on every call, and the index is made
+/// again once it changed. Measured 2026-10-17 on a Mac with 915 rollouts: listing them all
+/// took 12 ms, and `held` did it three times.
 struct Index {
     files: Vec<PathBuf>,
     /// Each thread's rollouts, by where they are in `files`.
     by_id: HashMap<String, Vec<usize>>,
-    /// Rollouts whose thread is not known for good.
-    unsettled: Vec<usize>,
-    /// Each folder below `sessions`, stamped before it was listed: none where one could
-    /// not be, and the index is then made again on every call.
+    /// Rollouts whose thread is not known for good, by where they are in `files`, each as
+    /// it stood before it was read.
+    unsettled: Vec<(usize, Option<Stamp>)>,
+    /// Each folder rollouts were listed or named in, stamped before it was listed: none
+    /// where one could not be, and the index is then made again on every call.
     folders: Option<Vec<(PathBuf, Stamp)>>,
     /// Every folder was read whole.
     complete: bool,
@@ -173,6 +175,22 @@ impl Store {
         let mut excluded = Vec::new();
         let mut subs: BTreeMap<String, Vec<SubAgent>> = BTreeMap::new();
         let mut sessions = Vec::new();
+        // A read that said nothing is answered again only while the rollouts it stood on are
+        // still those its thread and its history's threads are filed at.
+        self.quiet.keep(|external_id, sub_agent, at| {
+            let Some(filed) = threads.by_id.get(sub_agent.unwrap_or(external_id)) else {
+                return false;
+            };
+            let mut stood = Vec::new();
+            segments(
+                |thread| threads.by_id.get(thread).cloned().unwrap_or_default(),
+                newest(filed),
+                sub_agent.is_none(),
+                &mut stood,
+            );
+            stood.extend(filed.iter().cloned());
+            paths(&stood) == at
+        });
         for (id, filed) in &threads.by_id {
             let head = &newest(filed).head;
             if head.sub_agent() {
@@ -252,11 +270,12 @@ impl Store {
     /// took it, and a `fork` event marks where its own begins.
     ///
     /// The same read that said nothing is answered again without listing or reading a
-    /// rollout ([`Quiet`]) while every file the answer stands on stands as it did: each
+    /// rollout ([`Quiet`]) while every rollout the answer stands on stands as it did: each
     /// rollout of the thread (the newest is the one read, and says whose sub-agent it is),
-    /// each rollout of every thread its history was taken from, and every folder below
-    /// `sessions` (a rollout added anywhere could be a new shard of the thread, or the
-    /// parent its history names). Nothing else, the time included, decides what it says.
+    /// each rollout of every thread its history was taken from, and each rollout whose
+    /// thread is not yet known; and while `sessions/list` still files the thread and its
+    /// history's threads at those rollouts, so a shard or a fork parent added anywhere lets
+    /// it go. Nothing else, the time included, decides what it says.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
         if let Some(cursor) = read.cursor.as_deref()
             && let Some(whole) =
@@ -283,31 +302,36 @@ impl Store {
                 ));
             }
         }
-        let mut families = Vec::new();
+        let mut stood = Vec::new();
         let segments = segments(
             |thread| self.family(&index, thread).unwrap_or_default(),
             newest(&filed),
             read.sub_agent.is_none(),
-            &mut families,
+            &mut stood,
         );
-        families.push(filed);
+        stood.extend(filed);
         let events = read_from(&segments, read.cursor.as_deref(), read.tail)?;
         if let Some(cursor) = read.cursor.as_deref()
             && events.cursor == cursor
             && events.events.is_empty()
             && !events.more
             && !events.reset
-            && let Some(stands) = index.folders.clone().and_then(|mut stands| {
-                for filed in families.into_iter().flatten() {
-                    stands.push((filed.file.clone(), filed.stamp?));
-                }
-                Some(stands)
-            })
+            && let Some(stands) = stood
+                .iter()
+                .map(|filed| Some((filed.file.clone(), filed.stamp?)))
+                .chain(
+                    index
+                        .unsettled
+                        .iter()
+                        .map(|(at, stamp)| Some((index.files[*at].clone(), (*stamp)?))),
+                )
+                .collect::<Option<Vec<_>>>()
         {
             self.quiet.said_nothing(
                 &read.external_id,
                 read.sub_agent.as_deref(),
                 stands,
+                paths(&stood),
                 cursor,
                 events.whole,
             );
@@ -322,7 +346,7 @@ impl Store {
             .get(id)
             .into_iter()
             .flatten()
-            .chain(&index.unsettled)
+            .chain(index.unsettled.iter().map(|(at, _)| at))
             .copied()
             .collect();
         at.sort_unstable();
@@ -374,7 +398,6 @@ impl Store {
         if kept.len() > before {
             drop(kept);
             *self.index.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            self.quiet.forget();
         }
     }
 
@@ -402,6 +425,10 @@ impl Store {
                     .iter()
                     .all(|(folder, stamp)| Stamp::at(folder) == Some(*stamp))
             })
+            && index
+                .unsettled
+                .iter()
+                .all(|(at, stamp)| Stamp::at(&index.files[*at]) == *stamp)
         {
             return index.clone();
         }
@@ -423,15 +450,29 @@ impl Store {
         if !named.is_empty() {
             let own: BTreeSet<PathBuf> =
                 files.iter().filter_map(|f| f.canonicalize().ok()).collect();
-            files.extend(named.into_iter().filter(|file| !own.contains(file)));
+            for file in named.into_iter().filter(|file| !own.contains(file)) {
+                // Its folder says when it is replaced, or once gone, back.
+                if let Some(folder) = file.parent()
+                    && folders
+                        .as_ref()
+                        .is_some_and(|stood| stood.iter().all(|(listed, _)| listed != folder))
+                {
+                    match (folders.as_mut(), Stamp::at(folder)) {
+                        (Some(stood), Some(stamp)) => stood.push((folder.to_owned(), stamp)),
+                        _ => folders = None,
+                    }
+                }
+                files.push(file);
+            }
         }
         let mut by_id: HashMap<String, Vec<usize>> = HashMap::new();
         let mut unsettled = Vec::new();
         for (at, file) in files.iter().enumerate() {
             match self.filed(file) {
                 Some(Some((id, filed))) if filed.settled => by_id.entry(id).or_default().push(at),
-                Some(None) => {}
-                _ => unsettled.push(at),
+                Some(Some((_, filed))) => unsettled.push((at, filed.stamp)),
+                // Gone, or no rollout: one put there later changes its folder.
+                Some(None) | None => {}
             }
         }
         let listed: HashSet<&PathBuf> = files.iter().collect();
@@ -744,15 +785,23 @@ struct Segment {
     fork: Option<(String, u64)>,
 }
 
+/// The files of `stood`, in order, each once: what a read was filed at.
+fn paths(stood: &[Filed]) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = stood.iter().map(|filed| filed.file.clone()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
 /// The stretches a thread's history is read from, oldest first: the rollouts its
 /// `history_base` names, each cut where it was taken, then its own. With `ancestry`
 /// false a fork's parent is not read (a sub-agent's own work). Every rollout of each
-/// thread it was taken from, as `family` finds them, joins `families`.
+/// thread it was taken from, as `family` finds them, joins `stood`.
 fn segments(
     family: impl Fn(&str) -> Vec<Filed>,
     current: &Filed,
     ancestry: bool,
-    families: &mut Vec<Vec<Filed>>,
+    stood: &mut Vec<Filed>,
 ) -> Vec<Segment> {
     let mut chain = vec![Segment {
         file: current.file.clone(),
@@ -777,7 +826,7 @@ fn segments(
             .or_else(|| filed.iter().find(|filed| filed.file != at.file))
             .cloned();
         if forked {
-            families.push(filed);
+            stood.extend(filed);
         }
         let Some(base) = base else {
             break;
