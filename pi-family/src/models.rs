@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,6 +15,7 @@ use steery_driver_common::program::helper;
 use steery_sdk::wire::harness::{Model, Models};
 use steery_sdk::{Error, refusal};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+use tokio::sync::watch;
 
 use crate::harness::Harness;
 
@@ -22,7 +23,7 @@ use crate::harness::Harness;
 /// started and was swapping.
 const LISTED_WITHIN: Duration = Duration::from_secs(25);
 /// How long a `start` waits to learn whether omp lists the model it was told to run, where
-/// no catalog it listed before names it.
+/// no catalog it listed before names it: inside `start`'s 10 s, with room to answer.
 const A_TURN_WAITS: Duration = Duration::from_secs(8);
 /// pi's thinking levels, lowest first.
 const PI_THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -31,20 +32,38 @@ const PI_THINKING: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhig
 pub const PI_SETTINGS: &str =
     r#"{"extensions":["-builtin:mcp","-builtin:codemode","-builtin:tool-search"]}"#;
 
-/// The catalog as the harness listed it last.
+/// The catalog as the harness listed it last, and the ask of it in flight: one per driver,
+/// shared by every call.
+#[derive(Default, Clone)]
+pub struct Catalog(Arc<Kept>);
+
 #[derive(Default)]
-pub struct Catalog {
-    kept: Mutex<Option<Vec<Model>>>,
+struct Kept {
+    listed: Mutex<Option<Vec<Model>>>,
+    asking: Mutex<Option<Asking>>,
 }
 
+/// An ask of the harness's list: `None` while it runs, then what it gave.
+type Asking = watch::Receiver<Option<Result<Vec<Model>, String>>>;
+
 impl Catalog {
+    /// Ask omp for its list as the driver starts, so a `start` right after finds it. A
+    /// driver the runtime started again had none: the runtime keeps its own list and asks
+    /// only after 10 minutes, so each start with a pick ran `omp models` itself within 8 s,
+    /// which a Mac under builds missed (2026-10-15 18:10, 13.6 s; 10-14 09:30, over 25 s).
+    pub fn warm(&self, harness: Harness, root: &Path) {
+        if harness == Harness::Omp {
+            drop(self.asking(harness, root, false));
+        }
+    }
+
     /// `models`: every model the harness has a sign-in for, as it lists them, the default
     /// first, and the files whose change changes the list. `no-binary` where the harness
-    /// is not here; a list it will not give is refused with why.
+    /// is not here; a list it will not give is refused with why. Always asked afresh: the
+    /// runtime asks when what decides the list changed.
     pub async fn list(&self, harness: Harness, home: &Path, root: &Path) -> Result<Models, Error> {
         harness.need_binary()?;
-        let models = self
-            .ask(harness, root, LISTED_WITHIN)
+        let models = answer(self.asking(harness, root, true))
             .await
             .map_err(|why| Error::refused(refusal::REFUSED, why))?;
         Ok(Models {
@@ -66,51 +85,89 @@ impl Catalog {
     /// as long as the runtime keeps a list before asking again — and `omp models` then
     /// took over 8 s on a busy Mac, so a resume and each of its Retries failed "omp did not
     /// list its models within 8 s" (2026-10-13 and 10-14, on two members' Macs).
+    ///
+    /// The ask joins one in flight, and a start that stops waiting leaves it running: a
+    /// slow `omp models` killed with each start never finished, so no Retry could pass.
     pub async fn lists(&self, root: &Path, model: &str) -> Result<bool, String> {
         let named = |models: &[Model]| models.iter().any(|offer| offer.model == model);
-        {
-            let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
-            if kept.as_deref().is_some_and(named) {
-                return Ok(true);
-            }
+        if self.listed().as_deref().is_some_and(named) {
+            return Ok(true);
         }
-        Ok(named(&self.ask(Harness::Omp, root, A_TURN_WAITS).await?))
+        let asked = answer(self.asking(Harness::Omp, root, false));
+        let models = tokio::time::timeout(A_TURN_WAITS, asked)
+            .await
+            .map_err(|_| {
+                format!(
+                    "omp did not list its models within {} s",
+                    A_TURN_WAITS.as_secs()
+                )
+            })??;
+        Ok(named(&models))
     }
 
-    async fn ask(
-        &self,
-        harness: Harness,
-        root: &Path,
-        within: Duration,
-    ) -> Result<Vec<Model>, String> {
-        let binary = harness
-            .binary()
-            .ok_or_else(|| format!("{} is not installed here", harness.id()))?;
-        let models = match harness {
-            Harness::Omp => {
-                let mut models = omp_offers(&said(&binary, &["models", "--json"], within).await?)?;
-                if let Some(default) = omp_default(root, &models)
-                    && let Some(at) = models.iter().position(|offer| offer.model == default)
-                {
-                    let offer = models.remove(at);
-                    models.insert(0, offer);
-                }
-                models
-            }
-            Harness::Pi => {
-                let (rows, defined) = tokio::join!(
-                    async {
-                        let printed = said(&binary, &["--list-models"], within).await?;
-                        Ok::<_, String>(pi_rows(&String::from_utf8_lossy(&printed)))
-                    },
-                    pi_catalog(&binary, within),
-                );
-                pi_joined(rows?, defined?)?
-            }
-        };
-        *self.kept.lock().unwrap_or_else(|e| e.into_inner()) = Some(models.clone());
-        Ok(models)
+    fn listed(&self) -> std::sync::MutexGuard<'_, Option<Vec<Model>>> {
+        self.0.listed.lock().unwrap_or_else(|e| e.into_inner())
     }
+
+    /// The ask in flight, or a new one where none runs or `afresh`. It runs apart from
+    /// whoever waits on it, within [`LISTED_WITHIN`], and a list it gives is kept.
+    fn asking(&self, harness: Harness, root: &Path, afresh: bool) -> Asking {
+        let mut asking = self.0.asking.lock().unwrap_or_else(|e| e.into_inner());
+        if !afresh
+            && let Some(running) = asking.as_ref().filter(|asked| asked.borrow().is_none())
+        {
+            return running.clone();
+        }
+        let (give, asked) = watch::channel(None);
+        let catalog = self.clone();
+        let root = root.to_owned();
+        tokio::spawn(async move {
+            let models = ask(harness, &root).await;
+            if let Ok(models) = &models {
+                *catalog.listed() = Some(models.clone());
+            }
+            give.send_replace(Some(models));
+        });
+        *asking = Some(asked.clone());
+        asked
+    }
+}
+
+/// What `asked` gives once it is done.
+async fn answer(mut asked: Asking) -> Result<Vec<Model>, String> {
+    let ended = || "the models ask ended without an answer".to_owned();
+    let given = Option::clone(&*asked.wait_for(Option::is_some).await.map_err(|_| ended())?);
+    given.unwrap_or_else(|| Err(ended()))
+}
+
+/// The harness's list as it gives it now, within [`LISTED_WITHIN`].
+async fn ask(harness: Harness, root: &Path) -> Result<Vec<Model>, String> {
+    let binary = harness
+        .binary()
+        .ok_or_else(|| format!("{} is not installed here", harness.id()))?;
+    Ok(match harness {
+        Harness::Omp => {
+            let mut models =
+                omp_offers(&said(&binary, &["models", "--json"], LISTED_WITHIN).await?)?;
+            if let Some(default) = omp_default(root, &models)
+                && let Some(at) = models.iter().position(|offer| offer.model == default)
+            {
+                let offer = models.remove(at);
+                models.insert(0, offer);
+            }
+            models
+        }
+        Harness::Pi => {
+            let (rows, defined) = tokio::join!(
+                async {
+                    let printed = said(&binary, &["--list-models"], LISTED_WITHIN).await?;
+                    Ok::<_, String>(pi_rows(&String::from_utf8_lossy(&printed)))
+                },
+                pi_catalog(&binary, LISTED_WITHIN),
+            );
+            pi_joined(rows?, defined?)?
+        }
+    })
 }
 
 /// What the harness prints on standard output for `args`, within `within`; an error
