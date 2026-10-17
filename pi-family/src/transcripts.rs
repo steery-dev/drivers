@@ -26,6 +26,7 @@ use steery_sdk::{Error, refusal};
 
 use crate::Harness;
 use crate::events::{self, Reading, millis, text};
+use crate::quiet::{Quiet, Stamp};
 use crate::tree::Entries;
 
 /// How deep sub-agents are filed below their conversation's folder: a sub-agent's, the
@@ -50,6 +51,7 @@ pub struct Store {
     chosen: Option<PathBuf>,
     named: Mutex<BTreeSet<PathBuf>>,
     trees: Trees<Entries>,
+    quiet: Quiet,
     titles: Titles,
     starts: Starts,
     listings: Listings,
@@ -71,6 +73,7 @@ impl Store {
             chosen,
             named: Mutex::new(BTreeSet::new()),
             trees: Trees::default(),
+            quiet: Quiet::default(),
             titles: Titles::default(),
             starts: Starts::default(),
             listings: Listings::default(),
@@ -127,18 +130,16 @@ impl Store {
         Ok(Located { session })
     }
 
-    /// `sessions/read`: the events of a conversation, or of one of its sub-agents.
+    /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
+    /// same read of a transcript that said nothing and still stands as it did is answered
+    /// again unread ([`Quiet`]).
     pub fn read(&self, read: Read) -> Result<Events, Error> {
-        let file = self.find(&read.external_id)?;
-        let head = head(&file);
-        let (file, fork) = match &read.sub_agent {
-            None => {
-                let fork = parent(&read.external_id, &head).zip(head.created_at);
-                (file, fork)
-            }
+        let lead = self.find(&read.external_id)?;
+        let file = match &read.sub_agent {
+            None => lead.clone(),
             Some(agent) => {
                 let found = self
-                    .sub_agents(&file)
+                    .sub_agents(&lead)
                     .into_iter()
                     .find(|found| {
                         found.external_id == *agent || found.name.as_deref() == Some(agent)
@@ -153,8 +154,25 @@ impl Store {
                             ),
                         )
                     })?;
-                (found.transcripts.into_iter().next().unwrap_or(file), None)
+                found.transcripts.into_iter().next().unwrap_or(lead.clone())
             }
+        };
+        let stamp = Stamp::at(&file);
+        if let (Some(cursor), Some(stamp)) = (read.cursor.as_deref(), stamp)
+            && let Some(whole) = self.quiet.again(&file, stamp, cursor)
+        {
+            return Ok(Events {
+                cursor: cursor.to_owned(),
+                events: Vec::new(),
+                more: false,
+                reset: false,
+                whole,
+            });
+        }
+        let head = head(&lead);
+        let fork = match read.sub_agent {
+            None => parent(&read.external_id, &head).zip(head.created_at),
+            Some(_) => None,
         };
         let reading = Reading {
             harness: self.harness,
@@ -164,7 +182,26 @@ impl Store {
             fork,
             file,
         };
-        read_from(&self.trees, &reading, read.cursor.as_deref(), read.tail)
+        let events = read_from(
+            &self.trees,
+            &reading,
+            stamp,
+            read.cursor.as_deref(),
+            read.tail,
+        )?;
+        // Only a transcript still for `SETTLE` says the same again: before that, a failure
+        // held back is decided by time alone.
+        if let (Some(cursor), Some(stamp)) = (read.cursor.as_deref(), stamp)
+            && still(stamp)
+            && events.cursor == cursor
+            && events.events.is_empty()
+            && !events.more
+            && !events.reset
+        {
+            self.quiet
+                .said_nothing(&reading.file, stamp, cursor, events.whole);
+        }
+        Ok(events)
     }
 
     /// The one transcript of conversation `id`.
@@ -863,15 +900,12 @@ fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
 fn read_from(
     trees: &Trees<Entries>,
     reading: &Reading,
+    stamp: Option<Stamp>,
     cursor: Option<&str>,
     tail: Option<u64>,
 ) -> Result<Events, Error> {
     let given = cursor.map(parse_cursor).transpose()?;
-    let still = std::fs::metadata(&reading.file)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|at| SystemTime::now().duration_since(at).ok())
-        .is_some_and(|still| still >= events::SETTLE);
+    let still = stamp.is_some_and(still);
     trees
         .walk(&reading.file, Entries::default(), |walk| {
             let path = walk.tree.path()?;
@@ -922,6 +956,13 @@ fn read_from(
             })
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))
+}
+
+/// Whether the transcript stamped `stamp` stood still for [`events::SETTLE`].
+fn still(stamp: Stamp) -> bool {
+    SystemTime::now()
+        .duration_since(stamp.modified())
+        .is_ok_and(|still| still >= events::SETTLE)
 }
 
 #[cfg(test)]

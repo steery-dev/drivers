@@ -13,6 +13,7 @@ mod events;
 mod harness;
 mod hooks;
 mod models;
+mod quiet;
 mod setup;
 mod transcripts;
 mod tree;
