@@ -20,13 +20,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use steery_driver_common::follow::Followed;
 use steery_driver_common::lines::{Line, RECORD, capped};
+use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
 use crate::Harness;
 use crate::events::{self, Reading, millis, text};
-use crate::quiet::{Quiet, Stamp};
 use crate::tree::Entries;
 
 /// How deep sub-agents are filed below their conversation's folder: a sub-agent's, the
@@ -132,7 +132,13 @@ impl Store {
 
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents. The
     /// same read that said nothing, of a transcript that still stands as it did, is
-    /// answered again without finding or reading the transcript ([`Quiet`]).
+    /// answered again without finding or reading the transcript ([`Quiet`]). Measured
+    /// 2026-10-17 on a Mac with 411 omp conversations holding 600,000 records, past the
+    /// trees' bound: a sweep's 938 reads took 5.5 s walked, 0.37 s answered so.
+    ///
+    /// Only the transcript read is stamped: it stands for its conversation while it stands
+    /// as it did, and a second transcript filed under the same id later is seen once the
+    /// first one changes.
     pub fn read(&self, read: Read) -> Result<Events, Error> {
         if let Some(cursor) = read.cursor.as_deref()
             && let Some(whole) =
@@ -203,8 +209,7 @@ impl Store {
             self.quiet.said_nothing(
                 &read.external_id,
                 read.sub_agent.as_deref(),
-                &reading.file,
-                stamp,
+                vec![(reading.file.clone(), stamp)],
                 cursor,
                 events.whole,
             );
