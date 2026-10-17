@@ -229,7 +229,7 @@ and `recap` instead. One whose moments are hook commands answers `hook/answer` t
 
 ### The plugin
 
-`pi-family/plugin/extension.ts` speaks the plugin door, version 2. It draws nothing in the
+`pi-family/plugin/extension.ts` speaks the plugin door, version 1. It draws nothing in the
 harness and takes no answer there. `loader.ts` is the file the harness loads: it runs the
 copy of the extension the runtime's config folder names, and moves every session onto a
 newer copy once one is named. Typecheck them against pi's published types:

@@ -7,7 +7,7 @@
 // it is stopped, and the next takes the session up where it stood ([`Carried`]).
 //
 // Each conversation's copy opens one door: a WebSocket to this machine's runtime on its
-// loopback listener, speaking the plugin door, version 2 (PROTOCOL.md §4.4). Over it the
+// loopback listener, speaking the plugin door, version 1 (PROTOCOL.md §4.4). Over it the
 // copy says what the conversation is doing as it changes (`state`, a LiveState) and the
 // harness's moments as they happen (`moment`, the hook document the driver's `hook/read`
 // reads); at each turn the person starts the runtime answers the one paragraph Steery has
@@ -36,7 +36,7 @@ const O_CLOEXEC = process.platform === "darwin" ? 0x1000000 : 0o2000000;
 const HARNESS: string = "__STEERY_HARNESS__";
 
 /** The plugin door version this copy speaks (PROTOCOL.md §4.4). */
-const DOOR_VERSION = 2;
+const DOOR_VERSION = 1;
 
 /** The runtime's door. */
 const DOOR: string = "__STEERY_DOOR__";
