@@ -1568,7 +1568,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * they are of, the id of the last one sent (the runtime's `after` at first), how many of
    * the harness's entries that was, and whether a send runs or should run again.
    */
-  let stream: { session: string; after: string | undefined; sent: number; sending: boolean; again: boolean } | undefined;
+  let stream:
+    | { session: string; after: string | undefined; sent: number; sending: boolean; again: boolean; opened: boolean }
+    | undefined;
   let entriesTimer: NodeJS.Timeout | undefined;
 
   const send = (frame: Frame): boolean => {
@@ -1788,7 +1790,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       }
       if (records.length === 0) {
         one.sent = from;
-        return;
+        break;
       }
       const after = one.after === undefined ? "" : `"after":${JSON.stringify(one.after)},`;
       if (stream !== one || door?.readyState !== 1) return;
@@ -1799,10 +1801,22 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       }
       one.after = last;
       one.sent = from;
+      one.opened = true;
       const { promise, resolve } = Promise.withResolvers<void>();
       setTimeout(resolve, 0);
       await promise;
       if (stream !== one) return;
+    }
+    // A connection's first frame says the feed is open even where nothing is new since
+    // `welcome.entries.after`: the runtime reads silence as a copy that sends no entries.
+    if (!one.opened && stream === one && door?.readyState === 1) {
+      const after = one.after === undefined ? "" : `"after":${JSON.stringify(one.after)},`;
+      try {
+        door.send(`{"t":"entries",${after}"records":[]}`);
+        one.opened = true;
+      } catch {
+        // The drop that follows ends this connection's feed.
+      }
     }
   };
 
@@ -1873,7 +1887,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const ctx = live;
     if (ctx && entries && typeof entries === "object") {
       const after = "after" in entries && typeof entries.after === "string" ? entries.after : undefined;
-      stream = { session: ctx.sessionManager.getSessionId(), after, sent: 0, sending: false, again: false };
+      stream = { session: ctx.sessionManager.getSessionId(), after, sent: 0, sending: false, again: false, opened: false };
       void sendEntries();
     }
   };
