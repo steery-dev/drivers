@@ -913,7 +913,8 @@ fn refused(said: &str) -> &'static str {
 pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let codex = binary()?;
     let known = features(&codex).await?;
-    let servers = servers(&codex, &reader.cwd).await?;
+    let off: Vec<&str> = taken(reader.tools, &known).collect();
+    let servers = servers(&codex, &reader.cwd, &off).await?;
     planned(&codex, &known, &servers, reader)
 }
 
@@ -941,16 +942,9 @@ fn planned(
         argv.push("-c".into());
         argv.push(format!("mcp_servers.{server}.enabled=false"));
     }
-    let taken = match reader.tools {
-        ReaderTools::None => TAKEN,
-        ReaderTools::Read => LOOK_TAKEN,
-    };
-    for feature in taken
-        .iter()
-        .filter(|feature| known.iter().any(|known| known == *feature))
-    {
+    for feature in taken(reader.tools, known) {
         argv.push("--disable".into());
-        argv.push((*feature).into());
+        argv.push(feature.into());
     }
     if let Some(system) = &reader.system {
         argv.push("-c".into());
@@ -981,13 +975,29 @@ fn planned(
     })
 }
 
-/// The MCP servers Codex would reach from `cwd`, as `codex mcp list --json` names them:
-/// each is turned off for the read, since `-c mcp_servers={}` merges into them rather than
-/// replacing them (Codex 0.162). A name a dotted override cannot spell is refused.
-async fn servers(codex: &Path, cwd: &Path) -> Result<Vec<String>, Error> {
+/// The features a reader with `tools` takes away, of those this Codex knows.
+fn taken(tools: ReaderTools, known: &[String]) -> impl Iterator<Item = &'static str> + '_ {
+    let taken = match tools {
+        ReaderTools::None => TAKEN,
+        ReaderTools::Read => LOOK_TAKEN,
+    };
+    taken
+        .iter()
+        .copied()
+        .filter(|feature| known.iter().any(|known| known == feature))
+}
+
+/// The MCP servers the read would reach from `cwd` with the features `off` taken away, as
+/// `codex mcp list --json` names them: each is turned off for the read, since
+/// `-c mcp_servers={}` merges into them rather than replacing them (Codex 0.163). Listed
+/// without `off`, it would name a plugin's servers, which `--disable plugins` already
+/// drops, and whose override alone is no server (`invalid transport`). A name a dotted
+/// override cannot spell is refused.
+async fn servers(codex: &Path, cwd: &Path, off: &[&str]) -> Result<Vec<String>, Error> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         steery_driver_common::program::helper(codex)
+            .args(off.iter().flat_map(|feature| ["--disable", *feature]))
             .args(["mcp", "list", "--json"])
             .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
