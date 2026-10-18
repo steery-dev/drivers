@@ -582,10 +582,10 @@ fn quoted(word: &str) -> String {
 }
 
 /// `reader`: `claude --print`, the words on standard input, on the model given, else the
-/// one this machine chose in Claude Code's settings, with nothing of the machine's
-/// own: `--tools ""` disables every built-in tool (or `Read,Glob,Grep` for a reader that
-/// looks, with `--permission-prompts none` refusing whatever would stop to ask),
-/// `--strict-mcp-config` with an empty `--mcp-config` leaves no MCP server to reach,
+/// one this machine chose in Claude Code's settings, at the `--effort` given, with nothing
+/// of the machine's own: `--tools ""` disables every built-in tool (or `Read,Glob,Grep`
+/// for a reader that looks, with `--permission-prompts none` refusing whatever would stop
+/// to ask), `--strict-mcp-config` with an empty `--mcp-config` leaves no MCP server to reach,
 /// `--safe-mode` drops memory files, skills, plugins, hooks — Steery's own among them,
 /// so the run is never seen as a conversation — commands and agents, and
 /// `--no-session-persistence` leaves nothing behind. The answer is the whole output.
@@ -594,6 +594,14 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     if !reader.cwd.is_absolute() {
         return Err(Error::invalid("the reader's folder is no absolute path"));
+    }
+    if let Some(thinking) = &reader.thinking
+        && !EFFORT.contains(&thinking.as_str())
+    {
+        return Err(Error::refused(
+            refusal::SELECTION_UNSUPPORTED,
+            format!("Claude Code takes no effort {thinking}"),
+        ));
     }
     let mut argv: Vec<String> = vec![
         binary
@@ -606,6 +614,9 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     ];
     if let Some(model) = reader.model {
         argv.extend(["--model".into(), model]);
+    }
+    if let Some(thinking) = reader.thinking {
+        argv.extend(["--effort".into(), thinking]);
     }
     if let Some(system) = reader.system {
         argv.extend(["--system-prompt".into(), system]);
@@ -793,6 +804,7 @@ mod tests {
             let plan = reader(Reader {
                 system: Some("read".into()),
                 model: Some("claude-haiku-4-5".into()),
+                thinking: Some("low".into()),
                 tools,
                 cwd: PathBuf::from("/tmp"),
                 asked: "q".into(),
@@ -807,6 +819,7 @@ mod tests {
                 "--safe-mode",
                 "--no-session-persistence",
                 "--system-prompt",
+                "--effort",
             ] {
                 assert!(args.iter().any(|arg| arg == expected), "missing {expected}");
             }

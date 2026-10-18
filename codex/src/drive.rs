@@ -907,8 +907,9 @@ fn refused(said: &str) -> &'static str {
 /// `read-only` sandbox, which is how Codex reads files. `config.toml` is kept: it holds
 /// the person's provider and model, and dropping it sends Codex to an API key a person
 /// signed in through ChatGPT never set. The instructions go in as
-/// `developer_instructions`. Codex refuses a feature it does not know, so only those its
-/// own `codex features list` names are taken away.
+/// `developer_instructions`, the thinking level as `model_reasoning_effort`. Codex refuses
+/// a feature it does not know, so only those its own `codex features list` names are
+/// taken away.
 pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let codex = binary()?;
     let known = features(&codex).await?;
@@ -961,6 +962,13 @@ fn planned(
     if let Some(model) = reader.model.as_deref().filter(|model| !model.is_empty()) {
         argv.push("--model".into());
         argv.push(model.into());
+    }
+    if let Some(effort) = &reader.thinking {
+        argv.push("-c".into());
+        argv.push(format!(
+            "model_reasoning_effort={}",
+            serde_json::to_string(effort).map_err(|e| Error::invalid(e.to_string()))?
+        ));
     }
     argv.push("-".into());
     Ok(ReaderPlan {
@@ -1218,6 +1226,7 @@ mod tests {
         Reader {
             system: Some("you read".into()),
             model: model.map(str::to_owned),
+            thinking: None,
             tools,
             cwd: PathBuf::from("/tmp/steery-read"),
             asked: "q".into(),
