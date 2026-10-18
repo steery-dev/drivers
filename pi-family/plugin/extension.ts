@@ -10,8 +10,10 @@
 // loopback listener, speaking the plugin door, version 1 (PROTOCOL.md §4.4). Over it the
 // copy says what the conversation is doing as it changes (`state`, a LiveState) and the
 // harness's moments as they happen (`moment`, the hook document the driver's `hook/read`
-// reads); at each turn the person starts the runtime answers the one paragraph Steery has
-// for its agent (`say`), and at a turn's end (`settle`) the words that keep it going. In a
+// reads), and, where the runtime asks, the session's entries as the harness appends them
+// (`entries`, which the driver's `sessions/fold` reads); at each turn the person starts
+// the runtime answers the one paragraph Steery has for its agent (`say`), and at a turn's
+// end (`settle`) the words that keep it going. In a
 // conversation Steery started, the runtime asks the copy over the same door to hand words
 // to it (`say`), switch its model (`pick`), stop a turn (`stop`), recap it (`recap`) and
 // compact it (`compact`). The copy draws nothing in the harness and takes no answer there:
@@ -37,6 +39,15 @@ const HARNESS: string = "__STEERY_HARNESS__";
 
 /** The plugin door version this copy speaks (PROTOCOL.md §4.4). */
 const DOOR_VERSION = 1;
+
+/** The most bytes of records one `entries` frame carries, and the largest entry sent whole (PROTOCOL.md §9). */
+const RECORDS_MAX = 8 << 20;
+
+/** An entry's id, as both harnesses name every entry after the `session` header. */
+function entryId(entry: unknown): string | undefined {
+  if (!entry || typeof entry !== "object" || !("id" in entry)) return undefined;
+  return typeof entry.id === "string" && entry.id ? entry.id : undefined;
+}
 
 /** The runtime's door. */
 const DOOR: string = "__STEERY_DOOR__";
@@ -257,7 +268,7 @@ type Context = {
   sessionManager: {
     getSessionId(): string;
     getSessionFile?(): string | undefined;
-    /** omp: the session's entries, oldest first. */
+    /** Both: every entry of the session but its `session` header, in the order appended. */
     getEntries?(): unknown[];
     /** Both: the entries from the first to where the conversation stands now, oldest first. */
     getBranch?(): unknown[];
@@ -1552,6 +1563,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let stateAt = 0;
   let stateTimer: NodeJS.Timeout | undefined;
   let looking: NodeJS.Timeout | undefined;
+  /**
+   * The entries this door sends, where the runtime's welcome asked for them: the session
+   * they are of, the id of the last one sent (the runtime's `after` at first), how many of
+   * the harness's entries that was, and whether a send runs or should run again.
+   */
+  let stream: { session: string; after: string | undefined; sent: number; sending: boolean; again: boolean } | undefined;
+  let entriesTimer: NodeJS.Timeout | undefined;
 
   const send = (frame: Frame): boolean => {
     if (!door || door.readyState !== 1) return false;
@@ -1671,9 +1689,121 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   /** Something the state says may have changed: sent within [`STATE_EVERY_MS`]. */
   const noteState = () => {
     hold(live);
+    noteEntries();
     if (stateTimer || !welcomed) return;
     stateTimer = setTimeout(sendState, Math.max(0, stateAt + STATE_EVERY_MS - Date.now()));
     stateTimer.unref?.();
+  };
+
+  /** The harness may have appended entries: those not yet sent go on the next turn of the loop. */
+  const noteEntries = () => {
+    if (!stream || entriesTimer) return;
+    entriesTimer = setTimeout(() => {
+      entriesTimer = undefined;
+      void sendEntries();
+    }, 0);
+    entriesTimer.unref?.();
+  };
+
+  /** This door carries no entries: the copy cannot go on from where the runtime stands. */
+  const lose = (why: string) => {
+    stream = undefined;
+    send({ t: "lost", why });
+  };
+
+  /**
+   * Send the entries the harness appended after the last one sent (PROTOCOL.md §4.4).
+   * Both harnesses keep every entry of the session in memory in the order they appended
+   * it, the `session` header apart (`getEntries`), and write the same entries to the
+   * transcript; the copy keeps none of its own. omp drops an entry it discards from that
+   * list: where the last one sent is gone, the door says `lost`. A frame carries at most
+   * [`RECORDS_MAX`] bytes of records and one entry larger goes as its id alone, which the
+   * driver reads from the transcript. Frames go with a turn of the loop between them, so
+   * a long session's first send never holds the harness up.
+   */
+  const sendEntries = async (): Promise<void> => {
+    const one = stream;
+    if (!one) return;
+    if (one.sending) {
+      one.again = true;
+      return;
+    }
+    one.sending = true;
+    try {
+      do {
+        one.again = false;
+        await sendOnce(one);
+      } while (one.again && stream === one);
+    } finally {
+      one.sending = false;
+    }
+  };
+
+  const sendOnce = async (one: NonNullable<typeof stream>): Promise<void> => {
+    const ctx = live;
+    // A session that moved to another conversation sends nothing more on this door.
+    if (!ctx || ctx.sessionManager.getSessionId() !== one.session) return;
+    let entries: unknown[] | undefined;
+    try {
+      entries = ctx.sessionManager.getEntries?.();
+    } catch {
+      return;
+    }
+    if (!entries) return lose("this harness lists no entries");
+    let from = one.sent;
+    const known = one.after === undefined ? from === 0 : from > 0 && entryId(entries[from - 1]) === one.after;
+    if (!known) {
+      const at = entries.findIndex((entry) => entryId(entry) === one.after);
+      if (at < 0) return lose(`the session holds no entry ${one.after}`);
+      from = at + 1;
+    }
+    while (from < entries.length) {
+      const records: string[] = [];
+      let bytes = 0;
+      let last = one.after;
+      while (from < entries.length) {
+        const entry = entries[from];
+        const id = entryId(entry);
+        if (id === undefined) {
+          from++;
+          continue;
+        }
+        let value: string | undefined;
+        try {
+          value = JSON.stringify(entry);
+        } catch {
+          value = undefined;
+        }
+        const named = JSON.stringify(id);
+        const record =
+          value === undefined || Buffer.byteLength(value) > RECORDS_MAX
+            ? `{"id":${named}}`
+            : `{"id":${named},"value":${value}}`;
+        const size = Buffer.byteLength(record) + 1;
+        if (records.length > 0 && bytes + size > RECORDS_MAX) break;
+        records.push(record);
+        bytes += size;
+        from++;
+        last = id;
+      }
+      if (records.length === 0) {
+        one.sent = from;
+        return;
+      }
+      const after = one.after === undefined ? "" : `"after":${JSON.stringify(one.after)},`;
+      if (stream !== one || door?.readyState !== 1) return;
+      try {
+        door.send(`{"t":"entries",${after}"records":[${records.join(",")}]}`);
+      } catch {
+        return;
+      }
+      one.after = last;
+      one.sent = from;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 0);
+      await promise;
+      if (stream !== one) return;
+    }
   };
 
   /**
@@ -1724,8 +1854,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }, 0);
   };
 
-  /** The runtime accepted this copy: what was kept goes, then what the conversation is doing, again. */
-  const welcome = () => {
+  /**
+   * The runtime accepted this copy: what was kept goes, then what the conversation is
+   * doing, again, then, where the runtime takes them (`entries`), the entries after the
+   * last one it holds.
+   */
+  const welcome = (entries: unknown) => {
     welcomed = true;
     backoff = REDIAL_MIN_MS;
     for (const one of moments().queue.splice(0)) post(one);
@@ -1736,6 +1870,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     looking.unref?.();
     if (REGISTERS && missed && !reached(pi)) reconnect();
     missed = false;
+    const ctx = live;
+    if (ctx && entries && typeof entries === "object") {
+      const after = "after" in entries && typeof entries.after === "string" ? entries.after : undefined;
+      stream = { session: ctx.sessionManager.getSessionId(), after, sent: 0, sending: false, again: false };
+      void sendEntries();
+    }
   };
 
   /** The door open now is gone: what it had not answered goes with the next. */
@@ -1747,6 +1887,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     clearTimeout(stateTimer);
     stateTimer = undefined;
     stateSent = "";
+    stream = undefined;
+    clearTimeout(entriesTimer);
+    entriesTimer = undefined;
     const unanswered = [...inflight.values()];
     inflight.clear();
     moments().queue.unshift(...unanswered);
@@ -1763,7 +1906,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const said = frame as Frame;
     switch (said.t) {
       case "welcome":
-        if (said.door === DOOR_VERSION && !welcomed) welcome();
+        if (said.door === DOOR_VERSION && !welcomed) welcome(said.entries);
         return;
       case "answer": {
         if (typeof said.id !== "string" || !said.ok || typeof said.ok !== "object") return;
@@ -2936,6 +3079,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   });
   pi.on("tool_result", async (event, ctx) => {
     live = ctx;
+    noteEntries();
     const { tool, args } = called(event);
     // Each Steery call says whether the turn now waits ([`waits`]); the last one stands.
     const command = ran(commandOf(event.input));
@@ -3079,6 +3223,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       return;
     }
     live = ctx;
+    // The conversation's last entries go before the door closes with it.
+    await sendEntries();
     unheld = true;
     unhold();
     await release();
