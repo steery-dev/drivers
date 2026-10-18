@@ -14,7 +14,7 @@ name = "steery-driver-pi"
 path = "src/bin/pi.rs"
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.8.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.9.0" }
 steery-driver-common = { path = "../common" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 memchr = "2"

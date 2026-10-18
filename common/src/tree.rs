@@ -65,7 +65,9 @@ pub enum Parent {
 /// circle.
 #[derive(Default)]
 pub struct Tree {
-    ids: HashMap<Box<str>, u32>,
+    ids: HashMap<Arc<str>, u32>,
+    /// Each record's name, by its place.
+    names: Vec<Option<Arc<str>>>,
     nodes: Vec<Node>,
 }
 
@@ -98,13 +100,16 @@ impl Tree {
             Parent::Unheld => UNHELD,
         };
         self.nodes.push(Node { start, end, parent });
+        self.names.push(None);
         Some(at)
     }
 
     /// Name the record at `at` `id`; whether no record before had that name. A later
     /// record given the name takes it.
     pub fn name(&mut self, id: &str, at: u32) -> bool {
-        self.ids.insert(id.into(), at).is_none()
+        let id: Arc<str> = id.into();
+        self.names[at as usize] = Some(id.clone());
+        self.ids.insert(id, at).is_none()
     }
 
     /// The records from a root to the leaf, the last record, which is where the
@@ -489,6 +494,33 @@ impl Walk<'_> {
             aside: through,
             mark,
         }
+    }
+
+    /// The name of the newest record such that every record the file holds before it was
+    /// read, once the first `read` records of `path` and the records off it before
+    /// `through` are: none where the first record unread is the file's first named one.
+    pub fn after(&self, path: &[u32], read: usize, through: u64) -> Option<&str> {
+        let mut said = vec![false; self.tree.nodes.len()];
+        for node in &path[..read] {
+            said[*node as usize] = true;
+        }
+        let mut on_path = vec![false; self.tree.nodes.len()];
+        for node in path {
+            on_path[*node as usize] = true;
+        }
+        let unread = self
+            .tree
+            .nodes
+            .iter()
+            .enumerate()
+            .position(|(at, node)| !said[at] && (on_path[at] || node.start >= through))
+            .unwrap_or(self.tree.nodes.len());
+        self.tree.names[..unread].iter().rev().find_map(|name| name.as_deref())
+    }
+
+    /// Where the record named `id` is in the tree, where the file holds one.
+    pub fn named(&self, id: &str) -> Option<u32> {
+        self.tree.ids.get(id).copied()
     }
 }
 

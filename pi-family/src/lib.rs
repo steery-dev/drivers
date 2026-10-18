@@ -126,6 +126,7 @@ impl Program for Driver {
             method::SESSIONS_LIST => result(self.store()?.list(steery_sdk::params(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
+            method::SESSIONS_FOLD => result(self.store()?.fold(steery_sdk::params(params)?)?),
             method::HOOK_READ => result(hooks::read(self.store()?, steery_sdk::params(params)?)?),
             method::HELD => result(drive::held(self.store()?, steery_sdk::params(params)?)),
             method::IDLE => result(drive::idle(self.store()?, steery_sdk::params(params)?)),

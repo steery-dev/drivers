@@ -147,6 +147,13 @@ impl Program for ClaudeCode {
             method::SESSIONS_LIST => result(self.store()?.list(given(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),
             method::SESSIONS_READ => result(self.store()?.read(given(params)?)?),
+            method::SESSIONS_FOLD => {
+                let _: harness::Fold = given(params)?;
+                Err(Error::refused(
+                    refusal::SELECTION_UNSUPPORTED,
+                    "Claude Code has no plugin door to carry its records",
+                ))
+            }
             method::HOOK_READ => result(hooks::read(given(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
             method::HELD => result(drive::held(self.root()?, self.store()?, given(params)?)),

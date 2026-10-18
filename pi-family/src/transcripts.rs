@@ -20,10 +20,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use memchr::memmem;
 use serde_json::Value;
 use steery_driver_common::follow::Followed;
-use steery_driver_common::lines::{Line, RECORD, capped};
+use steery_driver_common::lines::{BATCH, Line, RECORD, capped};
 use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees};
-use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
+use steery_sdk::wire::harness::{
+    self, Events, Fold, Folded, List, Listed, Locate, Located, Read, Session, SubAgent,
+};
 use steery_sdk::{Error, refusal};
 
 use crate::Harness;
@@ -164,45 +166,11 @@ impl Store {
                 more: false,
                 reset: false,
                 whole,
+                after: None,
             });
         }
-        let lead = self.find(&read.external_id)?;
-        let file = match &read.sub_agent {
-            None => lead.clone(),
-            Some(agent) => {
-                let found = self
-                    .sub_agents(&lead)
-                    .into_iter()
-                    .find(|found| {
-                        found.external_id == *agent || found.name.as_deref() == Some(agent)
-                    })
-                    .ok_or_else(|| {
-                        Error::refused(
-                            refusal::NOT_FOUND,
-                            format!(
-                                "{} has no sub-agent {agent} in {}",
-                                self.harness.id(),
-                                read.external_id
-                            ),
-                        )
-                    })?;
-                found.transcripts.into_iter().next().unwrap_or(lead.clone())
-            }
-        };
-        let stamp = Stamp::at(&file);
-        let head = head(&lead);
-        let fork = match read.sub_agent {
-            None => parent(&read.external_id, &head).zip(head.created_at),
-            Some(_) => None,
-        };
-        let reading = Reading {
-            harness: self.harness,
-            blobs: events::blobs(&file, &self.root),
-            cwd: head.cwd,
-            servers: crate::calls::servers(&self.root),
-            fork,
-            file,
-        };
+        let (lead, reading) = self.reading(&read.external_id, read.sub_agent.as_deref())?;
+        let stamp = Stamp::at(&reading.file);
         let events = read_from(
             &self.trees,
             &reading,
@@ -229,6 +197,142 @@ impl Store {
             );
         }
         Ok(events)
+    }
+
+    /// `sessions/fold`: the events of the records the plugin door carried, folded as
+    /// [`Self::read`] folds the same records from the transcript, so either feed gives one
+    /// conversation the same events and ids. The door sends every entry in the order the
+    /// harness appended it, branches left behind included, so nothing is given apart as
+    /// what it spent. A record sent as its id alone is read from the transcript; one the
+    /// transcript does not hold yet is left, with those after it, for the next fold, until
+    /// the conversation was quiet for [`events::SETTLE`]. Until its transcript is written
+    /// (pi writes it at the first message) nothing is folded.
+    pub fn fold(&self, fold: Fold) -> Result<Folded, Error> {
+        let given = fold.cursor.as_deref().map(parse_cursor).transpose()?;
+        let unchanged = || {
+            fold.cursor
+                .clone()
+                .unwrap_or_else(|| fold_cursor(false, ""))
+        };
+        let reading = match self.reading(&fold.external_id, fold.sub_agent.as_deref()) {
+            Ok((_, reading)) => reading,
+            Err(Error::Refused { word, .. }) if word == refusal::NOT_FOUND => {
+                return Ok(Folded {
+                    cursor: unchanged(),
+                    events: Vec::new(),
+                    consumed: 0,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let still = Duration::from_millis(fold.quiet) >= events::SETTLE;
+        let mut kept = self.kept(&reading.file, &fold.records)?;
+        let mut ids = Vec::with_capacity(fold.records.len());
+        let mut records = Vec::with_capacity(fold.records.len());
+        for record in fold.records {
+            let value = match record.value {
+                Some(value) => Some(value),
+                None => match kept.remove(&record.id) {
+                    Some(value) => value,
+                    None if still => None,
+                    None => break,
+                },
+            };
+            ids.push(record.id);
+            records.push(events::Record { start: 0, value });
+        }
+        let forked = given.as_ref().is_some_and(Given::forked);
+        let end = if still {
+            events::End::Still
+        } else {
+            events::End::Open
+        };
+        let mut said = events::read(&reading, &records, forked, end);
+        // As a read's batch: a fold that held back a whole batch would never move on.
+        if said.consumed == 0 && weight(&records) >= BATCH {
+            said = events::read(&reading, &records, forked, events::End::Forced);
+        }
+        let cursor = match said.consumed.checked_sub(1) {
+            Some(last) => fold_cursor(said.forked, &ids[last]),
+            None => unchanged(),
+        };
+        Ok(Folded {
+            cursor,
+            events: said.events,
+            consumed: u32::try_from(said.consumed).unwrap_or(u32::MAX),
+        })
+    }
+
+    /// The transcript's own copies of the `records` the door sent as their ids alone, by
+    /// id, where the transcript holds them yet: none where it is over [`RECORD`].
+    fn kept(
+        &self,
+        file: &Path,
+        records: &[harness::Record],
+    ) -> Result<HashMap<String, Option<Value>>, Error> {
+        let wanted: Vec<&str> = records
+            .iter()
+            .filter(|record| record.value.is_none())
+            .map(|record| record.id.as_str())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(HashMap::new());
+        }
+        self.trees
+            .walk(file, Entries::default(), |walk| {
+                wanted
+                    .into_iter()
+                    .filter_map(|id| {
+                        let at = walk.named(id)?;
+                        Some(
+                            walk.record(walk.tree.node(at))
+                                .map(|record| (id.to_owned(), record.value)),
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|why| Error::refused(refusal::REFUSED, why))
+    }
+
+    /// The lead's transcript, and what reading the conversation, or one of its sub-agents,
+    /// needs: its transcript, and for a fork the conversation it came from.
+    fn reading(&self, id: &str, sub_agent: Option<&str>) -> Result<(PathBuf, Reading), Error> {
+        let lead = self.find(id)?;
+        let file = match sub_agent {
+            None => lead.clone(),
+            Some(agent) => {
+                let found = self
+                    .sub_agents(&lead)
+                    .into_iter()
+                    .find(|found| {
+                        found.external_id == *agent || found.name.as_deref() == Some(agent)
+                    })
+                    .ok_or_else(|| {
+                        Error::refused(
+                            refusal::NOT_FOUND,
+                            format!(
+                                "{} has no sub-agent {agent} in {id}",
+                                self.harness.id(),
+                            ),
+                        )
+                    })?;
+                found.transcripts.into_iter().next().unwrap_or(lead.clone())
+            }
+        };
+        let head = head(&lead);
+        let fork = match sub_agent {
+            None => parent(id, &head).zip(head.created_at),
+            Some(_) => None,
+        };
+        let reading = Reading {
+            harness: self.harness,
+            blobs: events::blobs(&file, &self.root),
+            cwd: head.cwd,
+            servers: crate::calls::servers(&self.root),
+            fork,
+            file,
+        };
+        Ok((lead, reading))
     }
 
     /// The one transcript of conversation `id`.
@@ -929,20 +1033,64 @@ fn clean(title: &str) -> Option<String> {
         .then(|| title.to_owned())
 }
 
-/// What a cursor's `mark` keeps: whether the fork was said. Its cursors are
+/// What a read cursor's `mark` keeps: whether the fork was said. Its cursors are
 /// `3.<device>.<inode>.<tip>.<at>.<aside>.<forked>` (`steery_driver_common::tree::Cursor`).
 const CURSOR: &str = "3";
 
-fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
-    Cursor::parse(CURSOR, cursor)
-        .filter(|cursor| cursor.mark <= 1)
-        .ok_or_else(|| Error::invalid(format!("`{cursor}` is no cursor this driver gave")))
+/// A fold's cursors are `f.<forked>.<id>`: after the entry named `id`, every entry before
+/// it in the order the harness appended them folded; `f.0.` before the first.
+const FOLD: &str = "f";
+
+/// A cursor this driver gave: a read's, or a fold's.
+enum Given {
+    Read(Cursor),
+    Fold { forked: bool, id: Option<String> },
+}
+
+impl Given {
+    /// Whether the fork was said before it.
+    fn forked(&self) -> bool {
+        match self {
+            Self::Read(cursor) => cursor.mark == 1,
+            Self::Fold { forked, .. } => *forked,
+        }
+    }
+}
+
+fn fold_cursor(forked: bool, id: &str) -> String {
+    format!("{FOLD}.{}.{id}", u8::from(forked))
+}
+
+fn parse_cursor(cursor: &str) -> Result<Given, Error> {
+    let fold = cursor
+        .strip_prefix(FOLD)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.split_once('.'))
+        .and_then(|(forked, id)| {
+            let forked = match forked {
+                "0" => false,
+                "1" => true,
+                _ => return None,
+            };
+            let id = (!id.is_empty()).then(|| id.to_owned());
+            Some(Given::Fold { forked, id })
+        });
+    fold.or_else(|| {
+        Cursor::parse(CURSOR, cursor)
+            .filter(|cursor| cursor.mark <= 1)
+            .map(Given::Read)
+    })
+    .ok_or_else(|| Error::invalid(format!("`{cursor}` is no cursor this driver gave")))
 }
 
 /// The events of a transcript's active path after `cursor`, or of its entries within
 /// `tail` bytes of its end (`Walk::read`). What a branch left behind spent is still
 /// spent: once the path is read to its end, every entry off it written since the last
 /// read is given as its `tokens` alone, each response once.
+///
+/// A fold's cursor goes on after its entry where that is on the path, every entry before
+/// it in the file read; where it is off the path, the read starts again; where the file
+/// does not hold it yet, nothing is read.
 fn read_from(
     trees: &Trees<Entries>,
     reading: &Reading,
@@ -955,6 +1103,33 @@ fn read_from(
     trees
         .walk(&reading.file, Entries::default(), |walk| {
             let path = walk.tree.path()?;
+            let given = match given {
+                None | Some(Given::Fold { id: None, .. }) => None,
+                Some(Given::Read(cursor)) => Some(cursor),
+                Some(Given::Fold {
+                    forked,
+                    id: Some(id),
+                }) => {
+                    let Some(at) = walk.named(&id) else {
+                        return Ok(Events {
+                            cursor: fold_cursor(forked, &id),
+                            events: Vec::new(),
+                            more: false,
+                            reset: false,
+                            whole: false,
+                            after: None,
+                        });
+                    };
+                    let node = walk.tree.node(at);
+                    Some(Cursor {
+                        file: walk.file,
+                        tip: at + 1,
+                        at: node.start,
+                        aside: node.end + 1,
+                        mark: u64::from(forked),
+                    })
+                }
+            };
             let read = walk.read(&path, given.as_ref(), tail)?;
             let records = &read.records;
             // Where a tail begins inside a fork's copy of its parent, the fork is still to
@@ -986,22 +1161,32 @@ fn read_from(
                     said.events.extend(events::spent(reading, value));
                 }
             }
+            let consumed = read.from + said.consumed;
             Ok(Events {
                 cursor: walk
-                    .cursor(
-                        &path,
-                        read.from + said.consumed,
-                        read.through,
-                        u64::from(said.forked),
-                    )
+                    .cursor(&path, consumed, read.through, u64::from(said.forked))
                     .said(CURSOR),
                 events: said.events,
                 more: read.more,
                 reset: read.reset,
                 whole: read.from == 0,
+                after: tail
+                    .is_none()
+                    .then(|| walk.after(&path, consumed, read.through))
+                    .flatten()
+                    .map(str::to_owned),
             })
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))
+}
+
+/// How many bytes of JSON `records` hold.
+fn weight(records: &[events::Record]) -> u64 {
+    records
+        .iter()
+        .filter_map(|record| record.value.as_ref())
+        .map(|value| serde_json::to_vec(value).map_or(0, |bytes| bytes.len() as u64))
+        .sum()
 }
 
 /// Whether the transcript stamped `stamp` stood still for [`events::SETTLE`].
@@ -1247,8 +1432,50 @@ pub(crate) mod tests {
             [("b".to_owned(), 5), ("c".to_owned(), 7)],
             "the branch left behind spent too, each response once"
         );
+        assert_eq!(first.after.as_deref(), Some("c"), "every entry was read");
         let again = read(Some(first.cursor.clone()));
         assert!(spent(&again.events).is_empty(), "nothing is counted twice");
+        // The door: the same entries as the harness appended them, folded once each, and
+        // a fold's cursor a read goes on from.
+        let fold = |cursor: Option<String>, records: Vec<harness::Record>, quiet: u64| {
+            store
+                .fold(Fold {
+                    external_id: "c2".into(),
+                    sub_agent: None,
+                    cursor,
+                    records,
+                    quiet,
+                })
+                .unwrap()
+        };
+        let record = |line: String| {
+            let value: Value = serde_json::from_str(&line).unwrap();
+            harness::Record {
+                id: text(&value, "id").unwrap().to_owned(),
+                value: Some(value),
+            }
+        };
+        let door = fold(
+            None,
+            vec![
+                record(entry("a", None, "user", "ask")),
+                record(answer("b", "a", 5)),
+                record(answer("c", "a", 7)),
+            ],
+            0,
+        );
+        assert_eq!(door.consumed, 3);
+        assert_eq!(words(&door.events), ["ask", "b", "c"], "every branch, in append order");
+        assert_eq!(
+            spent(&door.events),
+            [("b".to_owned(), 5), ("c".to_owned(), 7)],
+            "the door folds each response once, as the transcript's first read"
+        );
+        let read_on = read(Some(door.cursor.clone()));
+        assert!(read_on.events.is_empty() && !read_on.reset, "the fold read every entry the read would");
+        assert_eq!(read_on.after.as_deref(), Some("c"));
+        let gone = read(Some("f.0.zz".into()));
+        assert!(gone.events.is_empty() && gone.cursor == "f.0.zz", "an entry not yet written waits");
         let mut appended = std::fs::OpenOptions::new()
             .append(true)
             .open(&file)
@@ -1262,6 +1489,22 @@ pub(crate) mod tests {
             ["b", "c", "d"],
             "each response, said again, still once each"
         );
+
+        // `d` came as its id alone: the fold reads it from the transcript.
+        let more = fold(
+            Some(door.cursor.clone()),
+            vec![harness::Record {
+                id: "d".into(),
+                value: None,
+            }],
+            0,
+        );
+        assert_eq!(more.consumed, 1);
+        assert_eq!(spent(&more.events), [("d".to_owned(), 9)]);
+        assert!(read(Some(door.cursor)).reset, "`c` is off the path now");
+        let after_d = read(Some(more.cursor));
+        assert!(after_d.events.is_empty() && !after_d.reset);
+        assert_eq!(after_d.after.as_deref(), Some("d"));
         std::fs::remove_dir_all(&home).unwrap();
     }
 
@@ -1424,6 +1667,35 @@ pub(crate) mod tests {
             event,
             Event::Words { voice: Voice::Agent, text, .. } if text == "found two"
         )));
+
+        // The sub-agent's own door: its entries fold to what its transcript reads.
+        let fold = |sub_agent: &str| {
+            let records = [
+                r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-09T10:02:00Z","message":{"role":"user","attribution":"agent","content":[{"type":"text","text":"Find the two readers"}]}}"#,
+                r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-09T10:02:09Z","message":{"role":"assistant","stopReason":"stop","content":[{"type":"text","text":"found two"}]}}"#,
+            ]
+            .map(|line| harness::Record {
+                id: if line.contains(r#""id":"a""#) { "a" } else { "b" }.into(),
+                value: Some(serde_json::from_str(line).unwrap()),
+            });
+            store
+                .fold(Fold {
+                    external_id: lead.into(),
+                    sub_agent: Some(sub_agent.into()),
+                    cursor: None,
+                    records: records.into(),
+                    quiet: 0,
+                })
+                .unwrap()
+        };
+        let folded = fold(probe);
+        assert_eq!(folded.consumed, 2);
+        assert_eq!(folded.events, probed.events, "door and transcript say the same");
+        let unlisted = fold("nobody-yet");
+        assert!(
+            unlisted.consumed == 0 && unlisted.events.is_empty(),
+            "a sub-agent no listing names waits"
+        );
 
         // The lead starts another: read on from where its transcript was read.
         home.append(

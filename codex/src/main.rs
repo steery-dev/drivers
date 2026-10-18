@@ -149,6 +149,13 @@ impl Program for Codex {
                 result(self.drive()?.store.locate(steery_sdk::params(params)?)?)
             }
             method::SESSIONS_READ => result(self.drive()?.store.read(steery_sdk::params(params)?)?),
+            method::SESSIONS_FOLD => {
+                let _: harness::Fold = steery_sdk::params(params)?;
+                Err(Error::refused(
+                    refusal::SELECTION_UNSUPPORTED,
+                    "Codex has no plugin door to carry its records",
+                ))
+            }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::HELD => result(self.drive()?.held(steery_sdk::params(params)?).await?),
