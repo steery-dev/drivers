@@ -293,6 +293,7 @@ impl Store {
                 more: false,
                 reset: false,
                 whole,
+                after: None,
             });
         }
         let (events, stood) = self.reading(&read)?;
@@ -1122,6 +1123,7 @@ fn answer(
         more,
         reset,
         whole,
+        after: None,
     }
 }
 

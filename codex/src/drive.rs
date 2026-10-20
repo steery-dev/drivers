@@ -658,6 +658,7 @@ impl Drive {
             models: listed,
             unlisted: None,
             watch,
+            signed_in: None,
         })
     }
 }

@@ -70,6 +70,7 @@ impl Catalog {
             models,
             unlisted: None,
             watch: watched(harness, home, root),
+            signed_in: None,
         })
     }
 
