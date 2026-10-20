@@ -322,7 +322,8 @@ app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`
   place: where a Steery hook its person trusted moved because another tool put a group
   ahead of it, the plan writes the same trust again where it now stands (asked of Codex's
   own `hooks/list`, never computed here).
-- **Hooks** (`hook/read`, `hook/answer`). Codex's documents become Moments; an answer
+- **Hooks** (`hook/read`, `hook/answer`). Codex's documents become Moments, the model
+  each names kept as state; an answer
   becomes what Codex parses: `additionalContext` on `SessionStart` and `UserPromptSubmit`,
   `decision: "block"` at `Stop`, a `permissionDecision` on `PreToolUse`, and a `decision`
   with its `behavior` (and the standing permission chosen) on `PermissionRequest`.
@@ -339,7 +340,12 @@ app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`
     inbox (`turn/steer`, or `turn/start` once the turn ended) and ends with the last turn.
     A worktree is made where Codex makes its own, `<CODEX_HOME>/worktrees/<4 hex>/<repo>`.
   - `turn/read`: the thread named, the words taken (by their delivery marker), how each turn
-    completed, and the app server's refusals (`harness-busy` beside a live writer).
+    completed, and the app server's refusals (`harness-busy` beside a live writer). Its
+    lines' events go to the runtime before the rollout is read, each under the rollout's
+    own id: turns begun and ended, the agent's words and reasoning, shell and MCP calls
+    and their results, the running token total, the model (rerouted included), and the
+    thread's title (`thread/name/updated`). A person's words and a compaction are left to
+    the rollout: the app server names them by ids the rollout does not keep.
   - `stop`: the owner interrupts its own turn and it is seen to end.
   - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn
     after them carrying the delivery marker.

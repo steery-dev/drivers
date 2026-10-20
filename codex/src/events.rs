@@ -518,8 +518,9 @@ impl State {
 }
 
 /// When every window of a quota snapshot that is spent (`used_percent` at 100) resets,
-/// in milliseconds: none spent, or one spent with no reset, says nothing.
-fn spent_until(limits: &Value) -> Option<u64> {
+/// in milliseconds: none spent, or one spent with no reset, says nothing. The rollout
+/// spells it in snake_case, the app server in camelCase (`usedPercent`, `resetsAt`).
+pub fn spent_until(limits: &Value) -> Option<u64> {
     let mut until = None;
     for window in ["primary", "secondary"] {
         let Some(window) = limits.get(window).filter(|w| w.is_object()) else {
@@ -527,6 +528,7 @@ fn spent_until(limits: &Value) -> Option<u64> {
         };
         if window
             .get("used_percent")
+            .or_else(|| window.get("usedPercent"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0)
             < 100.0
@@ -535,6 +537,7 @@ fn spent_until(limits: &Value) -> Option<u64> {
         }
         let reset = window
             .get("resets_at")
+            .or_else(|| window.get("resetsAt"))
             .and_then(Value::as_u64)?
             .checked_mul(1000)?;
         until = until.max(Some(reset));
@@ -696,7 +699,7 @@ fn id(place: &Place<'_>, payload: &Value, n: usize) -> String {
 }
 
 /// A call's output as text: a string, or the content items Codex writes it as.
-fn output_text(output: Option<&Value>) -> String {
+pub fn output_text(output: Option<&Value>) -> String {
     match output {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Array(items)) => items
@@ -739,13 +742,13 @@ fn succeeded(output: Option<&Value>, text: &str) -> bool {
 }
 
 /// The last 8 lines of a result.
-fn tail(text: &str) -> Option<String> {
+pub fn tail(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
     let kept = lines[lines.len().saturating_sub(8)..].join("\n");
     (!kept.trim().is_empty()).then_some(kept)
 }
 
-fn number(value: &Value, key: &str) -> u64 {
+pub fn number(value: &Value, key: &str) -> u64 {
     value.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 

@@ -3,9 +3,10 @@
 //!
 //! Codex reads `hooks.json` beside its `config.toml` in the shape Claude Code's settings
 //! use, and hands each hook a JSON document on standard input: `session_id`, `cwd`,
-//! `hook_event_name`, and per moment `prompt`, `tool_name`, `tool_input`,
-//! `tool_response`, `tool_use_id`, `stop_hook_active`, `permission_suggestions`. A
-//! sub-agent's moments come under its lead's `session_id` with its own `agent_id`.
+//! `hook_event_name`, `model` (the moment's, kept on the Moment as state), and per moment
+//! `prompt`, `tool_name`, `tool_input`, `tool_response`, `tool_use_id`,
+//! `stop_hook_active`, `permission_suggestions`. A sub-agent's moments come under its
+//! lead's `session_id` with its own `agent_id`.
 //!
 //! It reads a paragraph back for its agent on `SessionStart` and `UserPromptSubmit`
 //! (`hookSpecificOutput.additionalContext`) and keeps a turn going at `Stop` only on
@@ -151,6 +152,10 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
             .flatten()
             .map(str::to_owned),
         context_left: None,
+        // Codex names the model each moment runs on, and no thinking level.
+        model: text(&document, "model").map(str::to_owned),
+        thinking: None,
+        failure: None,
         suggestions: (kind == HookKind::Permission)
             .then(|| {
                 document
@@ -336,6 +341,7 @@ mod tests {
             "tool_input": {"targets": ["a"]}, "tool_response": {"status": {}}, "tool_use_id": "call_1"});
         let read = moment("PostToolUse", codex.clone()).unwrap();
         assert_eq!(read.external_id, "019d");
+        assert_eq!(read.model.as_deref(), Some("gpt-5.5"));
         assert_eq!(
             read.cwd.as_deref(),
             Some(std::path::Path::new("/tmp/ra/codexwork"))

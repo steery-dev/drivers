@@ -817,7 +817,8 @@ fn stands(events: &[Event], now: u64) -> Option<Sample> {
 }
 
 /// `turn/read`: one line of a turn's output, as the turn mode writes it — every message
-/// of the app server on standard output, and its refusal on standard error.
+/// of the app server on standard output, and its refusal on standard error — and the
+/// events and title it says of the thread ([`crate::lines`]).
 pub fn turn_line(read: TurnRead) -> TurnLine {
     match read.stream {
         Stream::Stderr => TurnLine {
@@ -828,6 +829,7 @@ pub fn turn_line(read: TurnRead) -> TurnLine {
             let Ok(line) = serde_json::from_str::<Value>(&read.line) else {
                 return TurnLine::default();
             };
+            let (events, title) = crate::lines::said(&read.turn, &line);
             TurnLine {
                 named: line
                     .pointer("/result/thread/id")
@@ -840,6 +842,8 @@ pub fn turn_line(read: TurnRead) -> TurnLine {
                     .map(|_| true),
                 ended: ended(&line),
                 refused: None,
+                events,
+                title,
             }
         }
     }
@@ -1155,6 +1159,7 @@ fn quoted(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use steery_sdk::wire::harness::{Count, Voice};
 
     fn line(stream: Stream, line: &str, delivery: Option<&str>) -> TurnLine {
         turn_line(TurnRead {
@@ -1230,6 +1235,47 @@ mod tests {
             Some(refusal::NOT_FOUND)
         );
         assert_eq!(line(Stream::Stdout, "not json", None), TurnLine::default());
+
+        // Codex 0.163's own lines, cut down: each event under the id its rollout gives the
+        // same fact (turn id, item id, call_id, the total's numbers), a person's words none.
+        let said = |text: &str| line(Stream::Stdout, text, None);
+        said(r#"{"id":2,"result":{"thread":{"id":"01a158a8"},"model":"claude-haiku-4-5","modelProvider":"cpa-gui","reasoningEffort":"ultra"}}"#);
+        let began = said(r#"{"method":"turn/started","params":{"threadId":"01a158a8","turn":{"id":"01a158a8-03de","status":"inProgress"}},"emittedAtMs":1792488768669}"#);
+        assert_eq!(
+            began.events,
+            vec![
+                Event::TurnBegan {
+                    at: 1792488768669,
+                    turn: Some("01a158a8-03de".into())
+                },
+                Event::Model {
+                    at: 1792488768669,
+                    model: "claude-haiku-4-5".into(),
+                    provider: Some("cpa-gui".into()),
+                    thinking: Some("ultra".into())
+                }
+            ]
+        );
+        let person = said(r#"{"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a158a8-094a","content":[{"type":"text","text":"Run cat a.txt"}]}},"emittedAtMs":1792488769905}"#);
+        assert!(person.events.is_empty(), "the rollout names a person's words otherwise");
+        let thought = said(r#"{"method":"item/completed","params":{"item":{"type":"reasoning","id":"rs_msg_011CgDFw_0","summary":["Run it."],"content":[]}},"emittedAtMs":1792488775769}"#);
+        assert!(
+            matches!(thought.events.as_slice(), [Event::Words { id, voice: Voice::Thought, text, .. }] if id == "rs_msg_011CgDFw_0" && text == "Run it.")
+        );
+        let call = said(r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"toolu_0124","command":"/bin/zsh -lc 'cat a.txt'","source":"unifiedExecStartup","status":"inProgress"}},"emittedAtMs":1792488775950}"#);
+        assert!(
+            matches!(call.events.as_slice(), [Event::CallBegan { call, .. }] if call.id == "toolu_0124" && call.tool == "exec_command" && call.input == json!({"cmd": "cat a.txt"}))
+        );
+        let back = said(r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"toolu_0124","command":"/bin/zsh -lc 'cat a.txt'","source":"unifiedExecStartup","status":"completed","aggregatedOutput":"hello\n","exitCode":0}},"emittedAtMs":1792488776399}"#);
+        assert!(
+            matches!(back.events.as_slice(), [Event::CallEnded { id, ok: true, chars: 6, .. }, Event::Words { id: out, voice: Voice::Tool, .. }] if id == "toolu_0124" && out == "toolu_0124:out")
+        );
+        let spent = said(r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"totalTokens":196086,"inputTokens":195948,"cachedInputTokens":0,"outputTokens":138,"reasoningOutputTokens":65},"last":{"totalTokens":196086},"modelContextWindow":258400}},"emittedAtMs":1792488776483}"#);
+        assert!(
+            matches!(spent.events.as_slice(), [Event::Tokens { count: Count::Total, input: 195948, output: 138, reasoning: 65, model: Some(model), .. }] if model == "claude-haiku-4-5")
+        );
+        let named = said(r#"{"method":"thread/name/updated","params":{"threadId":"01a158a8","threadName":"Read a.txt"}}"#);
+        assert_eq!(named.title.as_deref(), Some("Read a.txt"));
     }
 
     fn asked(tools: ReaderTools, model: Option<&str>) -> Reader {
