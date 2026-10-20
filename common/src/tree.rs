@@ -1,7 +1,9 @@
-//! A transcript that is a tree: every record names the one before it, and the
-//! conversation is the path from the last record back to a root. Going back to an earlier
-//! record and on from there — a branch, a rewind — moves the leaf and leaves the other path
-//! in the file, read by nobody but for what it spent.
+//! A transcript that is a tree: every record names its parent, and the conversation is the
+//! path from the leaf — the last record written that no record names as its parent — back
+//! to a root. Going back to an earlier record and on from there — a branch, a rewind —
+//! moves the leaf and leaves the other path in the file, read by nobody but for what it
+//! spent. A parent may be written after its child: Claude Code does not always append a
+//! turn's records in the order it made them, so the file's order is not the tree's.
 //!
 //! What is kept of a transcript between reads is its tree — where each record lies and
 //! which record is its parent, never a word of a record — read on from where the last read
@@ -27,6 +29,8 @@ use crate::lines::{BATCH, RECORD, bytes};
 /// Why a walk stopped short of a beginning. Said, rather than handing back what had been
 /// walked, which would read exactly like a whole short conversation.
 const CARRIED_ON: &str = "that conversation carries on from one this machine does not hold, so only part of it can be read";
+/// Why a transcript whose records name each other in a circle has no leaf to walk from.
+const CIRCLE: &str = "that conversation's records name each other in a circle";
 
 /// How a harness's records make a tree: one per transcript, kept with its tree.
 pub trait Shape: Default + Send + 'static {
@@ -46,42 +50,44 @@ pub struct Node {
 
 /// The parent of a record that has none: where a conversation begins.
 const ROOT: u32 = u32::MAX;
-/// The parent of a record whose parent is no record before it in the file.
+/// The parent of a record whose parent the file does not hold, as far as it was read.
 const UNHELD: u32 = u32::MAX - 1;
 
 /// A record's parent, as a [`Shape`] names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Parent {
+pub enum Parent<'a> {
     /// None: the record begins a conversation.
     Root,
     /// The record at this place in the tree.
     Node(u32),
-    /// A record the file does not hold before it.
-    Unheld,
+    /// The record named this, written before it or after it.
+    Named(&'a str),
 }
 
-/// The tree of one transcript. A parent is looked up among the records before it when a
-/// record is added, so every parent comes before its child and no walk can go round in a
-/// circle.
+/// The tree of one transcript. A record whose parent is not written yet waits for it, so
+/// a parent can come after its child; a walk counts its steps, so records naming each
+/// other in a circle are an error rather than a walk that never ends.
 #[derive(Default)]
 pub struct Tree {
     ids: HashMap<Arc<str>, u32>,
     /// Each record's name, by its place.
     names: Vec<Option<Arc<str>>>,
     nodes: Vec<Node>,
+    /// Whether some record names it as its parent, by its place.
+    parents: Vec<bool>,
+    /// The records whose parent the file does not hold yet, by that parent's name.
+    waiting: HashMap<Arc<str>, Vec<u32>>,
 }
 
 impl Tree {
     /// The record named `id`, where one before is.
-    pub fn find(&self, id: &str) -> Parent {
-        self.ids
-            .get(id)
-            .map_or(Parent::Unheld, |at| Parent::Node(*at))
+    pub fn find(&self, id: &str) -> Option<u32> {
+        self.ids.get(id).copied()
     }
 
     /// The last record added, or none: the parent of a record that follows the one
     /// before it.
-    pub fn last(&self) -> Parent {
+    pub fn last(&self) -> Parent<'static> {
         self.nodes
             .len()
             .checked_sub(1)
@@ -90,35 +96,59 @@ impl Tree {
 
     /// Add the record at `start..end` (its newline not included) under `parent`; its
     /// place, or none where the tree holds as many records as can be.
-    pub fn add(&mut self, start: u64, end: u64, parent: Parent) -> Option<u32> {
+    pub fn add(&mut self, start: u64, end: u64, parent: Parent<'_>) -> Option<u32> {
         let at = u32::try_from(self.nodes.len())
             .ok()
             .filter(|at| *at < UNHELD)?;
         let parent = match parent {
             Parent::Root => ROOT,
             Parent::Node(node) => node,
-            Parent::Unheld => UNHELD,
+            Parent::Named(id) => match self.find(id) {
+                Some(node) => node,
+                None => {
+                    self.waiting.entry(id.into()).or_default().push(at);
+                    UNHELD
+                }
+            },
         };
+        if let Some(held) = self.parents.get_mut(parent as usize) {
+            *held = true;
+        }
         self.nodes.push(Node { start, end, parent });
         self.names.push(None);
+        self.parents.push(false);
         Some(at)
     }
 
-    /// Name the record at `at` `id`; whether no record before had that name. A later
-    /// record given the name takes it.
+    /// Name the record at `at` `id`, the parent of each record that waited for it; whether
+    /// no record before had that name. A later record given the name takes it.
     pub fn name(&mut self, id: &str, at: u32) -> bool {
         let id: Arc<str> = id.into();
         self.names[at as usize] = Some(id.clone());
+        if let Some(children) = self.waiting.remove(&id) {
+            for child in children {
+                self.nodes[child as usize].parent = at;
+            }
+            self.parents[at as usize] = true;
+        }
         self.ids.insert(id, at).is_none()
     }
 
-    /// The records from a root to the leaf, the last record, which is where the
-    /// conversation was when it was last written to; an error where the leaf's ancestry
-    /// stops at a parent the file does not hold.
+    /// The records from a root to the leaf, the last record written that no record names
+    /// as its parent, which is where the conversation was when it was last written to; an
+    /// error where the leaf's ancestry stops at a parent the file does not hold, or goes
+    /// round in a circle.
     pub fn path(&self) -> Result<Vec<u32>, String> {
         let mut path = Vec::new();
-        let mut at = self.nodes.len().checked_sub(1).map(|at| at as u32);
+        let leaf = self.parents.iter().rposition(|parent| !parent);
+        if leaf.is_none() && !self.nodes.is_empty() {
+            return Err(CIRCLE.into());
+        }
+        let mut at = leaf.map(|at| at as u32);
         while let Some(step) = at {
+            if path.len() == self.nodes.len() {
+                return Err(CIRCLE.into());
+            }
             path.push(step);
             at = match self.nodes[step as usize].parent {
                 ROOT => None,
@@ -520,7 +550,7 @@ impl Walk<'_> {
 
     /// Where the record named `id` is in the tree, where the file holds one.
     pub fn named(&self, id: &str) -> Option<u32> {
-        self.tree.ids.get(id).copied()
+        self.tree.find(id)
     }
 }
 
@@ -552,7 +582,7 @@ mod tests {
             };
             let parent = record["parent"]
                 .as_str()
-                .map_or(Parent::Root, |parent| tree.find(parent));
+                .map_or(Parent::Root, Parent::Named);
             let at = tree.add(start, end, parent).ok_or("full")?;
             tree.name(id, at);
             Ok(())
@@ -607,10 +637,11 @@ mod tests {
         })
     }
 
-    /// A tree is read on as it grows, from whichever record was written last: a branch
-    /// moves the leaf and leaves the other path in the file, half a line is no record yet,
-    /// a line that is not one says nothing, and a transcript written whole again under the
-    /// same name is read again from its start.
+    /// A tree is read on as it grows, from the last record no record names as its parent: a
+    /// branch moves the leaf and leaves the other path in the file, half a line is no record
+    /// yet, a line that is not one says nothing, a child written before its parent waits for
+    /// it, and a transcript written whole again under the same name is read again from its
+    /// start.
     #[test]
     fn a_tree_is_read_on_as_it_grows_and_walked_from_its_leaf() {
         let trees = Trees::default();
@@ -631,6 +662,18 @@ mod tests {
         append(&path, &half[half.len() / 2..]);
         append(&path, "not json\n");
         assert_eq!(walked(&trees, &path).unwrap(), [4, 3, 1]);
+        append(&path, &record("f", Some("e"), 6, 0));
+        assert_eq!(
+            walked(&trees, &path).unwrap_err(),
+            CARRIED_ON,
+            "a child whose parent is not written yet"
+        );
+        append(&path, &record("e", Some("d"), 5, 0));
+        assert_eq!(
+            walked(&trees, &path).unwrap(),
+            [6, 5, 4, 3, 1],
+            "its parent, written after it, is not the leaf"
+        );
         std::fs::write(
             &path,
             format!(
@@ -658,7 +701,13 @@ mod tests {
             record("a", Some("b"), 1, 0),
             record("b", Some("a"), 2, 0)
         ));
-        assert!(walked(&trees, &circle).is_err());
+        assert_eq!(walked(&trees, &circle).unwrap_err(), CIRCLE);
+        append(&circle, &record("c", Some("a"), 3, 0));
+        assert_eq!(
+            walked(&trees, &circle).unwrap_err(),
+            CIRCLE,
+            "a leaf whose ancestry goes round"
+        );
         let aside = file(&format!(
             "{}{}{}",
             record("a", None, 1, 0),

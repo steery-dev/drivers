@@ -5,9 +5,7 @@
 //! makes the entries a line, each the parent of the next.
 //!
 //! The tree, kept between reads and walked in batches, is the drivers' own
-//! ([`steery_driver_common::tree`]); this is how pi's entries make it. pi and omp append a
-//! child to a leaf already written, so a parent named later in the file is a transcript
-//! this does not read.
+//! ([`steery_driver_common::tree`]); this is how pi's entries make it.
 
 use serde::{Deserialize, Deserializer};
 use steery_driver_common::tree::{Parent, Shape, Tree};
@@ -77,7 +75,7 @@ impl Shape for Entries {
             .ok_or("that transcript has an entry with no id")?;
         let parent = match &head.parent {
             Some(None) => Parent::Root,
-            Some(Some(parent)) if !parent.is_empty() => tree.find(parent),
+            Some(Some(parent)) if !parent.is_empty() => Parent::Named(parent),
             _ => return Err("that transcript has an entry that names no parent".into()),
         };
         let at = tree.add(start, end, parent).ok_or_else(full)?;
@@ -220,15 +218,6 @@ mod tests {
             (
                 "a parent not held",
                 format!("{V3}{}{}", entry("a", None, 1), entry("b", Some("z"), 2)),
-            ),
-            (
-                "a parent written after its child",
-                format!(
-                    "{V3}{}{}{}",
-                    entry("a", Some("b"), 1),
-                    entry("b", None, 2),
-                    entry("c", Some("a"), 3)
-                ),
             ),
         ] {
             assert!(walked(&trees, &file(&body)).is_err(), "{why}");

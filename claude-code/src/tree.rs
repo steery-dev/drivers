@@ -1,7 +1,10 @@
 //! A Claude Code transcript is a tree: every message, attachment and system record names
 //! the record before it by its `uuid` (`parentUuid`, `null` at a root), and the
-//! conversation is the path from the last such record back to a root. A rewind writes the
-//! next record under an earlier one and leaves the other path in the file, read by nobody.
+//! conversation is the path from the last such record no record names as its parent back
+//! to a root. Claude Code does not always append a turn's records in the order it made
+//! them, so a parent can be written after its child: an attachment before the reminder it
+//! follows, a prompt before the answer it replies to. A rewind writes the next record
+//! under an earlier one and leaves the other path in the file, read by nobody.
 //! A compaction starts the chain again at its boundary record, which names the record it
 //! follows as `logicalParentUuid`: the conversation goes on through it. Records that name
 //! no `uuid` of their own — the mode, the queue, the title, the costs — are no part of it.
@@ -56,11 +59,8 @@ impl Shape for Records {
         let id = head.uuid.as_deref().filter(|id| !id.is_empty());
         let parent = match id {
             Some(_) => match (&head.parent, head.logical.as_deref()) {
-                (Some(Some(parent)), _) => tree.find(parent),
-                (_, Some(logical)) => match tree.find(logical) {
-                    Parent::Unheld => Parent::Root,
-                    held => held,
-                },
+                (Some(Some(parent)), _) => Parent::Named(parent),
+                (_, Some(logical)) => tree.find(logical).map_or(Parent::Root, Parent::Node),
                 _ => Parent::Root,
             },
             None if matches!(head.kind.as_deref(), Some("user" | "assistant" | "system")) => {
@@ -200,12 +200,22 @@ mod tests {
         assert_eq!(walked(&trees, &lined).unwrap(), [2, 1]);
     }
 
-    /// A walk that cannot reach a beginning says so: a parent the file does not hold, or a
-    /// parent written after its child, which is how records naming each other in a circle
-    /// read (the runtime's `a_chain_that_does_not_reach_a_beginning_is_refused`).
+    /// A chain goes back through a parent written after its child, as Claude Code writes a
+    /// turn's attachments before the record they follow; a walk that cannot reach a
+    /// beginning says so: a parent the file does not hold, or records naming each other in
+    /// a circle.
     #[test]
-    fn a_chain_that_does_not_reach_a_beginning_is_refused() {
+    fn a_chain_is_walked_to_a_beginning_or_refused() {
         let trees = Trees::default();
+        let reordered = file(&format!(
+            "{}{}{}{}{}",
+            record("a", None, 1),
+            record("b", Some("a"), 2),
+            record("d", Some("c"), 4),
+            record("e", Some("d"), 5),
+            record("c", Some("b"), 3)
+        ));
+        assert_eq!(walked(&trees, &reordered).unwrap(), [5, 4, 3, 2, 1]);
         let elsewhere = file(&record("b", Some("somewhere-else"), 1));
         assert!(walked(&trees, &elsewhere).is_err());
         let circle = file(&format!(
