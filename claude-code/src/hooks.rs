@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
-    Always, Answer, Append, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment,
-    HookRead, Moment, Says, Suggestion, TurnState, Via,
+    Always, Answer, Append, Decision, Failure, Hook, HookAnswer, HookAnswered, HookKind,
+    HookMoment, HookRead, Moment, Says, Suggestion, TurnState, Via,
 };
 
 /// The file Claude Code hands a `SessionStart` hook; its shell sources what is appended
@@ -40,7 +40,7 @@ pub(crate) struct Event {
 /// writes them. Claude Code reads a hook's `additionalContext` on `SessionStart`,
 /// `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` and `SubagentStart`, and goes
 /// on from a `Stop` that a hook blocks with a reason.
-pub(crate) const EVENTS: [Event; 11] = [
+pub(crate) const EVENTS: [Event; 12] = [
     Event {
         name: "SessionStart",
         kind: HookKind::SessionStart,
@@ -114,6 +114,15 @@ pub(crate) const EVENTS: [Event; 11] = [
         says: &[Says::Context],
         waits: SAYS_WAITS,
     },
+    // The session's model changed: `/model`, an automatic fallback, a resume restoring it
+    // (Claude Code 2.1.251 on; an older one ignores the entry). `SessionStart` names the
+    // model a session opens on, where it does.
+    Event {
+        name: "PostModelSwitch",
+        kind: HookKind::Changed,
+        says: &[],
+        waits: SAYS_WAITS,
+    },
 ];
 
 /// The hooks `initialize` declares.
@@ -161,9 +170,11 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
         _ => None,
     };
     let at_end = event.kind == HookKind::TurnEnd;
+    let failed = name == "StopFailure";
     Some(Moment {
         event: name.to_owned(),
         sub_agent: text(document, "agent_id").map(str::to_owned),
+        // Claude Code's documents carry no time: the runtime places it when it arrives.
         at: None,
         cwd: document
             .get("cwd")
@@ -198,6 +209,20 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
             .flatten()
             .map(str::to_owned),
         context_left: None,
+        model: match name {
+            "SessionStart" => text(document, "model"),
+            "PostModelSwitch" => text(document, "to_model"),
+            _ => None,
+        }
+        .map(str::to_owned),
+        // Claude Code says the effort in effect on the moments a turn or a call fires.
+        thinking: document
+            .pointer("/effort/level")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|level| !level.is_empty())
+            .map(str::to_owned),
+        failure: failed.then(|| failure(document)),
         suggestions: if event.kind == HookKind::Permission {
             document
                 .get("permission_suggestions")
@@ -209,6 +234,30 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
         },
         external_id,
     })
+}
+
+/// Why a turn ended at `StopFailure`: Claude Code's code for the API error (`error`), its
+/// words as the conversation shows them (`last_assistant_message`, the API error itself
+/// here), else its details (`error_details`). Every such failure is the model service's;
+/// the document names no status, model or time the service takes requests again.
+pub(crate) fn failure(document: &Value) -> Failure {
+    let code = text(document, "error");
+    let line = ["last_assistant_message", "error_details", "error"]
+        .into_iter()
+        .find_map(|field| text(document, field))
+        .map(crate::events::one_line)
+        .unwrap_or_default();
+    Failure {
+        kind: crate::events::failure_kind(None, code),
+        line,
+        service: true,
+        http_status: None,
+        code: code.map(str::to_owned),
+        retry_at: None,
+        provider: None,
+        model: None,
+        thinking: None,
+    }
 }
 
 /// One of Claude Code's `permission_suggestions` as a person reads it, kept at its index
@@ -446,6 +495,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use steery_sdk::wire::harness::FailureKind;
 
     fn read_one(event: &str, document: Value, env: &[(&str, &str)]) -> Option<Moment> {
         read(HookRead {
@@ -576,9 +626,49 @@ mod tests {
         .expect("a moment");
         assert_eq!(ended.outcome, Some(TurnState::Finished));
         assert!(ended.continued);
-        let failed = read_one("StopFailure", json!({"session_id": "s1"}), &[]).expect("a moment");
+        // As Claude Code 2.1.304 handed it, signed out.
+        let failed = read_one(
+            "StopFailure",
+            json!({"session_id": "s1", "prompt_id": "p1", "effort": {"level": "low"},
+                "hook_event_name": "StopFailure", "error": "authentication_failed",
+                "last_assistant_message": "Failed to authenticate: OAuth session expired and could not be refreshed"}),
+            &[],
+        )
+        .expect("a moment");
         assert_eq!(failed.outcome, Some(TurnState::Failed));
         assert!(!failed.continued);
+        assert_eq!(failed.thinking.as_deref(), Some("low"));
+        let failure = failed.failure.expect("why it failed");
+        assert_eq!(failure.kind, FailureKind::SignIn);
+        assert_eq!(failure.code.as_deref(), Some("authentication_failed"));
+        assert_eq!(
+            failure.line,
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        );
+        let limited = read_one(
+            "StopFailure",
+            json!({"session_id": "s1", "error": "overloaded", "error_details": "529 Overloaded"}),
+            &[],
+        )
+        .expect("a moment");
+        let failure = limited.failure.expect("why it failed");
+        assert_eq!((failure.kind, failure.line.as_str()), (FailureKind::RateLimit, "529 Overloaded"));
+        assert!(ended.failure.is_none(), "a turn that finished has no failure");
+        let opened = read_one(
+            "SessionStart",
+            json!({"session_id": "s1", "source": "startup", "model": "claude-sonnet-5-5"}),
+            &[],
+        )
+        .expect("a moment");
+        assert_eq!(opened.model.as_deref(), Some("claude-sonnet-5-5"));
+        let switched = read_one(
+            "PostModelSwitch",
+            json!({"session_id": "s1", "from_model": "claude-sonnet-5-5", "to_model": "claude-opus-5-5", "source": "command"}),
+            &[],
+        )
+        .expect("a moment");
+        assert_eq!(switched.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(switched.outcome, None);
     }
 
     #[test]

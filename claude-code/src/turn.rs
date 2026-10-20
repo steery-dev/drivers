@@ -4,11 +4,16 @@
 //! `steery-driver-claude-code turn <claude> <act> [<id>] [--worktree] [--model <model>]
 //! [--thinking <effort>] [--reads <folder>]…` takes the words on standard input, starts a
 //! background session with `claude --bg … -- <words>` (the words follow `--`, which Claude
-//! reads as the words and never as a flag), and follows it through `claude agents --json`
-//! to where its turn stopped. Every change in how the session is listed goes to standard
-//! output as `{"listed": <entry>}`, and the entry that settles the turn as `{"settled":
-//! <entry>}`; what Claude Code refused, in its own words, goes to standard error, and the
-//! mode exits 1.
+//! reads as the words and never as a flag or a file), and follows it through `claude agents
+//! --json` to where its turn stopped. Every change in how the session is listed goes to
+//! standard output as `{"listed": <entry>}`, and the entry that settles the turn as
+//! `{"settled": <entry>}`; what Claude Code refused, in its own words, goes to standard
+//! error, and the mode exits 1.
+//!
+//! Where the listing leaves a question — whether a stop it shows is this turn's, and what
+//! went wrong — the session's own `Stop` and `StopFailure` hooks answer it: the launch gives
+//! that one session two more hooks (`--settings`), which run this binary's `heard` mode and
+//! hand their documents to the follower ([`Heard`]). Nothing reads the transcript.
 //!
 //! A `continue` never starts beside a session that is in the conversation: Claude Code
 //! would start a copy. One already there is refused before anything starts, and a copy
@@ -39,8 +44,14 @@ const FOLLOW_EVERY: Duration = Duration::from_secs(1);
 /// How long a session `claude --bg` started has to be listed.
 const LISTED_WITHIN: Duration = Duration::from_secs(90);
 
-/// How much of a transcript's end is read for the last thing said in it.
-const LAST_SAID: u64 = 1024 * 1024;
+/// How long Claude Code gives the `heard` hook: it appends one line to a file.
+const HEARD_WAITS: u32 = 5;
+
+/// The word that starts the hook mode a turn's own session runs as its turn ends.
+pub const HEARD: &str = "heard";
+
+/// The hooks of the session's own turn end ([`Heard`]).
+const ENDS: [&str; 2] = ["Stop", "StopFailure"];
 
 /// A turn, as `start` plans it and the turn mode reads it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,13 +200,14 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
     {
         return Err(format!("session {id} {}", RUNNING[0]));
     }
-    let launched = now();
+    let heard = Heard::new(now())?;
     // The session writes the conversation: it keeps the `STEERY_STARTED` the runtime gave
     // this turn, never a helper's.
     let mut command = tokio::process::Command::new(&turn.binary);
     command.stdin(std::process::Stdio::null());
     let launch = command
         .args(turn.launching()?)
+        .args(heard.settings()?)
         .arg("--")
         .arg(words)
         .stdout(std::process::Stdio::piped())
@@ -232,28 +244,16 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&short))
         {
             Some(mut entry) => {
-                // The conversation's transcript, read only where the listing leaves a
-                // question: what went wrong, and whether this turn's end is recorded.
-                let session = entry
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                let transcript = || {
-                    crate::transcripts::Store::new(root.to_owned())
-                        .session(session.as_deref()?)
-                        .ok()?
-                        .transcripts
-                        .pop()
-                };
                 let short_of_done = agents::end(&entry).is_some()
                     && entry.get("state").and_then(Value::as_str) != Some("done");
+                let end = heard.end();
                 if short_of_done
-                    && let Some(error) = transcript().and_then(|at| stopped_on(&at))
+                    && let Some(error) = end.as_ref().and_then(failed_on)
                     && let Some(object) = entry.as_object_mut()
                 {
                     object.insert("error".into(), Value::from(error));
                 }
-                let ended = || transcript().is_some_and(|at| turn_ended_since(&at, launched));
+                let ended = || end.is_some();
                 if follow.settled_by(&entry, ended) {
                     return say(out, json!({ "settled": entry }));
                 }
@@ -315,64 +315,80 @@ async fn discard(binary: &Path, job: &str) {
     }
 }
 
-/// The complete records of a transcript's last `most` bytes.
-fn tail(transcript: &Path, most: u64) -> Option<Vec<Value>> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(transcript).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(most);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let whole = if start > 0 {
-        &bytes[bytes.iter().position(|byte| *byte == b'\n')? + 1..]
-    } else {
-        &bytes[..]
-    };
-    Some(
-        whole
-            .split(|byte| *byte == b'\n')
-            .filter_map(|line| serde_json::from_slice(line).ok())
-            .collect(),
-    )
-}
+/// Where the session a turn launches hands over its own turn ends: its `Stop` and
+/// `StopFailure` documents, one per line, written by this binary's [`HEARD`] mode. Made
+/// empty before the launch, so every document in it is of a turn this launch began, and
+/// removed once the follower is done; the hooks stay on the session for its later turns,
+/// and find no file to write to.
+struct Heard(PathBuf);
 
-/// Whether Claude Code recorded the end of a turn in `transcript` after `since`
-/// (milliseconds): the `system` `turn_duration` record it writes as each turn ends.
-fn turn_ended_since(transcript: &Path, since: u64) -> bool {
-    tail(transcript, LAST_SAID).is_some_and(|tail| {
-        tail.iter()
-            .filter(|record| {
-                record.get("type").and_then(Value::as_str) == Some("system")
-                    && record.get("subtype").and_then(Value::as_str) == Some("turn_duration")
-            })
-            .filter_map(|record| {
-                let at = record.get("timestamp").and_then(Value::as_str)?;
-                chrono::DateTime::parse_from_rfc3339(at).ok()
-            })
-            .any(|at| u64::try_from(at.timestamp_millis()).is_ok_and(|at| at > since))
-    })
-}
-
-/// What Claude Code said went wrong, when the last assistant record of a transcript is
-/// its own error (`isApiErrorMessage`) rather than the model's words.
-fn stopped_on(transcript: &Path) -> Option<String> {
-    let tail = tail(transcript, LAST_SAID)?;
-    let last = tail
-        .iter()
-        .rev()
-        .find(|record| record.get("type").and_then(Value::as_str) == Some("assistant"))?;
-    if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
-        return None;
+impl Heard {
+    fn new(launched: u64) -> Result<Self, String> {
+        let path = std::env::temp_dir().join(format!(
+            "steery-claude-code-turn-{}-{launched}.jsonl",
+            std::process::id()
+        ));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| format!("making {}: {e}", path.display()))?;
+        Ok(Self(path))
     }
-    let text = last
-        .pointer("/message/content")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
-    (!text.trim().is_empty()).then_some(text)
+
+    /// The launch's `--settings`: Claude Code runs this binary's [`HEARD`] mode on the
+    /// session's turn ends ([`ENDS`]), beside every hook its person's own settings name.
+    fn settings(&self) -> Result<[String; 2], String> {
+        let binary = std::env::current_exe().map_err(|e| format!("finding this driver: {e}"))?;
+        let command = format!(
+            "{} {HEARD} {}",
+            crate::drive::quoted(text(&binary)?),
+            crate::drive::quoted(text(&self.0)?)
+        );
+        let hook = json!([{"hooks": [{"type": "command", "command": command, "timeout": HEARD_WAITS}]}]);
+        let hooks: serde_json::Map<String, Value> = ENDS
+            .iter()
+            .map(|end| ((*end).to_owned(), hook.clone()))
+            .collect();
+        Ok(["--settings".into(), json!({ "hooks": hooks }).to_string()])
+    }
+
+    /// The newest turn end the session handed over since the launch, if any.
+    fn end(&self) -> Option<Value> {
+        std::fs::read(&self.0)
+            .ok()?
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .last()
+    }
+}
+
+impl Drop for Heard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// What Claude Code said went wrong, where a turn end it handed over is a `StopFailure`.
+fn failed_on(end: &Value) -> Option<String> {
+    (end.get("hook_event_name").and_then(Value::as_str) == Some("StopFailure"))
+        .then(|| crate::hooks::failure(end).line)
+        .filter(|line| !line.is_empty())
+}
+
+/// The [`HEARD`] mode, the hook a turn's own session runs as a turn ends: its document, off
+/// standard input, appended as one line to the follower's file its one argument names,
+/// while that file is there. It prints nothing, so Claude Code goes on as its person's own
+/// hooks say, and always exits 0.
+pub fn heard(mut args: impl Iterator<Item = String>) -> std::process::ExitCode {
+    if let Some(file) = args.next()
+        && let Ok(document) = std::io::read_to_string(std::io::stdin())
+        && let Ok(document) = serde_json::from_str::<Value>(&document)
+        && let Ok(mut out) = std::fs::OpenOptions::new().append(true).open(file)
+    {
+        let _ = out.write_all(format!("{document}\n").as_bytes());
+    }
+    std::process::ExitCode::SUCCESS
 }
 
 /// `turn/read`: what one line of a turn says. Standard output is the turn mode's own
@@ -490,61 +506,38 @@ mod tests {
         assert!(turn(Act::Continue, None, false).launching().is_err());
     }
 
+    /// The session's own turn ends reach the follower through the hooks its launch gives
+    /// it: each document a line of a file made empty before the launch, the newest saying
+    /// how the turn ended, a `StopFailure` with Claude Code's words for what went wrong.
     #[test]
-    fn a_background_session_stopped_on_its_own_error() {
-        let dir = Scratch::new("blocked");
-        let transcript = dir.path().join("t.jsonl");
-        std::fs::write(&transcript, concat!(
-            r#"{"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"working"}]}}"#, "\n",
-            r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"Autocompact is thrashing: the context refilled"}]}}"#, "\n",
-            r#"{"type":"system","subtype":"turn_duration"}"#, "\n",
-        )).unwrap();
+    fn a_turns_own_hooks_say_its_end_and_what_went_wrong() {
+        let heard = Heard::new(now()).unwrap();
+        let [flag, settings] = heard.settings().unwrap();
+        assert_eq!(flag, "--settings");
+        let settings: Value = serde_json::from_str(&settings).unwrap();
+        for end in ENDS {
+            let command = settings["hooks"][end][0]["hooks"][0]["command"].as_str().unwrap();
+            assert!(
+                command.ends_with(&format!(" {HEARD} '{}'", heard.0.display())),
+                "{command}"
+            );
+        }
+        assert_eq!(heard.end(), None, "nothing ended since the launch");
+        let stop = json!({"session_id": "s-1", "hook_event_name": "Stop", "last_assistant_message": "done"});
+        std::fs::write(&heard.0, format!("{stop}\n")).unwrap();
+        assert_eq!(heard.end().as_ref().and_then(failed_on), None);
+        // As Claude Code 2.1.304 handed it, the model unknown to its service.
+        let failed = json!({"session_id": "s-1", "effort": {"level": "high"},
+            "hook_event_name": "StopFailure", "error": "unknown",
+            "last_assistant_message": "API Error: 400 unknown provider for model claude-nonexistent-9"});
+        std::fs::write(&heard.0, format!("{stop}\n{failed}\n")).unwrap();
         assert_eq!(
-            stopped_on(&transcript).as_deref(),
-            Some("Autocompact is thrashing: the context refilled")
+            heard.end().as_ref().and_then(failed_on).as_deref(),
+            Some("API Error: 400 unknown provider for model claude-nonexistent-9")
         );
-        std::fs::write(&transcript, concat!(
-            r#"{"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"May I run it?"}]}}"#, "\n",
-        )).unwrap();
-        assert_eq!(
-            stopped_on(&transcript),
-            None,
-            "the model's own last word is no error"
-        );
-    }
-
-    /// Claude Code writes `system` `turn_duration` as each turn ends. Only one written
-    /// after the launch is this turn's.
-    #[test]
-    fn a_transcript_says_whether_a_turn_ended_since_the_launch() {
-        let dir = Scratch::new("ended");
-        let transcript = dir.path().join("t.jsonl");
-        std::fs::write(&transcript, concat!(
-            r#"{"type":"user","timestamp":"2026-09-27T20:43:44.000Z","entrypoint":"cli","message":{"role":"user","content":"go"}}"#, "\n",
-            r#"{"type":"assistant","timestamp":"2026-09-27T20:47:30.100Z","message":{"stop_reason":"stop_sequence","content":[{"type":"text","text":"Which one?"}]}}"#, "\n",
-            r#"{"type":"system","subtype":"turn_duration","timestamp":"2026-09-27T20:47:30.200Z"}"#, "\n",
-            r#"{"type":"frame-link"}"#, "\n",
-        )).unwrap();
-        let launch = |at: &str| {
-            u64::try_from(
-                chrono::DateTime::parse_from_rfc3339(at)
-                    .unwrap()
-                    .timestamp_millis(),
-            )
-            .unwrap()
-        };
-        assert!(turn_ended_since(
-            &transcript,
-            launch("2026-09-27T20:38:55.515Z")
-        ));
-        assert!(
-            !turn_ended_since(&transcript, launch("2026-09-27T21:07:00.000Z")),
-            "an earlier turn's end"
-        );
-        assert!(!turn_ended_since(
-            &dir.path().join("absent.jsonl"),
-            launch("2026-09-27T20:38:55Z")
-        ));
+        let path = heard.0.clone();
+        drop(heard);
+        assert!(!path.exists(), "the follower leaves no file behind");
     }
 
     #[test]
