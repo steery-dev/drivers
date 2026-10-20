@@ -352,8 +352,9 @@ fn pi_refused(said: &str) -> Option<&'static str> {
     }
 }
 
-/// `reader`: the harness as a one-shot reader, on the model it is given, else on its own
-/// default. A reader with no tools runs in a private folder and is asked through a file
+/// `reader`: the harness as a one-shot reader, on the model and thinking level it is
+/// given, else on its own default (with no tools, thinking `off`). A reader with no tools
+/// runs in a private folder and is asked through a file
 /// there, named as `@path`; one that reads runs in the place it looks at, which it must
 /// leave as it found it, and is asked on its command line. The answer is the whole
 /// output.
@@ -375,6 +376,14 @@ fn planned(harness: Harness, binary: &Path, reader: Reader) -> Result<ReaderPlan
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned(), "--print".into()];
     if let Some(model) = reader.model {
         argv.extend(["--model".into(), model]);
+    }
+    let thinking = match (reader.thinking, reader.tools) {
+        (Some(level), _) => Some(level),
+        (None, ReaderTools::None) => Some("off".to_owned()),
+        (None, ReaderTools::Read) => None,
+    };
+    if let Some(level) = thinking {
+        argv.extend(["--thinking".into(), level]);
     }
     if let Some(system) = reader.system {
         argv.extend(["--system-prompt".into(), system]);
@@ -410,8 +419,8 @@ fn planned(harness: Harness, binary: &Path, reader: Reader) -> Result<ReaderPlan
     let files = match reader.tools {
         ReaderTools::None => {
             match harness {
-                Harness::Omp => argv.extend(["--thinking", "off", "--"].map(String::from)),
-                Harness::Pi => argv.extend(["--approve", "--thinking", "off"].map(String::from)),
+                Harness::Omp => argv.push("--".into()),
+                Harness::Pi => argv.push("--approve".into()),
             }
             let asked = reader.cwd.join(ASKED);
             let asked = asked
@@ -518,6 +527,7 @@ mod tests {
         Reader {
             system: Some("you read".into()),
             model: Some("a/model".into()),
+            thinking: None,
             tools,
             cwd: PathBuf::from("/tmp/steery-read"),
             asked: "what is here?".into(),

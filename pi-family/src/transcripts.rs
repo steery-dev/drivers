@@ -164,6 +164,7 @@ impl Store {
                 more: false,
                 reset: false,
                 whole,
+                after: None,
             });
         }
         let lead = self.find(&read.external_id)?;
@@ -999,6 +1000,7 @@ fn read_from(
                 more: read.more,
                 reset: read.reset,
                 whole: read.from == 0,
+                after: None,
             })
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))

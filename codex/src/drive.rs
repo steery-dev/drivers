@@ -908,12 +908,14 @@ fn refused(said: &str) -> &'static str {
 /// `read-only` sandbox, which is how Codex reads files. `config.toml` is kept: it holds
 /// the person's provider and model, and dropping it sends Codex to an API key a person
 /// signed in through ChatGPT never set. The instructions go in as
-/// `developer_instructions`. Codex refuses a feature it does not know, so only those its
-/// own `codex features list` names are taken away.
+/// `developer_instructions`, the thinking level as `model_reasoning_effort`. Codex refuses
+/// a feature it does not know, so only those its own `codex features list` names are
+/// taken away.
 pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let codex = binary()?;
     let known = features(&codex).await?;
-    let servers = servers(&codex, &reader.cwd).await?;
+    let off: Vec<&str> = taken(reader.tools, &known).collect();
+    let servers = servers(&codex, &reader.cwd, &off).await?;
     planned(&codex, &known, &servers, reader)
 }
 
@@ -941,16 +943,9 @@ fn planned(
         argv.push("-c".into());
         argv.push(format!("mcp_servers.{server}.enabled=false"));
     }
-    let taken = match reader.tools {
-        ReaderTools::None => TAKEN,
-        ReaderTools::Read => LOOK_TAKEN,
-    };
-    for feature in taken
-        .iter()
-        .filter(|feature| known.iter().any(|known| known == *feature))
-    {
+    for feature in taken(reader.tools, known) {
         argv.push("--disable".into());
-        argv.push((*feature).into());
+        argv.push(feature.into());
     }
     if let Some(system) = &reader.system {
         argv.push("-c".into());
@@ -963,6 +958,13 @@ fn planned(
         argv.push("--model".into());
         argv.push(model.into());
     }
+    if let Some(effort) = &reader.thinking {
+        argv.push("-c".into());
+        argv.push(format!(
+            "model_reasoning_effort={}",
+            serde_json::to_string(effort).map_err(|e| Error::invalid(e.to_string()))?
+        ));
+    }
     argv.push("-".into());
     Ok(ReaderPlan {
         argv,
@@ -974,13 +976,29 @@ fn planned(
     })
 }
 
-/// The MCP servers Codex would reach from `cwd`, as `codex mcp list --json` names them:
-/// each is turned off for the read, since `-c mcp_servers={}` merges into them rather than
-/// replacing them (Codex 0.162). A name a dotted override cannot spell is refused.
-async fn servers(codex: &Path, cwd: &Path) -> Result<Vec<String>, Error> {
+/// The features a reader with `tools` takes away, of those this Codex knows.
+fn taken(tools: ReaderTools, known: &[String]) -> impl Iterator<Item = &'static str> + '_ {
+    let taken = match tools {
+        ReaderTools::None => TAKEN,
+        ReaderTools::Read => LOOK_TAKEN,
+    };
+    taken
+        .iter()
+        .copied()
+        .filter(|feature| known.iter().any(|known| known == feature))
+}
+
+/// The MCP servers the read would reach from `cwd` with the features `off` taken away, as
+/// `codex mcp list --json` names them: each is turned off for the read, since
+/// `-c mcp_servers={}` merges into them rather than replacing them (Codex 0.163). Listed
+/// without `off`, it would name a plugin's servers, which `--disable plugins` already
+/// drops, and whose override alone is no server (`invalid transport`). A name a dotted
+/// override cannot spell is refused.
+async fn servers(codex: &Path, cwd: &Path, off: &[&str]) -> Result<Vec<String>, Error> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         steery_driver_common::program::helper(codex)
+            .args(off.iter().flat_map(|feature| ["--disable", *feature]))
             .args(["mcp", "list", "--json"])
             .current_dir(cwd)
             .stdout(std::process::Stdio::piped())
@@ -1219,6 +1237,7 @@ mod tests {
         Reader {
             system: Some("you read".into()),
             model: model.map(str::to_owned),
+            thinking: None,
             tools,
             cwd: PathBuf::from("/tmp/steery-read"),
             asked: "q".into(),
