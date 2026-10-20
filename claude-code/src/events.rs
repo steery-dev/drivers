@@ -500,11 +500,9 @@ const AGENTS: [&str; 2] = ["Task", "Agent"];
 const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
 
 /// Why a turn failed, as Claude Code recorded it: the API's status (`apiErrorStatus`) and
-/// its own code (`error`), its words in the message. Never read from wording: a 401 or
-/// its `authentication_failed` is a sign-in it could not make; a 429, 503 or 529 or its
-/// `rate_limit` a limit. Every such failure is the model service's. A limit's end is the
-/// quota Claude Code says refused it (`quotaLimits`, `status` `rejected`): its `resetsAt`,
-/// in seconds.
+/// its own code (`error`), its words in the message ([`failure_kind`]). Every such failure
+/// is the model service's. A limit's end is the quota Claude Code says refused it
+/// (`quotaLimits`, `status` `rejected`): its `resetsAt`, in seconds.
 fn failure(record: &Value, message: &Value) -> Failure {
     let http_status = record
         .get("apiErrorStatus")
@@ -514,19 +512,8 @@ fn failure(record: &Value, message: &Value) -> Failure {
     let code = text(record, "error")
         .filter(|code| !code.is_empty())
         .map(str::to_owned);
-    let signed_out = match http_status {
-        Some(status) => status == 401,
-        None => code.as_deref() == Some("authentication_failed"),
-    };
-    let limited = http_status.is_some_and(|status| matches!(status, 429 | 503 | 529))
-        || code.as_deref() == Some("rate_limit");
-    let kind = if signed_out {
-        FailureKind::SignIn
-    } else if limited {
-        FailureKind::RateLimit
-    } else {
-        FailureKind::Other
-    };
+    let kind = failure_kind(http_status, code.as_deref());
+    let limited = kind == FailureKind::RateLimit;
     let line = blocks(message.get("content").unwrap_or(&Value::Null))
         .iter()
         .find_map(|block| text(block, "text"))
@@ -551,6 +538,27 @@ fn failure(record: &Value, message: &Value) -> Failure {
             .filter(|model| *model != SYNTHETIC && !model.is_empty())
             .map(str::to_owned),
         thinking: None,
+    }
+}
+
+/// The kind of a failure Claude Code gave up on, by the API's status where it recorded one
+/// and its own code (the transcript's `error`, the `StopFailure` hook's `error`), never by
+/// wording: a 401 or `authentication_failed` is a sign-in it could not make (a service that
+/// answered other than 401 took the sign-in); a 429, 503 or 529, `rate_limit` or
+/// `overloaded` a limit.
+pub fn failure_kind(http_status: Option<u16>, code: Option<&str>) -> FailureKind {
+    let signed_out = match http_status {
+        Some(status) => status == 401,
+        None => code == Some("authentication_failed"),
+    };
+    let limited = http_status.is_some_and(|status| matches!(status, 429 | 503 | 529))
+        || matches!(code, Some("rate_limit" | "overloaded"));
+    if signed_out {
+        FailureKind::SignIn
+    } else if limited {
+        FailureKind::RateLimit
+    } else {
+        FailureKind::Other
     }
 }
 

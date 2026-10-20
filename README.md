@@ -258,11 +258,15 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
   it is `~/.claude`), the skill in `skills/steery/SKILL.md`, and one hook per event in
   `settings.json`, at `/hooks/<event>/-`: one group beside the person's own that runs
   `steery hook claude-code <event>`. `found.release` is what `claude --version` says.
-- **Moments** (`hook/read`, `hook/answer`). A hook's document becomes a Moment; Steery's
-  answer becomes what Claude Code reads: `hookSpecificOutput.additionalContext`, a
-  `Stop` that keeps the turn going (`decision: block`), a `PreToolUse` or
-  `PermissionRequest` decision, and the conversation's lead written to `CLAUDE_ENV_FILE`
-  (`append`).
+- **Moments** (`hook/read`, `hook/answer`). A hook's document becomes a Moment, with the
+  state Claude Code's documents carry: the model (`SessionStart`'s `model`,
+  `PostModelSwitch`'s `to_model`), the effort (`effort.level`) and, at `StopFailure`, the
+  failure (`error`, its words in `last_assistant_message`). They carry no time, and
+  `PreCompact`/`PostCompact` carry no compaction's id or tokens, so compactions stay the
+  transcript's. Steery's answer becomes what Claude Code reads:
+  `hookSpecificOutput.additionalContext`, a `Stop` that keeps the turn going (`decision:
+  block`), a `PreToolUse` or `PermissionRequest` decision, and the conversation's lead
+  written to `CLAUDE_ENV_FILE` (`append`).
 - **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
   `reader`, `terminal`).
   - `held`: Claude Code's registry, `sessions/<pid>.json`, names the live session in a
@@ -274,7 +278,10 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
     `-w`, `--model`, `--effort`). The plan runs this driver's own binary in its turn mode
     (`steery-driver-claude-code turn …`), which starts the session and follows it through
     `claude agents` to where its turn stopped; `turn/read` reads those lines and Claude
-    Code's own refusals (`untrusted`, `not-found`, `harness-busy`).
+    Code's own refusals (`untrusted`, `not-found`, `harness-busy`). The launch gives that
+    session its own `Stop` and `StopFailure` hooks (`--settings`), which run the binary's
+    `heard` mode into a file the follower reads: whether a stop the listing shows is this
+    turn's, and Claude Code's words for an API error. No transcript is read.
   - `receipt/mark`, `receipt/find`: the person's input carrying the delivery marker, in
     the transcript past a mark.
   - `models`: the model in `settings.json`, and Claude Code's effort levels for any other.

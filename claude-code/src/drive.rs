@@ -577,7 +577,7 @@ fn plain_job(job: &str) -> bool {
 }
 
 /// One literal POSIX shell word.
-fn quoted(word: &str) -> String {
+pub(crate) fn quoted(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 

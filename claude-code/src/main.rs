@@ -31,8 +31,10 @@ const MARK: &str = "M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some(turn::MODE) {
-        return turn::run(args);
+    match args.next().as_deref() {
+        Some(turn::MODE) => return turn::run(args),
+        Some(turn::HEARD) => return turn::heard(args),
+        _ => {}
     }
     // Many threads: most calls read files without yielding, and on one thread a slow one
     // stops standard input being read; the runtime then kills the driver with every call in
