@@ -88,6 +88,10 @@ fn moment(store: &Store, event: &str, document: &Value) -> Option<Moment> {
             .get("context_left")
             .and_then(Value::as_f64)
             .filter(|left| (0.0..=1.0).contains(left)),
+        // The door says the model and thinking level; a pi hook document names neither.
+        model: None,
+        thinking: None,
+        failure: None,
         suggestions: Vec::new(),
         external_id,
     })
