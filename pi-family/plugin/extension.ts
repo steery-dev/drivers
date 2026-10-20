@@ -2012,7 +2012,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         ? "print"
         : "tui";
 
-  /** The first frame on every door: who this copy is and what its conversation is doing now. */
+  /** The first frame on every door: who this copy is, where it runs and what its conversation is doing now. */
   const hello = (ctx: Context): Frame => {
     const lead = led(ctx) ? leadOf(ctx) : undefined;
     const state = stateNow(ctx);
@@ -2027,6 +2027,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       mode: modeOf(ctx),
       ...(lead ? { lead } : {}),
       state,
+      cwd: ctx.cwd,
     };
   };
 
