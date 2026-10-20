@@ -126,6 +126,15 @@ impl Follow {
     }
 }
 
+/// Whether a listing's row is of a process started at or after `launched` (milliseconds):
+/// `startedAt` moves to each process that runs the session, so such a row's state is that
+/// process's.
+pub fn started_since(line: &Value, launched: u64) -> bool {
+    line.get("startedAt")
+        .and_then(Value::as_u64)
+        .is_some_and(|started| started >= launched)
+}
+
 /// The short id `claude --bg` prints on its first line, `backgrounded · <id>`, a name
 /// after it where the session has one.
 pub fn backgrounded(said: &str) -> Option<String> {

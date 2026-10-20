@@ -13,7 +13,9 @@
 //! Where the listing leaves a question — whether a stop it shows is this turn's, and what
 //! went wrong — the session's own `Stop` and `StopFailure` hooks answer it: the launch gives
 //! that one session two more hooks (`--settings`), which run this binary's `heard` mode and
-//! hand their documents to the follower ([`Heard`]). Nothing reads the transcript.
+//! hand their documents to the follower ([`Heard`]). A row whose process started after the
+//! launch is this turn's without them, and an error no `StopFailure` named is read from the
+//! transcript's end.
 //!
 //! A `continue` never starts beside a session that is in the conversation: Claude Code
 //! would start a copy. One already there is refused before anything starts, and a copy
@@ -200,7 +202,8 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
     {
         return Err(format!("session {id} {}", RUNNING[0]));
     }
-    let heard = Heard::new(now())?;
+    let launched = now();
+    let heard = Heard::new(launched)?;
     // The session writes the conversation: it keeps the `STEERY_STARTED` the runtime gave
     // this turn, never a helper's.
     let mut command = tokio::process::Command::new(&turn.binary);
@@ -247,13 +250,26 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
                 let short_of_done = agents::end(&entry).is_some()
                     && entry.get("state").and_then(Value::as_str) != Some("done");
                 let end = heard.end();
+                // What went wrong as the turn's own StopFailure said it, else as Claude Code
+                // recorded its own error in the transcript: StopFailure names API errors, and
+                // a person's settings may run no hooks.
                 if short_of_done
-                    && let Some(error) = end.as_ref().and_then(failed_on)
+                    && let Some(error) = end.as_ref().and_then(failed_on).or_else(|| {
+                        let session = entry.get("sessionId").and_then(Value::as_str)?;
+                        let transcript = crate::transcripts::Store::new(root.to_owned())
+                            .session(session)
+                            .ok()?
+                            .transcripts
+                            .pop()?;
+                        stopped_on(&transcript)
+                    })
                     && let Some(object) = entry.as_object_mut()
                 {
                     object.insert("error".into(), Value::from(error));
                 }
-                let ended = || end.is_some();
+                // The stop is this turn's where its own hook said so, or where the row is
+                // of the process this launch started: hooks may not run at all.
+                let ended = || end.is_some() || agents::started_since(&entry, launched);
                 if follow.settled_by(&entry, ended) {
                     return say(out, json!({ "settled": entry }));
                 }
@@ -374,6 +390,41 @@ fn failed_on(end: &Value) -> Option<String> {
     (end.get("hook_event_name").and_then(Value::as_str) == Some("StopFailure"))
         .then(|| crate::hooks::failure(end).line)
         .filter(|line| !line.is_empty())
+}
+
+/// How much of a transcript's end is read for the last thing said in it.
+const LAST_SAID: u64 = 1024 * 1024;
+
+/// What Claude Code said went wrong, when the last assistant record of a transcript is
+/// its own error (`isApiErrorMessage`) rather than the model's words.
+fn stopped_on(transcript: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(transcript).ok()?;
+    let start = file.metadata().ok()?.len().saturating_sub(LAST_SAID);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let whole = if start > 0 {
+        &bytes[bytes.iter().position(|byte| *byte == b'\n')? + 1..]
+    } else {
+        &bytes[..]
+    };
+    let last = whole
+        .split(|byte| *byte == b'\n')
+        .rev()
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .find(|record| record.get("type").and_then(Value::as_str) == Some("assistant"))?;
+    if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    let text = last
+        .pointer("/message/content")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!text.trim().is_empty()).then_some(text)
 }
 
 /// The [`HEARD`] mode, the hook a turn's own session runs as a turn ends: its document, off
