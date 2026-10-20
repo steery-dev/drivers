@@ -11,11 +11,13 @@
 //! error, and the mode exits 1.
 //!
 //! Where the listing leaves a question — whether a stop it shows is this turn's, and what
-//! went wrong — the session's own `Stop` and `StopFailure` hooks answer it: the launch gives
-//! that one session two more hooks (`--settings`), which run this binary's `heard` mode and
-//! hand their documents to the follower ([`Heard`]). A row whose process started after the
-//! launch is this turn's without them, and an error no `StopFailure` named is read from the
-//! transcript's end.
+//! went wrong — a `new` or a `fork` session's own `Stop` and `StopFailure` hooks answer it:
+//! the launch gives that one session two more hooks (`--settings`), which run this binary's
+//! `heard` mode and hand their documents to the follower ([`Heard`]). A `continue` gets none:
+//! Claude Code 2.1.304 resumes a session launched with `--settings` as a new session, so
+//! the words would go to a conversation nobody asked for. A row whose process started after
+//! the launch is this turn's without them, and an error no `StopFailure` named is read from
+//! the transcript's end.
 //!
 //! A `continue` never starts beside a session that is in the conversation: Claude Code
 //! would start a copy. One already there is refused before anything starts, and a copy
@@ -170,6 +172,9 @@ fn text(path: &Path) -> Result<&str, String> {
 
 /// The turn mode: run the turn its arguments say, the words on standard input. Exits 0
 /// once the turn settled, 1 with Claude Code's words on standard error where it did not.
+/// A runtime stops a turn by signalling its process group, so a SIGTERM, a SIGINT or a
+/// SIGHUP ends the follow there, which drops everything it made ([`Heard`]): the session it
+/// started goes on as Claude Code's own and writes nowhere of the follower's.
 pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     let ran = (|| {
         let turn = Turn::parse(args)?;
@@ -181,7 +186,20 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
             .enable_all()
             .build()
             .map_err(|e| e.to_string())?
-            .block_on(follow(&turn, &root, &words, &mut std::io::stdout()))
+            .block_on(async {
+                use tokio::signal::unix::{SignalKind, signal};
+                let hear = |kind| signal(kind).map_err(|e| format!("hearing signals: {e}"));
+                let mut term = hear(SignalKind::terminate())?;
+                let mut int = hear(SignalKind::interrupt())?;
+                let mut hup = hear(SignalKind::hangup())?;
+                let mut out = std::io::stdout();
+                tokio::select! {
+                    followed = follow(&turn, &root, &words, &mut out) => followed,
+                    _ = term.recv() => Err("stopped by SIGTERM".to_owned()),
+                    _ = int.recv() => Err("stopped by SIGINT".to_owned()),
+                    _ = hup.recv() => Err("stopped by SIGHUP".to_owned()),
+                }
+            })
     })();
     match ran {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -203,14 +221,19 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
         return Err(format!("session {id} {}", RUNNING[0]));
     }
     let launched = now();
-    let heard = Heard::new(launched)?;
+    let heard = match turn.act {
+        Act::Continue => None,
+        _ => Some(Heard::new(launched)?),
+    };
     // The session writes the conversation: it keeps the `STEERY_STARTED` the runtime gave
     // this turn, never a helper's.
     let mut command = tokio::process::Command::new(&turn.binary);
     command.stdin(std::process::Stdio::null());
+    command.args(turn.launching()?);
+    if let Some(heard) = &heard {
+        command.args(heard.settings()?);
+    }
     let launch = command
-        .args(turn.launching()?)
-        .args(heard.settings()?)
         .arg("--")
         .arg(words)
         .stdout(std::process::Stdio::piped())
@@ -249,7 +272,7 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
             Some(mut entry) => {
                 let short_of_done = agents::end(&entry).is_some()
                     && entry.get("state").and_then(Value::as_str) != Some("done");
-                let end = heard.end();
+                let end = heard.as_ref().and_then(Heard::end);
                 // What went wrong as the turn's own StopFailure said it, else as Claude Code
                 // recorded its own error in the transcript: StopFailure names API errors, and
                 // a person's settings may run no hooks.
