@@ -45,13 +45,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
 
 /// Every entry, in the order Claude Code reads them.
 fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
-    // Claude Code keeps its user-scope servers beside its configuration root: in
-    // `~/.claude.json`, or inside the folder `CLAUDE_CONFIG_DIR` moves the root to.
-    let servers = if root == crate::default_root(home) {
-        home.join(".claude.json")
-    } else {
-        root.join(".claude.json")
-    };
+    let servers = crate::claude_json(home, root);
     let mut entries = vec![
         // A per-server `timeout`, in milliseconds, is at once the bound on one call and the
         // floor of Claude Code's idle watchdog on an `http` server. Claude Code reads no
