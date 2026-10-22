@@ -58,7 +58,8 @@ async fn servers(client: &Client, params: Value) -> Value {
 
 /// omp: everywhere, the agent folder's servers, a URL one by its bare URL, one turned off
 /// in its entry but on in `enabledServers`, and none `disabledServers` names. In a folder,
-/// its `.omp/mcp.json` comes first and wins a name, and its root `mcp.json` comes last.
+/// its `.omp/mcp.json` comes first and wins a name, and its root `mcp.json` comes last;
+/// `mcp.enableProjectConfig: false` in omp's `config.yml` drops both.
 /// pi: a folder's `.pi/mcp.json` counts only where `trust.json` trusts that folder.
 #[tokio::test]
 async fn omp_and_pi_list_the_servers_a_conversation_loads_and_no_secret() {
@@ -111,6 +112,32 @@ async fn omp_and_pi_list_the_servers_a_conversation_loads_and_no_secret() {
             {"server": "forced"},
             {"server": "fallback", "url": "https://fallback.example.com/mcp"},
         ])
+    );
+    std::fs::write(
+        home.join(".omp/agent/config.yml"),
+        "modelRoles:\n  default: none\nmcp:\n  # the folder's own files are not read\n  enableProjectConfig: false\n",
+    )
+    .unwrap();
+    let raw = omp
+        .call(
+            method::MCP_LIST,
+            json!({"cwd": work}),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        raw["servers"],
+        json!([
+            {"server": "forced"},
+            {"server": "tracker", "url": "https://mcp.example.com/mcp"},
+        ])
+    );
+    assert!(
+        raw["watch"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(home.join(".omp/agent/config.yml")))
     );
     omp.shutdown().await.unwrap();
 

@@ -137,9 +137,9 @@ and path leave the machine; [`common/src/mcp.rs`](common/src/mcp.rs) reads the
 
 | Driver | Everywhere | In a folder, ahead of those | `complete` |
 |---|---|---|---|
-| `omp` | agent folder's `mcp.json`, `.mcp.json`; `enabled: false` off unless `enabledServers`; `disabledServers` off | `.omp/mcp.json`, `.omp/.mcp.json`; the folder's `mcp.json`, `.mcp.json` last | never: other tools' files, plugins, extensions |
+| `omp` | agent folder's `mcp.json`, `.mcp.json`; `enabled: false` off unless `enabledServers`; `disabledServers` off | `.omp/mcp.json`, `.omp/.mcp.json`; the folder's `mcp.json`, `.mcp.json` last; none where `config.yml` says `mcp.enableProjectConfig: false` | never: other tools' files, plugins, extensions |
 | `pi` | agent folder's `mcp.json` | `.pi/mcp.json`, where `trust.json` trusts exactly that folder | never: extensions register servers |
-| `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`; `.mcp.json` where the folder is trusted and the server approved, not rejected; `disabledMcpServers` off | not with managed configuration, a plugin on, or a claude.ai sign-in |
+| `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`; `.mcp.json` where the folder is trusted and the server approved, not rejected (`start` runs `claude --bg`, an interactive background session that waits on approval, not `-p`); `disabledMcpServers` off | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 
 ## Adding a driver

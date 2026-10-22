@@ -7,7 +7,9 @@
 //!   `.mcp.json`, only where the folder is trusted (`hasTrustDialogAccepted`) and the server
 //!   approved (`enableAllProjectMcpServers` or `enabledMcpjsonServers`) and not rejected
 //!   (`disabledMcpjsonServers`) by the person's settings, the folder's, or its entry in the
-//!   state file. The folder's `disabledMcpServers` turns any server off there.
+//!   state file. The folder's `disabledMcpServers` turns any server off there. Approval
+//!   counts because a conversation Steery starts runs as `claude --bg` ([`crate::turn`]):
+//!   an interactive background session, which waits on it, not a `-p` run, which skips it.
 //!
 //! An entry with a `url` and no `type`, or of `type: "sdk"`, Claude Code skips, and so does
 //! this list. The list is incomplete where an administrator's managed configuration is
