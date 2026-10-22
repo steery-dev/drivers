@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use steery_driver_common::mcp;
 use steery_driver_common::program::{release_within, version};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
@@ -206,12 +207,8 @@ fn extension(harness: Harness, setup: &Setup) -> Result<String, Error> {
 /// would stand beside the one the plugin registers: pi's own, and each trusted project's
 /// `.pi/mcp.json`. pi reads `-` and `_` in a server's name alike.
 fn own_servers(root: &Path) -> Vec<PathBuf> {
-    let json = |file: &Path| -> Option<Value> {
-        let bytes = std::fs::read(file).ok()?;
-        serde_json::from_slice(bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes)).ok()
-    };
     let mut files = vec![root.join("mcp.json")];
-    if let Some(Value::Object(decisions)) = json(&root.join("trust.json")) {
+    if let Some(Value::Object(decisions)) = mcp::json(&root.join("trust.json")) {
         files.extend(
             decisions
                 .iter()
@@ -224,14 +221,9 @@ fn own_servers(root: &Path) -> Vec<PathBuf> {
     files
         .into_iter()
         .filter(|file| {
-            json(file)
-                .and_then(|config| match config.get("mcpServers") {
-                    Some(Value::Object(servers)) => {
-                        Some(servers.keys().any(|name| name.replace('-', "_") == SERVER))
-                    }
-                    _ => None,
-                })
-                .unwrap_or(false)
+            mcp::json(file).is_some_and(|config| {
+                mcp::entries(&config).any(|(name, _)| name.replace('-', "_") == SERVER)
+            })
         })
         .collect()
 }

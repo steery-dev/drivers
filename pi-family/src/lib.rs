@@ -12,6 +12,7 @@ mod drive;
 mod events;
 mod harness;
 mod hooks;
+mod mcp;
 mod models;
 mod setup;
 mod transcripts;
@@ -22,7 +23,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 use steery_sdk::wire;
-use steery_sdk::{Error, PROTOCOL, Program, method, refusal, result};
+use steery_sdk::{Error, Program, method, refusal, result};
 
 pub use harness::Harness;
 
@@ -72,11 +73,8 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        if !params.protocol.contains(&PROTOCOL) {
-            return Err(Error::invalid(format!(
-                "this driver speaks protocol {PROTOCOL} only"
-            )));
-        }
+        let protocol = steery_sdk::pick(&params.protocol)
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 3 and 4"))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
             home: params.home.clone(),
@@ -92,7 +90,7 @@ impl Program for Driver {
             self.catalog.warm(harness, store.root());
         }
         Ok(wire::Initialized {
-            protocol: PROTOCOL,
+            protocol,
             program: wire::ProgramInfo {
                 id: harness.id().parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
@@ -128,6 +126,11 @@ impl Program for Driver {
             method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
             method::SESSIONS_FOLD => result(self.store()?.fold(steery_sdk::params(params)?)?),
             method::HOOK_READ => result(hooks::read(self.store()?, steery_sdk::params(params)?)?),
+            method::MCP_LIST => result(mcp::list(
+                harness,
+                self.store()?.root(),
+                steery_sdk::params(params)?,
+            )),
             method::HELD => result(drive::held(self.store()?, steery_sdk::params(params)?)),
             method::IDLE => result(drive::idle(self.store()?, steery_sdk::params(params)?)),
             method::MODELS => {
