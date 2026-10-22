@@ -112,7 +112,7 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
 - **The methods** (`Program::call`) are one match from each `steery_sdk::method` name to the
   module that answers it, its parameters read with `steery_sdk::params` and its answer
   given with `steery_sdk::result`: observe (`setup/plan`, `sessions/list`,
-  `sessions/locate`, `sessions/read`, `hook/read`; §4.1), drive (`held`, `idle`, `models`,
+  `sessions/locate`, `sessions/read`, `hook/read`, `mcp/list`; §4.1), drive (`held`, `idle`, `models`,
   `start`, `turn/read`, `receipt/*`, `reader`, `terminal`; §4.2), and any other answers
   `Error::Unknown`. A refusal is `Error::refused` with one of the protocol's words
   (`steery_sdk::refusal`).

@@ -1,0 +1,23 @@
+# The `config.toml` behind mcp-list-*.json (codex-cli 0.163.0). Each project is a git
+# repository; trusted/.codex/config.toml holds
+#   [mcp_servers.proj]
+#   url = "https://proj.example.com/mcp?k=SECRET"
+# and untrusted/.codex/config.toml holds
+#   [mcp_servers.unapproved]
+#   command = "evil"
+[mcp_servers.docs]
+url = "https://person:pw@mcp.example.com:8443/mcp?token=SECRET#frag"
+http_headers = { Authorization = "Bearer SECRET" }
+[mcp_servers.files]
+command = "npx"
+args = ["-y", "fs", "--key", "SECRET"]
+env = { KEY = "SECRET" }
+[mcp_servers.steery]
+url = "http://127.0.0.1:7777/mcp"
+[mcp_servers.off]
+command = "x"
+enabled = false
+[projects."/private/tmp/codex-probe/trusted"]
+trust_level = "trusted"
+[projects."/private/tmp/codex-probe/untrusted"]
+trust_level = "untrusted"

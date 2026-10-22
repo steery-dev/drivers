@@ -13,6 +13,7 @@ mod events;
 mod home;
 mod hooks;
 mod lines;
+mod mcp;
 mod native;
 mod rollout;
 mod router;
@@ -159,6 +160,9 @@ impl Program for Codex {
             }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::MCP_LIST => result(
+                mcp::list(home::binary().as_deref(), steery_sdk::params(params)?).await?,
+            ),
             method::HELD => result(self.drive()?.held(steery_sdk::params(params)?).await?),
             method::IDLE => result(self.drive()?.idle(steery_sdk::params(params)?).await?),
             method::MODELS => {

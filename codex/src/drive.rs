@@ -998,34 +998,8 @@ fn taken(tools: ReaderTools, known: &[String]) -> impl Iterator<Item = &'static 
 /// drops, and whose override alone is no server (`invalid transport`). A name a dotted
 /// override cannot spell is refused.
 async fn servers(codex: &Path, cwd: &Path, off: &[&str]) -> Result<Vec<String>, Error> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        steery_driver_common::program::helper(codex)
-            .args(off.iter().flat_map(|feature| ["--disable", *feature]))
-            .args(["mcp", "list", "--json"])
-            .current_dir(cwd)
-            .stdout(std::process::Stdio::piped())
-            .output(),
-    )
-    .await
-    .map_err(|_| {
-        Error::refused(
-            refusal::NO_ANSWER,
-            "`codex mcp list` did not answer in time",
-        )
-    })?
-    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex would not start: {e}")))?;
-    let listed: Value = serde_json::from_slice(&output.stdout)
-        .ok()
-        .filter(|_| output.status.success())
-        .ok_or_else(|| {
-            Error::refused(
-                refusal::REFUSED,
-                "`codex mcp list` did not list its servers",
-            )
-        })?;
     let mut names = Vec::new();
-    for server in listed.as_array().into_iter().flatten() {
+    for server in crate::mcp::listed(codex, cwd, off).await? {
         let name = server
             .get("name")
             .and_then(Value::as_str)

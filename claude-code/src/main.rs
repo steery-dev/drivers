@@ -12,6 +12,7 @@ mod drive;
 mod events;
 mod hooks;
 mod live;
+mod mcp;
 mod registry;
 mod setup;
 mod transcripts;
@@ -158,6 +159,7 @@ impl Program for ClaudeCode {
             }
             method::HOOK_READ => result(hooks::read(given(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
+            method::MCP_LIST => result(mcp::list(&self.place()?.home, self.root()?, given(params)?)?),
             method::HELD => result(drive::held(self.root()?, self.store()?, given(params)?)),
             method::IDLE => result(drive::idle(self.root()?, &self.listing, given(params)?).await),
             method::MODELS => {
@@ -273,6 +275,17 @@ pub(crate) fn root(home: &Path) -> Result<PathBuf, String> {
 /// Claude Code's configuration root where no variable moves it.
 pub(crate) fn default_root(home: &Path) -> PathBuf {
     home.join(".claude")
+}
+
+/// The file Claude Code keeps its servers and per-project state in, beside its
+/// configuration root: `~/.claude.json`, or inside the folder `CLAUDE_CONFIG_DIR` moves the
+/// root to.
+pub(crate) fn claude_json(home: &Path, root: &Path) -> PathBuf {
+    if root == default_root(home) {
+        home.join(".claude.json")
+    } else {
+        root.join(".claude.json")
+    }
 }
 
 /// Claude Code's executable: the first `claude` on `PATH`, else the one its own installer

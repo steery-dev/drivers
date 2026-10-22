@@ -12,6 +12,7 @@ mod drive;
 mod events;
 mod harness;
 mod hooks;
+mod mcp;
 mod models;
 mod setup;
 mod transcripts;
@@ -128,6 +129,15 @@ impl Program for Driver {
             method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
             method::SESSIONS_FOLD => result(self.store()?.fold(steery_sdk::params(params)?)?),
             method::HOOK_READ => result(hooks::read(self.store()?, steery_sdk::params(params)?)?),
+            method::MCP_LIST => result(
+                mcp::list(
+                    harness,
+                    self.store()?.root(),
+                    harness.binary(),
+                    steery_sdk::params(params)?,
+                )
+                .await?,
+            ),
             method::HELD => result(drive::held(self.store()?, steery_sdk::params(params)?)),
             method::IDLE => result(drive::idle(self.store()?, steery_sdk::params(params)?)),
             method::MODELS => {
