@@ -8,11 +8,11 @@ writes, and says how to start, read and resume a turn. It decides nothing and wr
 of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers version 3 of the program protocol. Steery adds the drivers below the way it adds any
-program: from this repository's releases, each a prebuilt executable per target
-(`steery programs add https://github.com/steery-dev/drivers`, which Steery's installer
-runs). Everything a person sees of a driver, its label, its short name, its tint and its
-mark, is what its `initialize` says.
+answers version 4 of the program protocol, or 3 to a runtime that offers only 3. Steery
+adds the drivers below the way it adds any program: from this repository's releases, each
+a prebuilt executable per target (`steery programs add https://github.com/steery-dev/drivers`,
+which Steery's installer runs). Everything a person sees of a driver, its label, its short
+name, its tint and its mark, is what its `initialize` says.
 
 | Driver | Harness | Crate | Levels |
 |---|---|---|---|
@@ -49,7 +49,8 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v3.8.0" }`, and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.0.0" }` (by `rev`
+until that tag is published), and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
@@ -102,8 +103,9 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
   `steery_driver_pi_family::serve(Harness::Omp)`, which calls
   `steery_sdk::serve(|_notifier| Driver::new(harness))`. The SDK reads requests, answers
   each one, and gives the notifier for what the driver says unasked.
-- **`initialize`** (`Program::initialize` in `src/lib.rs`) refuses a runtime that does not
-  offer `steery_sdk::PROTOCOL`, keeps the `home` and `config` it is given, and answers
+- **`initialize`** (`Program::initialize` in `src/lib.rs`) answers the newest protocol
+  the runtime offers that it speaks (`steery_sdk::pick`), refusing a runtime that offers
+  none, keeps the `home` and `config` it is given, and answers
   `wire::Initialized`: `program` (`id`, `kind: Harness`, `release`, `label`, `short`, and
   optionally `tint` and `mark`, what a person sees of it),
   `harness` (`HarnessInfo` from `src/harness.rs`: its levels, the harness's minimum release,
@@ -112,8 +114,9 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
 - **The methods** (`Program::call`) are one match from each `steery_sdk::method` name to the
   module that answers it, its parameters read with `steery_sdk::params` and its answer
   given with `steery_sdk::result`: observe (`setup/plan`, `sessions/list`,
-  `sessions/locate`, `sessions/read`, `hook/read`; §4.1), drive (`held`, `idle`, `models`,
-  `start`, `turn/read`, `receipt/*`, `reader`, `terminal`; §4.2), and any other answers
+  `sessions/locate`, `sessions/read`, `hook/read`, `mcp/list`; §4.1), drive (`held`,
+  `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`, `terminal`; §4.2), and
+  any other answers
   `Error::Unknown`. A refusal is `Error::refused` with one of the protocol's words
   (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own (`picks`, `keeps`) answers `say`,
@@ -123,6 +126,21 @@ worked example; copy it and keep its shape (the layout is below, under omp and p
   to the runtime itself, and the driver has no live methods. The runtime uses the live
   methods only on conversations Steery started; a conversation a person started is never
   steered.
+
+## MCP servers
+
+`mcp/list` (protocol 4) answers the MCP servers a conversation loads: without `cwd`, the
+person's own; with `cwd`, those a conversation started there loads, as the harness itself
+decides. Of each server only its name and, for a URL server, the URL's scheme, host, port
+and path leave the machine; [`common/src/mcp.rs`](common/src/mcp.rs) reads the
+`mcpServers` files omp, pi and Claude Code share.
+
+| Driver | Everywhere | In a folder, ahead of those | `complete` |
+|---|---|---|---|
+| `omp` | agent folder's `mcp.json`, `.mcp.json`; `enabled: false` off unless `enabledServers`; `disabledServers` off | `.omp/mcp.json`, `.omp/.mcp.json`; the folder's `mcp.json`, `.mcp.json` last; none where `config.yml` says `mcp.enableProjectConfig: false` | never: other tools' files, plugins, extensions |
+| `pi` | agent folder's `mcp.json` | `.pi/mcp.json`, where `trust.json` trusts exactly that folder | never: extensions register servers |
+| `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`; `.mcp.json` where the folder is trusted and the server approved, not rejected (`start` runs `claude --bg`, an interactive background session that waits on approval, not `-p`); `disabledMcpServers` off | not with managed configuration, a plugin on, or a claude.ai sign-in |
+| `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 
 ## Adding a driver
 

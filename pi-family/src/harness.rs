@@ -323,6 +323,31 @@ fn absolute(path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
+/// omp's settings files in its agent folder `root`, the one it reads first first.
+pub const OMP_CONFIG: [&str; 2] = ["config.yml", "config.yaml"];
+
+/// The value omp's `config.yml` gives `key` in its top-level block `section`
+/// (`section:` then indented `key: value`), unquoted.
+pub fn omp_setting(root: &Path, section: &str, key: &str) -> Option<String> {
+    let text = OMP_CONFIG
+        .iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())?;
+    let mut inside = false;
+    text.lines().find_map(|line| {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
+            return None;
+        }
+        if !line.starts_with([' ', '\t']) {
+            inside = line.trim_end().strip_suffix(':') == Some(section);
+            return None;
+        }
+        inside
+            .then(|| line.trim_start().strip_prefix(key)?.strip_prefix(':'))
+            .flatten()
+            .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
+    })
+}
+
 /// The oldest Node.js pi's installer accepts.
 const PI_NODE: (u64, u64, u64) = (22, 19, 0);
 

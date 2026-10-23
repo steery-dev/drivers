@@ -460,13 +460,14 @@ name = "steery-driver-common"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "steery-sdk",
  "tokio",
 ]
 
 [[package]]
 name = "steery-sdk"
-version = "3.11.0"
-source = "git+https://github.com/steery-dev/sdk?tag=v3.11.0#ace4adb34cfc3609a9ea7d6155817d6949f0917e"
+version = "4.0.0"
+source = "git+https://github.com/steery-dev/sdk?tag=v4.0.0#5c128ca8d4d86bb5ece4aa0d315df88f47c058e7"
 dependencies = [
  "libc",
  "serde",

@@ -259,23 +259,7 @@ fn price(model: &Value) -> Option<f64> {
 /// The model omp runs when told none: `modelRoles.default` in its `config.yml`, a
 /// selector with its thinking level after a `:`, where that names one it lists.
 fn omp_default(root: &Path, models: &[Model]) -> Option<String> {
-    let text = ["config.yml", "config.yaml"]
-        .iter()
-        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())?;
-    let mut roles = false;
-    let named = text.lines().find_map(|line| {
-        if line.trim().is_empty() || line.trim_start().starts_with('#') {
-            return None;
-        }
-        if !line.starts_with([' ', '\t']) {
-            roles = line.trim_end() == "modelRoles:";
-            return None;
-        }
-        roles
-            .then(|| line.trim_start().strip_prefix("default:"))
-            .flatten()
-            .map(|value| value.trim().trim_matches(['"', '\'']).to_owned())
-    })?;
+    let named = crate::harness::omp_setting(root, "modelRoles", "default")?;
     let listed = |selector: &str| models.iter().any(|offer| offer.model == selector);
     if listed(&named) {
         return Some(named);
