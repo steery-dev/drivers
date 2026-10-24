@@ -49,8 +49,7 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.0.0" }` (by `rev`
-until that tag is published), and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.2.0" }`, and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
