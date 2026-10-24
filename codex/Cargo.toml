@@ -6,7 +6,7 @@ license = "MIT"
 description = "Steery's driver for Codex: it reads Codex's conversations, plans its setup, and starts, steers and stops Codex turns through Codex's own app server."
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", rev = "d3704c186cf852602c803fd2bd8d56796e847334" }
 steery-driver-common = { path = "../common" }
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
