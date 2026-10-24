@@ -394,29 +394,196 @@ fn input_carries(record: &Value, marker: &str) -> bool {
     }
 }
 
-/// `models`: Claude Code names no models on its command line, and keeps the one this
-/// machine chose in its own settings (`model` in `settings.json`): that one, with every
-/// effort level, and any other model it runs takes the same levels.
-pub fn models(root: &Path) -> Models {
+/// Claude Code's model aliases, as its model configuration documents them
+/// (https://code.claude.com/docs/en/model-config, "Model aliases"), each with what a person
+/// reads and the model families it runs: an alias resolves to the newest model of its
+/// family the account's provider serves, so the list never goes stale with a release.
+/// `opus` first: it is what `default` resolves to on every account type the page names
+/// ("Default model setting"). `default` itself is left out: it names no model. A fresh
+/// Claude Code names none in its settings, so listing only that left a person Default alone
+/// (Ali's first run, #product Slack thread 2026-10-19).
+const ALIASES: [(&str, &str, &[&str]); 8] = [
+    ("opus", "Opus", &["opus"]),
+    ("sonnet", "Sonnet", &["sonnet"]),
+    ("haiku", "Haiku", &["haiku"]),
+    ("fable", "Fable", &["fable"]),
+    (
+        "best",
+        "Best: Fable where it runs, else Opus",
+        &["fable", "opus"],
+    ),
+    (
+        "opusplan",
+        "Opus to plan, Sonnet to work",
+        &["opus", "sonnet"],
+    ),
+    ("opus[1m]", "Opus, 1M context", &["opus"]),
+    ("sonnet[1m]", "Sonnet, 1M context", &["sonnet"]),
+];
+
+/// Where an administrator's managed settings files are (https://code.claude.com/docs/en/managed-settings,
+/// "File-based"): `managed-settings.json`, then each `*.json` of `managed-settings.d/` in
+/// alphabetical order, merged in that order.
+fn managed_folder() -> &'static Path {
+    if cfg!(target_os = "macos") {
+        Path::new("/Library/Application Support/ClaudeCode")
+    } else {
+        Path::new("/etc/claude-code")
+    }
+}
+
+/// The managed settings files, in the order Claude Code merges them.
+fn managed_files() -> Vec<PathBuf> {
+    let folder = managed_folder();
+    let mut drop_ins: Vec<PathBuf> = std::fs::read_dir(folder.join("managed-settings.d"))
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "json")
+                && !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'))
+        })
+        .collect();
+    drop_ins.sort();
+    let mut files = vec![folder.join("managed-settings.json")];
+    files.extend(drop_ins);
+    files
+}
+
+/// The models an administrator allows (`availableModels` in managed settings), the last
+/// file that sets it winning; none where no file restricts them. A value that is not a list
+/// allows none but Claude Code's default, as Claude Code enforces it.
+fn allowed(files: &[PathBuf]) -> Option<Vec<String>> {
+    files
+        .iter()
+        .filter_map(|file| {
+            let value: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+            let listed = value.get("availableModels")?;
+            Some(
+                listed
+                    .as_array()
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| entry.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            )
+        })
+        .last()
+}
+
+/// Whether the allowlist entry `entry` lets `model` run, by the page's rule ("Restrict
+/// model selection"): an entry is a family (`sonnet`), a version prefix
+/// (`claude-sonnet-4-5`, also allowing later ids that extend it) or a full id. An alias is
+/// allowed where any version of a family it runs is: Claude Code then runs the newest one
+/// allowed.
+fn permits(entry: &str, model: &str) -> bool {
+    let model = model.strip_suffix("[1m]").unwrap_or(model);
+    let families: &[&str] = ALIASES
+        .iter()
+        .find(|(alias, ..)| *alias == model)
+        .map(|(_, _, families)| *families)
+        .unwrap_or_default();
+    let family = |family: &str| entry == family || entry.starts_with(&format!("claude-{family}"));
+    if !families.is_empty() {
+        return families.iter().any(|&one| family(one));
+    }
+    if entry.contains('-') {
+        model == entry || model.starts_with(&format!("{entry}-"))
+    } else {
+        model.starts_with(&format!("claude-{entry}"))
+    }
+}
+
+/// Whether Claude Code is logged in here, as `claude auth status` says it: its JSON's
+/// `loggedIn`, else its exit (0 logged in, 1 not); none where it is not here or did not
+/// answer within [`steery_driver_common::program::PROBE`]. `claude auth status --help`:
+/// "Show authentication status". It writes nothing a login does not also write.
+async fn signed_in() -> Option<bool> {
+    let binary = crate::binary()?;
+    let output = tokio::time::timeout(
+        steery_driver_common::program::PROBE,
+        steery_driver_common::program::helper(&binary)
+            .args(["auth", "status", "--json"])
+            .stdout(std::process::Stdio::piped())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let said = serde_json::from_slice::<Value>(&output.stdout)
+        .ok()
+        .and_then(|status| status.get("loggedIn")?.as_bool());
+    said.or(match output.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    })
+}
+
+/// `models`: Claude Code names no models on its command line. It lists its documented
+/// aliases ([`ALIASES`]), the one this machine chose in its own settings (`model` in
+/// `settings.json`) first, each with every effort level, any other model it runs taking the
+/// same levels; only those an administrator's managed settings allow. It says whether
+/// Claude Code is logged in ([`signed_in`]), so a login made in a terminal lifts a sign-in
+/// failure on its own (Ali's first run, #product Slack thread 2026-10-19), and watches the
+/// files a login, a model choice and a policy change rewrite.
+pub async fn models(home: &Path, root: &Path) -> Models {
     let settings = root.join("settings.json");
     let thinking: Vec<String> = EFFORT.map(String::from).to_vec();
     let chosen = std::fs::read(&settings)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| value.get("model")?.as_str().map(str::to_owned));
-    Models {
-        models: chosen
-            .into_iter()
-            .map(|model| Model {
+        .and_then(|value| value.get("model")?.as_str().map(str::to_owned))
+        .filter(|model| !model.is_empty() && model != "default");
+    let managed = managed_files();
+    let allowed = allowed(&managed);
+    let runs = |model: &str| {
+        allowed
+            .as_ref()
+            .is_none_or(|allowed| allowed.iter().any(|entry| permits(entry, model)))
+    };
+    let mut models: Vec<Model> = ALIASES
+        .iter()
+        .map(|(alias, label, _)| Model {
+            provider: None,
+            model: (*alias).to_owned(),
+            label: Some((*label).to_owned()),
+            thinking: thinking.clone(),
+            cost: None,
+        })
+        .collect();
+    if let Some(chosen) = chosen {
+        let first = match models.iter().position(|model| model.model == chosen) {
+            Some(at) => models.remove(at),
+            None => Model {
                 provider: None,
-                model,
+                model: chosen,
                 label: None,
                 thinking: thinking.clone(),
                 cost: None,
-            })
-            .collect(),
+            },
+        };
+        models.insert(0, first);
+    }
+    models.retain(|model| runs(&model.model));
+    let mut watch = vec![
+        settings,
+        crate::state_file(home, root),
+        // Where Claude Code keeps a login's credentials outside a keychain.
+        root.join(".credentials.json"),
+    ];
+    watch.extend(managed);
+    Models {
+        models,
         unlisted: Some(Unlisted { thinking }),
-        watch: vec![settings],
+        watch,
+        signed_in: signed_in().await,
     }
 }
 
