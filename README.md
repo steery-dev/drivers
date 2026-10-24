@@ -252,8 +252,9 @@ and `recap` instead. One whose moments are hook commands answers `hook/answer` t
 harness and takes no answer there. `loader.ts` is the file the harness loads: it runs the
 copy of the extension the runtime's config folder names, and moves every session onto a
 newer copy once one is named. In omp it keeps a parked conversation's prompt cache warm
-until the park's wake time where the refreshes left cost less than one miss
-(`cache_warming_decision`). Typecheck them against pi's published types:
+until the park's wake time, past omp's safety windows, where the refreshes left cost less
+than one miss (`cache_warming_decision` with `extendWindow`). Typecheck them against pi's
+published types:
 
 ```sh
 cd pi-family/plugin && npm i && npm run check

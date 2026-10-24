@@ -3020,16 +3020,19 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   pi.on("before_provider_request", (event) => unanchored(event.payload));
   if (HARNESS === "omp") {
     /**
-     * Warm a parked conversation's cache until its known wake: the refreshes left cost
-     * `ceil(left / refreshIntervalMs)` cache reads, and the miss they prevent one full write.
-     * omp without `refreshIntervalMs` gets no answer: its own decision stands.
+     * Warm a parked conversation's cache until its known wake, past omp's safety windows
+     * (`extendWindow`): the refreshes left cost `ceil(left / refreshIntervalMs)` cache
+     * reads, and the miss they prevent one full write. omp without `refreshIntervalMs`
+     * gets no answer: its own decision stands.
      */
     pi.on("cache_warming_decision", (event) => {
       if (!parked || wakeAt === undefined) return undefined;
       const { refreshIntervalMs: interval, warmCost, missCost } = event;
       if (typeof interval !== "number" || typeof warmCost !== "number" || typeof missCost !== "number") return undefined;
       const left = wakeAt - Date.now();
-      if (left > 0 && interval > 0 && Math.ceil(left / interval) * warmCost < missCost) return { action: "warm" };
+      if (left > 0 && interval > 0 && Math.ceil(left / interval) * warmCost < missCost) {
+        return { action: "warm", extendWindow: true };
+      }
       return undefined;
     });
   }
