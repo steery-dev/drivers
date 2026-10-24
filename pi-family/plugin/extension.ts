@@ -2385,8 +2385,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     if (!ctx.abort) return { refused: "selection-unsupported", error: `this ${HARNESS} cannot abort` };
     const running = () => turning || ctx.isIdle?.() === false;
-    // Its person's own stop holds the conversation parked whether or not a turn runs.
-    if (say === undefined) parked = true;
+    // Its person's own stop holds the conversation parked whether or not a turn runs, with
+    // no wake known: nothing keeps its cache warm.
+    if (say === undefined) {
+      parked = true;
+      wakeAt = undefined;
+    }
     if (!running()) return { ok: { stopped: false, running: background(ctx) } };
     if (say !== undefined && !ours.has(say)) {
       const waiting = says.some((one) => idsOf(one).includes(say) && !one.seen);
@@ -3138,7 +3142,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       typeof args.park === "object"
     ) {
       parked = true;
-      // Steery's park names its time as `wake.at`.
       const wake = "wake" in args.park && !!args.park.wake && typeof args.park.wake === "object" ? args.park.wake : {};
       const at = "at" in wake && typeof wake.at === "string" ? Date.parse(wake.at) : Number.NaN;
       wakeAt = Number.isNaN(at) ? undefined : at;
