@@ -30,6 +30,7 @@
 
 import { closeSync, constants, existsSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 
 /** `O_CLOEXEC` from `<fcntl.h>`, which `node:fs` does not export. */
 const O_CLOEXEC = process.platform === "darwin" ? 0x1000000 : 0o2000000;
@@ -229,6 +230,22 @@ const SETTLED_KEPT = 16;
  */
 const LOOK_EVERY_MS = 1000;
 
+/** The most background jobs a call's entry in the `state` names, oldest kept (LiveState `jobs`). */
+const JOBS_KEPT = 8;
+
+/** The longest job label the `state` says, in characters. */
+const JOB_LABEL_MAX = 120;
+
+/** The longest line of a job's output the `state` says, in characters. */
+const JOB_OUTPUT_MAX = 200;
+
+/**
+ * At most one change of a call's jobs' output per this many milliseconds reaches the
+ * `state`: omp says a wait's jobs every 500 ms, and a busy build's newest line changes at
+ * each.
+ */
+const JOB_OUTPUT_EVERY_MS = 1000;
+
 /** How many moments the process keeps while no door is open, oldest dropped first. */
 const MOMENTS_KEPT = 256;
 
@@ -390,6 +407,8 @@ type Event = {
   parentToolCallId?: unknown;
   input?: unknown;
   isError?: unknown;
+  /** omp's `tool_execution_update`: the call's result so far. */
+  partialResult?: unknown;
   /** A call's result: its text parts. */
   content?: unknown;
   stop_hook_active?: unknown;
@@ -1049,7 +1068,31 @@ function spoken(message: unknown): string | undefined {
 type Say = { id: string; throw?: string; also: string[]; words: string; mode: "steer" | "queue"; seen: boolean };
 
 /** A call the conversation's agent is inside, with the calls made from inside it that are still running: LiveState's. */
-type Call = { id: string; tool: string; since: number; children: { id: string; tool: string }[] };
+type Call = {
+  id: string;
+  tool: string;
+  since: number;
+  children: { id: string; tool: string }[];
+  /** The background jobs it waits on that still run, oldest first; absent: none. */
+  jobs?: Job[];
+  /** When a change of its jobs' output last reached the `state`. */
+  told?: number;
+};
+
+/**
+ * A background job a call waits on, by the harness's id for it: its newest output line as
+ * last seen and when that changed, and the line the `state` says, which follows at most
+ * once per [`JOB_OUTPUT_EVERY_MS`] (LiveState's `jobs`).
+ */
+type Job = {
+  id: string;
+  label: string;
+  since: number;
+  seen?: string;
+  seen_at?: number;
+  output?: string;
+  output_at?: number;
+};
 
 /** A call the conversation's agent was inside that ended, and when, by this process's clock. */
 type Ended = { id: string; at: number };
@@ -1178,6 +1221,8 @@ function isCall(one: unknown): one is Call {
     typeof call.id === "string" &&
     typeof call.tool === "string" &&
     typeof call.since === "number" &&
+    (call.jobs === undefined || (Array.isArray(call.jobs) && call.jobs.every(isJob))) &&
+    (call.told === undefined || typeof call.told === "number") &&
     Array.isArray(call.children) &&
     call.children.every(
       (child: unknown) =>
@@ -1208,6 +1253,76 @@ function isSettled(one: unknown): one is Settled {
     typeof settled.failed === "boolean" &&
     (settled.error === undefined || typeof settled.error === "string")
   );
+}
+
+function isJob(one: unknown): one is Job {
+  if (!one || typeof one !== "object") return false;
+  const job = one as Record<string, unknown>;
+  const optional = (value: unknown, type: "string" | "number") => value === undefined || typeof value === type;
+  return (
+    typeof job.id === "string" &&
+    typeof job.label === "string" &&
+    typeof job.since === "number" &&
+    optional(job.seen, "string") &&
+    optional(job.seen_at, "number") &&
+    optional(job.output, "string") &&
+    optional(job.output_at, "number")
+  );
+}
+
+/** `text` on one line, its whitespace collapsed and its terminal styling gone, cut to `max` characters with `…`. */
+function oneLine(text: string, max: number): string {
+  const line = stripVTControlCharacters(text).replace(/\s+/g, " ").trim();
+  const chars = [...line];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : line;
+}
+
+/**
+ * Puts on a `wait` call the jobs omp reports it waiting on that still run, oldest first, at
+ * most [`JOBS_KEPT`]: each one's start as first seen, and its newest output line, a
+ * sub-agent's stage or a command's last line. A change of jobs reaches the `state` at once,
+ * a change of output alone at most once per [`JOB_OUTPUT_EVERY_MS`]. Whether what the
+ * `state` says of the call changed.
+ */
+function waitedOn(call: Call, reported: unknown[], now: number): boolean {
+  const before = call.jobs ?? [];
+  const known = new Map(before.map((job) => [job.id, job]));
+  const jobs: Job[] = [];
+  for (const one of reported) {
+    if (!one || typeof one !== "object") continue;
+    const job = one as Record<string, unknown>;
+    if (job.status !== "running" || typeof job.id !== "string") continue;
+    const widget = job.widget && typeof job.widget === "object" ? (job.widget as Record<string, unknown>) : undefined;
+    const said = widget?.stage ?? job.stage;
+    const seen = (typeof said === "string" && oneLine(said, JOB_OUTPUT_MAX)) || undefined;
+    const old = known.get(job.id);
+    jobs.push({
+      id: job.id,
+      label: oneLine(str(job.label), JOB_LABEL_MAX),
+      since: old?.since ?? now - (typeof job.durationMs === "number" ? job.durationMs : 0),
+      seen,
+      seen_at: seen === undefined ? undefined : old?.seen === seen ? old.seen_at : now,
+      output: old?.output,
+      output_at: old?.output_at,
+    });
+  }
+  jobs.sort((a, b) => a.since - b.since);
+  jobs.splice(JOBS_KEPT);
+  const same =
+    jobs.length === before.length &&
+    jobs.every((job, at) => job.id === before[at]?.id && job.label === before[at]?.label);
+  let told = false;
+  if (!same || now - (call.told ?? 0) >= JOB_OUTPUT_EVERY_MS) {
+    for (const job of jobs) {
+      if (job.output === job.seen) continue;
+      job.output = job.seen;
+      job.output_at = job.seen_at;
+      told = true;
+    }
+  }
+  if (told) call.told = now;
+  call.jobs = jobs.length > 0 ? jobs : undefined;
+  return !same || told;
 }
 
 function isDialog(one: unknown): one is Dialog {
@@ -1529,7 +1644,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       ...(running > 0 ? { jobs: running } : {}),
       ...current(ctx),
       ...known("context_left", left(ctx)),
-      calls: [...calls.values()],
+      calls: [...calls.values()].map(({ id, tool, since, children, jobs }) => ({
+        id,
+        tool,
+        since,
+        children,
+        ...(jobs ? { jobs: jobs.map(({ label, since, output, output_at }) => ({ label, since, output, output_at })) } : {}),
+      })),
       ended,
       ...(dialog ? { dialog } : {}),
       settled,
@@ -2883,6 +3004,18 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (!parent) calls.set(id, { id, tool, since: Date.now(), children: [] });
     else outer(parent)?.children.push({ id, tool });
     noteState();
+  });
+  // omp's `wait` reports the background jobs it waits on every 500 ms: those still running
+  // stand on its call, and leave with it at its end. pi has no `wait`.
+  pi.on("tool_execution_update", (event, ctx) => {
+    if (event.toolName !== "wait") return;
+    const call = calls.get(str(event.toolCallId));
+    if (!call) return;
+    live = ctx;
+    const partial = event.partialResult;
+    const details = partial && typeof partial === "object" && "details" in partial ? partial.details : undefined;
+    const reported = details && typeof details === "object" && "jobs" in details ? details.jobs : undefined;
+    if (waitedOn(call, Array.isArray(reported) ? reported : [], Date.now())) noteState();
   });
   pi.on("tool_execution_end", (event, ctx) => {
     live = ctx;
