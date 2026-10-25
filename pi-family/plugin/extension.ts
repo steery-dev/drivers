@@ -1080,9 +1080,9 @@ type Call = {
 };
 
 /**
- * A background job a call waits on, by the harness's id for it: its newest output line as
- * last seen and when that changed, and the line the `state` says, which follows at most
- * once per [`JOB_OUTPUT_EVERY_MS`] (LiveState's `jobs`).
+ * A background job a call waits on, by the harness's id for it: what it says now as last
+ * seen ([`waitedOn`]) and when that changed, and what the `state` says, which follows at
+ * most once per [`JOB_OUTPUT_EVERY_MS`] (LiveState's `jobs`).
  */
 type Job = {
   id: string;
@@ -1280,8 +1280,8 @@ function oneLine(text: string, max: number): string {
 /**
  * What omp's own job tile shows of the widget omp drew for a job (`state: "live"`), on one
  * line: its headline, else its newest spark value, else its meter, each after its label.
- * Once omp draws one, the lines its rules read leave the widget's `stage`, so a command
- * printing only progress has no newest line left to say.
+ * Once omp draws one, the lines its rules read move into this figure, and the widget's
+ * `stage` keeps only the newest line they did not read, which stands still while they run.
  */
 function figure(widget: Record<string, unknown> | undefined): string | undefined {
   if (widget?.state !== "live") return undefined;
@@ -1307,10 +1307,12 @@ function figure(widget: Record<string, unknown> | undefined): string | undefined
 
 /**
  * Puts on a `wait` call the jobs omp reports it waiting on that still run, oldest first, at
- * most [`JOBS_KEPT`]: each one's start as first seen, and its newest output line, a
- * sub-agent's stage or a command's last line, else the [`figure`] of the widget omp drew
- * for it. A change of jobs reaches the `state` at once, a change of output alone at most
- * once per [`JOB_OUTPUT_EVERY_MS`]. Whether what the `state` says of the call changed.
+ * most [`JOBS_KEPT`]: each one's start as first seen, and what it says now, as omp's own
+ * tile shows it: the [`figure`] of the widget omp drew for it, then its stage, a sub-agent's
+ * or the newest line of a command's its widget's rules did not read. The figure leads, so a
+ * line cut at its end keeps what moves. A change of jobs reaches the `state` at once, a
+ * change of output alone at most once per [`JOB_OUTPUT_EVERY_MS`]. Whether what the `state`
+ * says of the call changed.
  */
 function waitedOn(call: Call, reported: unknown[], now: number): boolean {
   const before = call.jobs ?? [];
@@ -1321,8 +1323,10 @@ function waitedOn(call: Call, reported: unknown[], now: number): boolean {
     const job = one as Record<string, unknown>;
     if (job.status !== "running" || typeof job.id !== "string") continue;
     const widget = job.widget && typeof job.widget === "object" ? (job.widget as Record<string, unknown>) : undefined;
-    const said = widget?.stage ?? figure(widget) ?? job.stage;
-    const seen = (typeof said === "string" && oneLine(said, JOB_OUTPUT_MAX)) || undefined;
+    const said = [figure(widget), widget?.stage ?? job.stage]
+      .map((part) => (typeof part === "string" ? oneLine(part, JOB_OUTPUT_MAX) : ""))
+      .filter((part) => part !== "");
+    const seen = said.length > 0 ? oneLine(said.join(" · "), JOB_OUTPUT_MAX) : undefined;
     const old = known.get(job.id);
     jobs.push({
       id: job.id,
