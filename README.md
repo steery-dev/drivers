@@ -8,7 +8,7 @@ writes, and says how to start, read and resume a turn. It decides nothing and wr
 of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers version 4 of the program protocol, or 3 to a runtime that offers only 3. Steery
+answers version 4 of the program protocol, which every runtime Steery supports offers. Steery
 adds the drivers below the way it adds any program: from this repository's releases, each
 a prebuilt executable per target (`steery programs add https://github.com/steery-dev/drivers`,
 which Steery's installer runs). Everything a person sees of a driver, its label, its short
@@ -41,9 +41,41 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 | Driver | Installer folder | `install` (offered where its shell and `curl` are on `PATH`) |
 |---|---|---|
 | `omp` | `PI_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://omp.sh/install \| sh -s -- --binary"` |
-| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"` (offered only where npm is here and `node --version` names 22.19 or newer within 5 s) |
+| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"` (offered only where npm is here and `node --version` names 22.19 or newer within 5 s; otherwise refused, saying which) |
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
+
+Where `install` is not offered, `setup/plan` answers `refused` with why, in one line, which
+`steery setup --harness <id>` shows: "pi's installer needs Node.js 22.19 or newer and npm
+(`npm` is not on PATH)", or "omp's installer needs `curl` and `sh` on PATH: `curl` is not
+there". pi's installer exits 0 having installed nothing without them, so it is never run
+there.
+
+Where the harness is found in more than one place (two folders on `PATH`, or one and the
+installer's folder; a link to the same file is one place), `setup/plan` says so in a note: the
+one Steery runs (the first on `PATH`, else the installer's folder) and the others, never run. The protocol has
+no field for a list of binaries (`Found` is one `binary`), so the note is the only place.
+
+## Signing in
+
+`sign_in` is what a person does at the machine, read on their phone after "<harness> is not
+logged in on <machine>:". Whether it is true is `models`' `signed_in`, as the harness itself
+says.
+
+| Driver | `sign_in` | `signed_in` |
+|---|---|---|
+| `omp` | ``run `omp login` in a terminal`` (`omp login` is the terminal counterpart of `/login`) | not told |
+| `pi` | ``run `pi` in a terminal and type /login in it`` (pi has no login command: its `auth` prints credentials and checks readiness) | not told |
+| `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
+| `codex` | ``run `codex login` in a terminal`` | `codex login status`: exit 0 signed in; exit 1 with `Not logged in` not |
+
+Each probe is bounded by 5 s and killed past it. Where it gives no answer (it did not start
+or end in time, or exited otherwise: `codex login status` also exits 1 for a `config.toml`
+it cannot read, and its `Not logged in` says nothing where `config.toml` names a
+`model_provider` of its own), `signed_in` is absent and nothing is claimed. Why is written
+to standard error, the runtime's log of the driver, since `Models` has no field for a
+reason: showing it to a person needs one in the SDK (`signed_in_why?: string` beside
+`signed_in`, a protocol change).
 
 ## Building
 
@@ -203,7 +235,9 @@ What each driver does:
   `terminal`).
   - `held`: no registry, so the runtime looks for processes. In pi it also looks for a
     stray process, since a pi without the plugin holds no file open.
-  - `models`: omp's comes from `omp models --json`, with its default from `config.yml`.
+  - `models`: omp's comes from `omp models --json`, with its default from `config.yml`, or
+    `config.yaml` where that is the only one there (omp itself reads both, in that order,
+    and writes the one it read; omp's code names `config.yaml` its legacy-compatible fallback).
     pi's comes from `pi --list-models` and its RPC mode's `get_available_models`.
   - `start`: a turn is a kept process, `--mode rpc` (omp's with `--no-ui`) with its
     standard input held: it stays up between turns and takes every turn's words, the first
@@ -377,7 +411,8 @@ app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`
   - `stop`: the owner interrupts its own turn and it is seen to end.
   - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn
     after them carrying the delivery marker.
-  - `models`: the app server's `model/list`, the default first.
+  - `models`: the app server's `model/list`, the default first; and `signed_in` from `codex
+    login status` (see Signing in), watching `auth.json` so a login is seen at once.
   - `reader`: `codex exec --json --ephemeral` with every MCP server turned off, every tool
     and feature it can do without taken away, and a read-only sandbox; `reader/read` takes
     its last agent message.

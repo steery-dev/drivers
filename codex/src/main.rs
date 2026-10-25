@@ -108,8 +108,8 @@ impl Codex {
 
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_sdk::pick(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 3 and 4"))?;
+        let protocol = steery_driver_common::program::protocol(&params.protocol)
+            .ok_or_else(|| Error::invalid("this driver speaks protocol 4"))?;
         let _ = self.home.set(params.home.clone());
         let _ = self
             .place
@@ -196,7 +196,7 @@ fn info() -> wire::HarnessInfo {
             release: MINIMUM.into(),
             update: Some(UPDATE.into()),
         }),
-        sign_in: Some("run `codex login`".into()),
+        sign_in: Some("run `codex login` in a terminal".into()),
         knowing: KNOWING.into(),
         transcript: Some(TRANSCRIPT.into()),
         identity: wire::Identity {

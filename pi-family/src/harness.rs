@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use steery_driver_common::program::{executable, on_path, release_within, version};
+use steery_driver_common::program::{
+    executable, lacks, on_path, others_note, release_within, version,
+};
 use steery_sdk::wire::{self, harness};
 
 /// A harness of the pi family.
@@ -86,6 +88,18 @@ impl Harness {
         }
     }
 
+    /// What a person does at the machine to log in, read on their phone. omp has a terminal
+    /// counterpart of `/login` (`omp login`: "Log in to a model provider (terminal
+    /// counterpart of /login)"). pi has none (its commands are `install`, `remove`,
+    /// `uninstall`, `update`, `list`, `config`, `auth`, `mcp`; `auth` prints credentials and
+    /// checks readiness), so its login is typed inside it.
+    fn sign_in(self) -> &'static str {
+        match self {
+            Self::Omp => "run `omp login` in a terminal",
+            Self::Pi => "run `pi` in a terminal and type /login in it",
+        }
+    }
+
     /// The harness as Steery reads it.
     pub fn info(self) -> wire::HarnessInfo {
         wire::HarnessInfo {
@@ -94,7 +108,7 @@ impl Harness {
                 release: self.minimum().into(),
                 update: Some(format!("{} update", self.id())),
             }),
-            sign_in: Some("run /login".into()),
+            sign_in: Some(self.sign_in().into()),
             knowing: self.knowing().into(),
             transcript: Some(
                 "One JSON record per line: a `session` header, then entries with `id` and \
@@ -255,50 +269,72 @@ impl Harness {
         }
     }
 
-    /// The harness's executable: the first on `PATH`, else the one in the folder its own
-    /// installer writes it to — omp's `PI_INSTALL_DIR`, else `~/.local/bin`; pi's agent
-    /// folder's `bin` — which a shell that has not read its profile since may not have on
-    /// `PATH`.
-    pub fn binary(self) -> Option<PathBuf> {
-        on_path(self.id()).or_else(|| {
-            let home = PathBuf::from(std::env::var_os("HOME")?);
-            let installed = match self {
-                Self::Omp => std::env::var_os("PI_INSTALL_DIR")
-                    .filter(|v| !v.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| home.join(".local/bin")),
-                Self::Pi => self.root(&home).ok()?.join("bin"),
-            };
-            executable(installed.join(self.id()))
+    /// The folder the harness's own installer writes it to — omp's `PI_INSTALL_DIR`, else
+    /// `~/.local/bin`; pi's agent folder's `bin` — which a shell that has not read its
+    /// profile since may not have on `PATH`.
+    fn installer_folder(self) -> Option<PathBuf> {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        Some(match self {
+            Self::Omp => std::env::var_os("PI_INSTALL_DIR")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".local/bin")),
+            Self::Pi => self.root(&home).ok()?.join("bin"),
         })
+    }
+
+    /// The harness's executable: the first on `PATH`, else the one in its installer's folder
+    /// ([`Self::installer_folder`]).
+    pub fn binary(self) -> Option<PathBuf> {
+        on_path(self.id()).or_else(|| executable(self.installer_folder()?.join(self.id())))
+    }
+
+    /// A line for a person where the harness is installed in more than one place: which
+    /// one Steery runs and which it does not.
+    pub fn others_note(self, used: &Path) -> Option<String> {
+        others_note(
+            self.id(),
+            self.id(),
+            self.installer_folder().as_deref(),
+            used,
+        )
     }
 
     /// The harness's own installer, where what it needs is here: omp's prebuilt binary
     /// into `~/.local/bin`, and pi's, which installs its npm package, into a folder on
     /// `PATH` or its agent folder's `bin`. pi's installer needs Node.js 22.19 or newer and
     /// npm, and without them exits 0 having installed nothing, so it is offered only where
-    /// both are here.
-    pub async fn install(self) -> Option<harness::Install> {
-        on_path("sh")?;
-        on_path("curl")?;
+    /// both are here. Where it is not offered, why, in one line (`Planned::refused`).
+    pub async fn install(self) -> Result<harness::Install, String> {
         let (line, into) = match self {
             Self::Omp => (
                 "curl -fsSL https://omp.sh/install | sh -s -- --binary",
                 "omp's own installer, its prebuilt binary into ~/.local/bin",
             ),
-            Self::Pi => {
-                on_path("npm")?;
-                if !node_at_least(PI_NODE).await? {
-                    return None;
-                }
-                (
-                    "curl -fsSL https://pi.dev/install.sh | sh",
-                    "pi's own installer, its npm package into a folder on PATH or \
-                     ~/.pi/agent/bin",
-                )
-            }
+            Self::Pi => (
+                "curl -fsSL https://pi.dev/install.sh | sh",
+                "pi's own installer, its npm package into a folder on PATH or \
+                 ~/.pi/agent/bin",
+            ),
         };
-        Some(harness::Install {
+        let mut why: Vec<String> = lacks(&["sh", "curl"]).into_iter().collect();
+        if self == Self::Pi {
+            let mut parts: Vec<String> = Vec::new();
+            if on_path("npm").is_none() {
+                parts.push("`npm` is not on PATH".into());
+            }
+            parts.extend(node_lacks().await);
+            if !parts.is_empty() {
+                why.push(format!(
+                    "needs Node.js 22.19 or newer and npm ({})",
+                    parts.join("; ")
+                ));
+            }
+        }
+        if !why.is_empty() {
+            return Err(format!("{}'s installer {}", self.id(), why.join(", and ")));
+        }
+        Ok(harness::Install {
             argv: vec!["sh".into(), "-c".into(), line.into()],
             about: format!("{into}: {line}"),
         })
@@ -323,7 +359,10 @@ fn absolute(path: PathBuf) -> Result<PathBuf, String> {
     }
 }
 
-/// omp's settings files in its agent folder `root`, the one it reads first first.
+/// omp's settings files in its agent folder `root`, the one it reads first first. omp
+/// writes `config.yml`, but where only `config.yaml` stands it reads that and goes on
+/// writing it (`MAIN_CONFIG_FILENAMES`, `Settings`' load, in omp's own code), so both are
+/// real.
 pub const OMP_CONFIG: [&str; 2] = ["config.yml", "config.yaml"];
 
 /// The value omp's `config.yml` gives `key` in its top-level block `section`
@@ -351,10 +390,20 @@ pub fn omp_setting(root: &Path, section: &str, key: &str) -> Option<String> {
 /// The oldest Node.js pi's installer accepts.
 const PI_NODE: (u64, u64, u64) = (22, 19, 0);
 
-/// Whether the `node` on `PATH` is `least` or newer; none where there is no `node`, or it
-/// names no release within the probe's time (a broken shim, a version manager waiting on
-/// input), which is then killed.
-async fn node_at_least(least: (u64, u64, u64)) -> Option<bool> {
-    let node = on_path("node")?;
-    Some(release_within(&version(&node).await?)? >= least)
+/// Why pi's installer cannot run here, as a line a person reads: no `node` on `PATH`, a
+/// `node` older than [`PI_NODE`], or one that names no release within the probe's time (a
+/// broken shim, a version manager waiting on input), which is then killed. None where
+/// `node` is new enough.
+async fn node_lacks() -> Option<String> {
+    let Some(node) = on_path("node") else {
+        return Some("`node` is not on PATH".into());
+    };
+    let Some(said) = version(&node).await else {
+        return Some("`node --version` did not answer".into());
+    };
+    match release_within(&said) {
+        None => Some(format!("`node --version` said `{said}`, which names no release")),
+        Some(release) if release < PI_NODE => Some(format!("`node` is {said}")),
+        Some(_) => None,
+    }
 }
