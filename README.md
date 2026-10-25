@@ -49,8 +49,7 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.0.0" }` (by `rev`
-until that tag is published), and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.2.0" }`, and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
@@ -302,7 +301,11 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
     turn's, and Claude Code's words for an API error. No transcript is read.
   - `receipt/mark`, `receipt/find`: the person's input carrying the delivery marker, in
     the transcript past a mark.
-  - `models`: the model in `settings.json`, and Claude Code's effort levels for any other.
+  - `models`: Claude Code's documented aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
+    `opusplan`, `opus[1m]`, `sonnet[1m]`), the model in `settings.json` first, only those
+    managed settings' `availableModels` allow, each with Claude Code's effort levels, as any
+    other it runs; and `signed_in` from `claude auth status`, watching the files a login
+    rewrites (`.claude.json`, `.credentials.json`).
   - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode` and no session
     kept.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session

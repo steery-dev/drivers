@@ -165,7 +165,7 @@ impl Program for ClaudeCode {
             method::IDLE => result(drive::idle(self.root()?, &self.listing, given(params)?).await),
             method::MODELS => {
                 let _: wire::Empty = given(params)?;
-                result(drive::models(self.root()?))
+                result(drive::models(&self.place()?.home, self.root()?).await)
             }
             method::START => result(drive::start(self.store()?, given(params)?)?),
             method::TURN_READ => result(turn::read(given(params)?)),
@@ -206,7 +206,11 @@ fn info() -> wire::HarnessInfo {
             release: "2.1.169".into(),
             update: Some("claude update".into()),
         }),
-        sign_in: Some("run /login".into()),
+        // What a person does at the machine, read on their phone: `/login` works only inside
+        // an interactive `claude`, and read as Steery's own sign-out (Ali's first run,
+        // #product Slack thread 2026-10-19). `claude auth login --help`: "Sign in to your
+        // Anthropic account".
+        sign_in: Some("run `claude auth login` in a terminal".into()),
         knowing: KNOWING.into(),
         transcript: Some(TRANSCRIPT.into()),
         identity: wire::Identity {
@@ -230,9 +234,10 @@ fn info() -> wire::HarnessInfo {
                 extensions: true,
                 history: true,
             },
-            // Anthropic's small model, under the short name Claude Code documents: Claude
-            // Code lists no models, and runs this one whatever its settings name.
-            known: vec!["claude-haiku-4-5".into()],
+            // Claude Code's small model, by the alias Claude Code documents
+            // (https://code.claude.com/docs/en/model-config): it resolves to the newest Haiku
+            // the account's provider serves, whatever its settings name.
+            known: vec!["haiku".into()],
             unnamed: true,
         }),
         facts: wire::HarnessFacts {
@@ -288,7 +293,7 @@ pub(crate) fn binary() -> Option<PathBuf> {
 
 /// The file Claude Code keeps its state and its user- and local-scope MCP servers in:
 /// `~/.claude.json`, or `.claude.json` inside the folder `CLAUDE_CONFIG_DIR` moves the root
-/// to.
+/// to. It also keeps the account a login signed in (`oauthAccount`), so a login rewrites it.
 pub(crate) fn state_file(home: &Path, root: &Path) -> PathBuf {
     if root == default_root(home) {
         home.join(".claude.json")
