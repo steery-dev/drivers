@@ -126,9 +126,13 @@ impl Turn {
 
     /// The command line that starts a background session for the act, before `--` and
     /// the words. A folder outside its own the session reads is granted it (`--add-dir`):
-    /// Claude Code asks its person before a read anywhere else.
+    /// Claude Code asks its person before a read anywhere else. Bypass mode is made
+    /// available, never turned on, so a person's "everything, this session" in Steery,
+    /// a `setMode` to `bypassPermissions`, takes effect: Claude Code ignores that update in
+    /// a session launched without it (https://code.claude.com/docs/en/hooks, "Permission
+    /// update entries").
     fn launching(&self) -> Result<Vec<String>, String> {
-        let mut args: Vec<String> = vec!["--bg".into()];
+        let mut args: Vec<String> = vec!["--bg".into(), "--allow-dangerously-skip-permissions".into()];
         match (self.act, self.id.as_deref()) {
             (Act::New, _) => {}
             (Act::Continue, Some(id)) => args.extend(["--resume".into(), id.into()]),
@@ -555,6 +559,7 @@ mod tests {
             picked.launching().unwrap(),
             [
                 "--bg",
+                "--allow-dangerously-skip-permissions",
                 "--resume",
                 "s-1",
                 "--add-dir",
@@ -567,7 +572,7 @@ mod tests {
         );
         assert_eq!(
             turn(Act::Fork, Some("s-1"), true).launching().unwrap(),
-            ["--bg", "--resume", "s-1", "--fork-session", "-w"]
+            ["--bg", "--allow-dangerously-skip-permissions", "--resume", "s-1", "--fork-session", "-w"]
         );
         let new = Turn {
             reads: vec![PathBuf::from("/a/2026/09"), PathBuf::from("/a/2026/10")],
@@ -575,7 +580,7 @@ mod tests {
         };
         assert_eq!(
             new.launching().unwrap(),
-            ["--bg", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
+            ["--bg", "--allow-dangerously-skip-permissions", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
         );
         assert!(turn(Act::Continue, None, false).launching().is_err());
     }
