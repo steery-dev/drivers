@@ -31,8 +31,9 @@ pub fn protocol(offered: &[u32]) -> Option<u32> {
     offered.contains(&PROTOCOL).then_some(PROTOCOL)
 }
 
-/// Why the programs `names` are not all on `PATH`, as a line a person reads ("needs `curl`
-/// and `sh` on PATH: `curl` is not there"); none where each is.
+/// Why the programs `names` are not all on `PATH`, as a line a person reads (`["sh",
+/// "curl"]` with `curl` missing: "needs `sh` and `curl` on PATH: `curl` is not there"); none
+/// where each is.
 pub fn lacks(names: &[&str]) -> Option<String> {
     let missing: Vec<String> = names
         .iter()

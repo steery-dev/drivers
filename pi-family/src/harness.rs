@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use steery_driver_common::program::{
-    executable, lacks, on_path, others_note, release_within, version,
+    ask, executable, helper, lacks, on_path, others_note, release_within,
 };
 use steery_sdk::wire::{self, harness};
 
@@ -391,16 +391,27 @@ pub fn omp_setting(root: &Path, section: &str, key: &str) -> Option<String> {
 const PI_NODE: (u64, u64, u64) = (22, 19, 0);
 
 /// Why pi's installer cannot run here, as a line a person reads: no `node` on `PATH`, a
-/// `node` older than [`PI_NODE`], or one that names no release within the probe's time (a
-/// broken shim, a version manager waiting on input), which is then killed. None where
-/// `node` is new enough.
+/// `node` older than [`PI_NODE`], one whose `--version` failed (its exit), one that did not
+/// start or name a release within the probe's time (a broken shim, a version manager
+/// waiting on input), which is then killed, or one that names no release. None where `node`
+/// is new enough.
 async fn node_lacks() -> Option<String> {
     let Some(node) = on_path("node") else {
         return Some("`node` is not on PATH".into());
     };
-    let Some(said) = version(&node).await else {
-        return Some("`node --version` did not answer".into());
+    let mut command = helper(&node);
+    command.arg("--version");
+    let answer = match ask(command).await {
+        Ok(answer) => answer,
+        Err(why) => return Some(format!("`node --version` {why}")),
     };
+    if answer.code != Some(0) {
+        return Some(format!(
+            "`node --version` exited {}",
+            answer.code.map_or("by signal".to_owned(), |code| code.to_string())
+        ));
+    }
+    let said = String::from_utf8_lossy(&answer.stdout).trim().to_owned();
     match release_within(&said) {
         None => Some(format!("`node --version` said `{said}`, which names no release")),
         Some(release) if release < PI_NODE => Some(format!("`node` is {said}")),

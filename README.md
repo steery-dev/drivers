@@ -47,7 +47,7 @@ which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.
 
 Where `install` is not offered, `setup/plan` answers `refused` with why, in one line, which
 `steery setup --harness <id>` shows: "pi's installer needs Node.js 22.19 or newer and npm
-(`npm` is not on PATH)", or "omp's installer needs `curl` and `sh` on PATH: `curl` is not
+(`npm` is not on PATH)", or "omp's installer needs `sh` and `curl` on PATH: `curl` is not
 there". pi's installer exits 0 having installed nothing without them, so it is never run
 there.
 
