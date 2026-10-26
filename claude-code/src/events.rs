@@ -526,7 +526,7 @@ impl State<'_> {
 const AGENTS: [&str; 2] = ["Task", "Agent"];
 
 /// The `stop_reason`s of a response that ends its turn: any but a call.
-const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
+pub(crate) const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
 
 /// Why a turn failed, as Claude Code recorded it: a context over the model's limit
 /// ([`context_full`]), else by the API's status (`apiErrorStatus`) and its own code

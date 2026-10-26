@@ -26,7 +26,7 @@ use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
-use crate::context::Window;
+use crate::context::{Now, Tails};
 use crate::events::{self, Reading, Turn, agent_file, agent_id, millis, one_line, text};
 use crate::tree::Records;
 
@@ -53,8 +53,8 @@ const CUSTOM_TITLE: &[u8] = br#"{"type":"custom-title""#;
 /// Claude Code's conversations here: its configuration root, the other `projects` folders
 /// its moments named, each folder's listing, kept while the folder stands as it did, what
 /// each transcript's head says, kept while the file only grows, where each fork came from
-/// once that is settled, each transcript's tree as far as it was read, and the reads that
-/// said nothing.
+/// once that is settled, each transcript's tree as far as it was read, what each
+/// transcript's end says it stands at now ([`Tails`]), and the reads that said nothing.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
@@ -66,6 +66,7 @@ pub struct Store {
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
     origins: Mutex<HashMap<PathBuf, Kept<Option<Origin>>>>,
     trees: Trees<Records>,
+    tails: Tails,
     quiet: Quiet,
 }
 
@@ -110,6 +111,7 @@ struct Facts {
 impl Store {
     pub fn new(root: PathBuf) -> Self {
         Self {
+            tails: Tails::new(&root),
             root,
             named: Mutex::new(BTreeSet::new()),
             listings: Mutex::new(HashMap::new()),
@@ -124,6 +126,11 @@ impl Store {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Where the conversation `transcript` holds stands now, as its end says it.
+    pub fn now(&self, transcript: &Path) -> Now {
+        self.tails.now(transcript)
     }
 
     /// `sessions/list`: every conversation updated since `seen_since`.
@@ -259,7 +266,7 @@ impl Store {
             &Reading {
                 own,
                 agents,
-                window: Window::read(&self.root),
+                window: self.tails.window(),
                 fork,
             },
             read.cursor.as_deref(),
@@ -381,9 +388,9 @@ impl Store {
         self.kin(&by_id).remove(first).unwrap_or_default()
     }
 
-    /// Where conversation `id`, filed at `file`, was forked from, if it was: kept once
-    /// settled, which a fork is once it wrote a record of its own, and anything else at
-    /// once.
+    /// Where conversation `id`, filed at `file`, was forked from, if it was: kept for the
+    /// file once settled, which a fork is once it wrote a record of its own, and anything
+    /// else at once; a fork with none of its own yet is kept while its file stands as it is.
     fn origin(
         &self,
         id: &str,
@@ -391,35 +398,35 @@ impl Store {
         facts: &Facts,
         kin: &dyn Fn(&str) -> Vec<(String, PathBuf)>,
     ) -> Option<Origin> {
-        if let Some(kept) = lock(&self.origins)
-            .get(file)
-            .filter(|kept| kept.stamp.file() == facts.stamp.file())
-        {
+        let settled = |origin: &Option<Origin>| origin.as_ref().is_none_or(|o| o.own.is_some());
+        if let Some(kept) = lock(&self.origins).get(file).filter(|kept| {
+            kept.stamp.file() == facts.stamp.file()
+                && (settled(&kept.value) || kept.stamp == facts.stamp)
+        }) {
             return kept.value.clone();
         }
         let origin = self.trace(id, file, facts, kin);
-        if origin.as_ref().is_none_or(|origin| origin.own.is_some()) {
-            lock(&self.origins).insert(
-                file.to_owned(),
-                Kept {
-                    stamp: facts.stamp,
-                    value: origin.clone(),
-                },
-            );
-        }
+        lock(&self.origins).insert(
+            file.to_owned(),
+            Kept {
+                stamp: facts.stamp,
+                value: origin.clone(),
+            },
+        );
         origin
     }
 
     /// Where a conversation was forked from. Claude Code's fork (`--fork-session`) opens a
     /// new transcript with copies of its parent's records, each under the uuid it has in
-    /// the parent, and names no parent. The parent is a conversation filed before it that
-    /// holds its first record: one whose own first record is that one, or the one an
-    /// opening record says wrote it ([`Head::copied_from`]). Of those, the one holding the
+    /// the parent, and names no parent. The parent is a conversation that holds its first
+    /// record: the one an opening record says wrote it ([`Head::copied_from`]), or one
+    /// filed before it whose own first record is that one. Of those, the one holding the
     /// longest run of its opening records is the parent, the older on a tie (a fork made
     /// beside it holds no more of them), and the first record after that run is its own.
     /// A conversation filed later than it is never its parent: a parent that went on after
-    /// the fork reads as the fork's fork otherwise. Only these candidates' transcripts are
-    /// read whole, and only for a conversation that has one.
+    /// the fork reads as the fork's fork otherwise; where the file system keeps no time a
+    /// file was made, only the writer an opening record names is. Only the candidates are
+    /// read whole, and the conversation itself only as far as its first record of its own.
     fn trace(
         &self,
         id: &str,
@@ -427,7 +434,7 @@ impl Store {
         facts: &Facts,
         kin: &dyn Fn(&str) -> Vec<(String, PathBuf)>,
     ) -> Option<Origin> {
-        let forked = born(file)?;
+        let forked = born(file);
         let named = facts
             .head
             .first_uuid
@@ -439,12 +446,15 @@ impl Store {
             .copied_from
             .as_ref()
             .and_then(|writer| Some((writer.clone(), self.find(writer).ok()?.0)));
-        let mut candidates: Vec<(String, PathBuf, std::time::SystemTime)> = Vec::new();
+        let written_by = writer.as_ref().map(|(writer, _)| writer.clone());
+        let mut candidates: Vec<(String, PathBuf, Option<std::time::SystemTime>)> = Vec::new();
         for (other, path) in named.into_iter().chain(writer) {
             if other == id || candidates.iter().any(|(seen, ..)| *seen == other) {
                 continue;
             }
-            if let Some(when) = born(&path).filter(|when| *when < forked) {
+            let when = born(&path);
+            let older = matches!((when, forked), (Some(when), Some(forked)) if when < forked);
+            if older || written_by.as_ref() == Some(&other) {
                 candidates.push((other, path, when));
             }
         }
@@ -452,18 +462,21 @@ impl Store {
             return None;
         }
         candidates.sort_by_key(|(_, _, when)| *when);
-        let own = uuids(file);
-        let mut best: Option<(usize, String)> = None;
-        for (other, path, _) in candidates {
-            let theirs: HashSet<String> = uuids(&path).into_iter().collect();
+        let held: Vec<(String, HashSet<String>)> = candidates
+            .into_iter()
+            .map(|(other, path, _)| (other, uuids(&path).into_iter().collect()))
+            .collect();
+        let own = leading(file, |uuid| held.iter().any(|(_, theirs)| theirs.contains(uuid)));
+        let mut best: Option<(usize, &str)> = None;
+        for (other, theirs) in &held {
             let copied = own.iter().take_while(|uuid| theirs.contains(*uuid)).count();
-            if copied > 0 && best.as_ref().is_none_or(|(most, _)| copied > *most) {
-                best = Some((copied, other));
+            if copied > 0 && best.is_none_or(|(most, _)| copied > most) {
+                best = Some((copied, other.as_str()));
             }
         }
         let (copied, parent) = best?;
         Some(Origin {
-            parent,
+            parent: parent.to_owned(),
             own: own.get(copied).cloned(),
         })
     }
@@ -685,22 +698,38 @@ fn born(path: &Path) -> Option<std::time::SystemTime> {
 
 /// The uuids of a transcript's main-thread records, in the order they were written.
 fn uuids(file: &Path) -> Vec<String> {
+    named(file).collect()
+}
+
+/// The uuids of a transcript's leading main-thread records that `held` holds, and the
+/// first after them it does not: the rest of the file is never read.
+fn leading(file: &Path, held: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut found = Vec::new();
+    for uuid in named(file) {
+        let copied = held(&uuid);
+        found.push(uuid);
+        if !copied {
+            break;
+        }
+    }
+    found
+}
+
+/// The uuids of a transcript's main-thread records, read as they are asked for.
+fn named(file: &Path) -> impl Iterator<Item = String> {
     #[derive(serde::Deserialize)]
     struct Named {
         uuid: Option<String>,
         #[serde(rename = "isSidechain")]
         sidechain: Option<bool>,
     }
-    let Ok(open) = File::open(file) else {
-        return Vec::new();
-    };
-    BufReader::new(open)
-        .split(b'\n')
+    File::open(file)
+        .into_iter()
+        .flat_map(|open| BufReader::new(open).split(b'\n'))
         .map_while(Result::ok)
         .filter_map(|line| serde_json::from_slice::<Named>(&line).ok())
         .filter(|named| named.sidechain != Some(true))
         .filter_map(|named| named.uuid)
-        .collect()
 }
 
 /// What the head of a conversation's transcript says, and how far it has been read.

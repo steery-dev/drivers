@@ -191,10 +191,7 @@ pub async fn idle(root: &Path, store: &Store, listing: &Listing, held: Held) -> 
         (found.started_at, found.ended_at) = run_times(root, job, found.state);
     }
     if let Ok(transcript) = store.transcript(id) {
-        let now = crate::context::now(
-            &crate::context::newest_first(&transcript),
-            &crate::context::Window::default(),
-        );
+        let now = store.now(&transcript);
         found.model = now.model;
         found.thinking = now.thinking;
     }

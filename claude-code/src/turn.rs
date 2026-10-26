@@ -475,10 +475,9 @@ fn failed_on(end: &Value) -> Option<String> {
 /// What Claude Code said went wrong, when the last assistant record of a transcript is
 /// its own error (`isApiErrorMessage`) rather than the model's words.
 fn stopped_on(transcript: &Path) -> Option<String> {
-    let records = crate::context::newest_first(transcript);
-    let last = records
-        .iter()
-        .find(|record| record.get("type").and_then(Value::as_str) == Some("assistant"))?;
+    let last = crate::context::newest(transcript, |record| {
+        record.get("type").and_then(Value::as_str) == Some("assistant")
+    })?;
     if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
         return None;
     }

@@ -1,6 +1,7 @@
 //! What the end of a conversation's transcript says it stands at now: the model and effort
 //! of its newest main-thread answer, as Claude Code wrote them on that `assistant` record
-//! (`message.model`, `effort`), and how much of its context window is left.
+//! (`message.model`, `effort`), how much of its context window is left, and when its
+//! newest turn ended.
 //!
 //! The context is what the newest answer's `message.usage` counted (its input, fresh and
 //! from or into a cache, and its output), or after a compaction with no answer since, what
@@ -8,13 +9,20 @@
 //! gives the model (https://code.claude.com/docs/en/model-config, "Extended context"):
 //! 1M for an id carrying `[1m]` and for the models that run with it natively, else 200K;
 //! an auto-compact window a person set is the effective one, capped at the model's.
+//!
+//! A transcript is read back from its end only as far as its newest answer, in windows
+//! that grow until one is found, then on from where it was read as it grows ([`Tails`]).
 
+use std::collections::HashMap;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
+use steery_driver_common::quiet::Stamp;
 
-use crate::events::{SYNTHETIC, text};
+use crate::events::{ENDS, SYNTHETIC, millis, text};
 
 /// The window of a model with an extended context.
 const EXTENDED: u64 = 1_000_000;
@@ -23,35 +31,67 @@ const STANDARD: u64 = 200_000;
 /// The least auto-compact window Claude Code takes.
 const LEAST_WINDOW: u64 = 100_000;
 
-/// How much of a transcript's end is read for where the conversation stands now.
-const TAIL: u64 = 1024 * 1024;
+/// How much of a transcript's end is read first, looking back; each look after reads four
+/// times as much, until the file is read whole.
+const FIRST_LOOK: u64 = 1024 * 1024;
 
-/// The whole records within the last [`TAIL`] bytes of `transcript`, newest first.
-pub fn newest_first(transcript: &Path) -> Vec<Value> {
-    let Ok(mut file) = std::fs::File::open(transcript) else {
-        return Vec::new();
-    };
-    let Ok(meta) = file.metadata() else {
-        return Vec::new();
-    };
-    let start = meta.len().saturating_sub(TAIL);
-    let mut bytes = Vec::new();
-    if file.seek(SeekFrom::Start(start)).is_err() || file.read_to_end(&mut bytes).is_err() {
-        return Vec::new();
-    }
-    let whole = if start > 0 {
-        match bytes.iter().position(|byte| *byte == b'\n') {
-            Some(at) => &bytes[at + 1..],
-            None => return Vec::new(),
+/// The newest record of `transcript` for which `wanted` holds, among its whole lines.
+pub fn newest(transcript: &Path, wanted: impl Fn(&Value) -> bool) -> Option<Value> {
+    let mut file = File::open(transcript).ok()?;
+    let end = file.metadata().ok()?.len();
+    back(&mut file, end, wanted).map(|(_, record)| record)
+}
+
+/// The newest record before `end` for which `wanted` holds, and where its line starts.
+fn back(file: &mut File, end: u64, wanted: impl Fn(&Value) -> bool) -> Option<(u64, Value)> {
+    let mut look = FIRST_LOOK;
+    loop {
+        let start = end.saturating_sub(look);
+        let (base, bytes) = whole(file, start, end).ok()?;
+        let mut at = bytes.len();
+        while at > 0 {
+            let from = bytes[..at - 1]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |newline| newline + 1);
+            if let Ok(record) = serde_json::from_slice::<Value>(&bytes[from..at - 1])
+                && wanted(&record)
+            {
+                return Some((base + from as u64, record));
+            }
+            at = from;
         }
+        if start == 0 {
+            return None;
+        }
+        look = look.saturating_mul(4);
+    }
+}
+
+/// The whole lines between `start` and `end`, each ending in its newline, and where the
+/// first starts: a line `start` cuts is left out, one it begins is kept.
+fn whole(file: &mut File, start: u64, end: u64) -> std::io::Result<(u64, Vec<u8>)> {
+    // The byte before `start` says whether a line begins there.
+    let from = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(from))?;
+    let mut bytes = Vec::new();
+    file.take(end - from).read_to_end(&mut bytes)?;
+    let skip = if start > 0 {
+        bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |newline| newline + 1)
     } else {
-        &bytes[..]
+        0
     };
-    whole
-        .split(|byte| *byte == b'\n')
-        .rev()
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-        .collect()
+    let last = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1)
+        .max(skip);
+    bytes.truncate(last);
+    bytes.drain(..skip);
+    Ok((from + skip as u64, bytes))
 }
 
 /// Where a conversation stands now, as its transcript's end says it.
@@ -61,38 +101,157 @@ pub struct Now {
     pub thinking: Option<String>,
     /// The share of the context window left, 0 to 1.
     pub context_left: Option<f64>,
+    /// When its newest turn ended, in milliseconds, where the records read say so.
+    pub ended: Option<u64>,
 }
 
-/// [`Now`], from a transcript's records newest first: its newest answer of the model's own
-/// in the main thread, never a sub-agent's inlined record or one Claude Code wrote itself.
-pub fn now(newest_first: &[Value], window: &Window) -> Now {
-    let Some(answer) = newest_first.iter().find(|record| main_answer(record)) else {
-        return Now::default();
-    };
-    let model = answer
-        .pointer("/message/model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|model| !model.is_empty());
-    let held = newest_first.iter().find_map(|record| {
-        if main_answer(record) {
-            record.pointer("/message/usage").map(used)
-        } else if text(record, "subtype") == Some("compact_boundary")
-            && record.get("isSidechain").and_then(Value::as_bool) != Some(true)
-        {
-            record.pointer("/compactMetadata/postTokens")?.as_u64()
-        } else {
-            None
+/// What the records read so far say, newest last.
+#[derive(Debug, Clone, Default)]
+struct Seen {
+    model: Option<String>,
+    thinking: Option<String>,
+    requested: Option<String>,
+    held: Option<u64>,
+    ended: Option<u64>,
+}
+
+impl Seen {
+    /// One more record, in the order they were written: a sub-agent's inlined record or
+    /// one Claude Code wrote itself says nothing of the conversation's model.
+    fn record(&mut self, record: &Value) {
+        if record.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            return;
         }
-    });
-    Now {
-        model: model.map(str::to_owned),
-        thinking: text(answer, "effort")
-            .filter(|effort| !effort.is_empty())
-            .map(str::to_owned),
-        context_left: model
-            .zip(held)
-            .map(|(model, held)| window.left(model, text(answer, "requestedModel"), held)),
+        let at = || text(record, "timestamp").and_then(millis);
+        if main_answer(record) {
+            let message = &record["message"];
+            self.model = text(message, "model")
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_owned);
+            self.thinking = text(record, "effort")
+                .filter(|effort| !effort.is_empty())
+                .map(str::to_owned);
+            self.requested = text(record, "requestedModel").map(str::to_owned);
+            if let Some(usage) = message.get("usage") {
+                self.held = Some(used(usage));
+            }
+            if text(message, "stop_reason").is_some_and(|reason| ENDS.contains(&reason)) {
+                self.ended = at().or(self.ended);
+            }
+        } else if text(record, "type") == Some("system") {
+            match text(record, "subtype") {
+                Some("compact_boundary") => {
+                    if let Some(after) = record.pointer("/compactMetadata/postTokens") {
+                        self.held = after.as_u64().or(self.held);
+                    }
+                }
+                Some("turn_duration") => self.ended = at().or(self.ended),
+                _ => {}
+            }
+        }
+    }
+
+    fn now(&self, window: &Window) -> Now {
+        Now {
+            model: self.model.clone(),
+            thinking: self.thinking.clone(),
+            context_left: self
+                .model
+                .as_deref()
+                .zip(self.held)
+                .map(|(model, held)| window.left(model, self.requested.as_deref(), held)),
+            ended: self.ended,
+        }
+    }
+}
+
+/// What each transcript asked about said as far as it was read, and the window the
+/// settings say, read again only once `settings.json` changed.
+pub struct Tails {
+    root: PathBuf,
+    read: Mutex<HashMap<PathBuf, Kept>>,
+    window: Mutex<Option<(Option<Stamp>, Window)>>,
+}
+
+/// One transcript as far as it was read: which file, and the end of its last whole line.
+struct Kept {
+    file: (u64, u64),
+    through: u64,
+    seen: Seen,
+}
+
+impl Tails {
+    /// For the conversations of Claude Code's configuration root `root`.
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_owned(),
+            read: Mutex::new(HashMap::new()),
+            window: Mutex::new(None),
+        }
+    }
+
+    /// The window the settings say now.
+    pub fn window(&self) -> Window {
+        let stamp = Stamp::at(&self.root.join("settings.json"));
+        let mut kept = self.window.lock().unwrap_or_else(PoisonError::into_inner);
+        match kept.as_ref() {
+            Some((at, window)) if *at == stamp && stamp.is_some() => window.clone(),
+            _ => {
+                let window = Window::read(&self.root);
+                *kept = Some((stamp, window.clone()));
+                window
+            }
+        }
+    }
+
+    /// Where the conversation `transcript` holds stands now: what was appended since the
+    /// last look is read on, and a file new to this or no longer the one read is read back
+    /// from its end as far as its newest answer.
+    pub fn now(&self, transcript: &Path) -> Now {
+        let window = self.window();
+        let Ok(mut file) = File::open(transcript) else {
+            return Now::default();
+        };
+        let Some(stamp) = file.metadata().ok().and_then(|meta| Stamp::of(&meta)) else {
+            return Now::default();
+        };
+        let end = stamp.length();
+        let kept = self
+            .read
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(transcript)
+            .filter(|read| read.file == stamp.file() && read.through <= end);
+        let (from, mut seen) = match kept {
+            Some(read) => (read.through, read.seen),
+            None => (
+                back(&mut file, end, main_answer).map_or(0, |(at, _)| at),
+                Seen::default(),
+            ),
+        };
+        let through = match whole(&mut file, from, end) {
+            Ok((base, bytes)) => {
+                for line in bytes.split(|byte| *byte == b'\n') {
+                    if let Ok(record) = serde_json::from_slice::<Value>(line) {
+                        seen.record(&record);
+                    }
+                }
+                base + bytes.len() as u64
+            }
+            Err(_) => from,
+        };
+        let now = seen.now(&window);
+        let mut read = self.read.lock().unwrap_or_else(PoisonError::into_inner);
+        read.insert(
+            transcript.to_owned(),
+            Kept {
+                file: stamp.file(),
+                through,
+                seen,
+            },
+        );
+        now
     }
 }
 
@@ -133,7 +292,7 @@ pub struct Window {
 
 impl Window {
     /// The window settings under configuration root `root` say.
-    pub fn read(root: &Path) -> Self {
+    fn read(root: &Path) -> Self {
         let settings: Value = std::fs::read(root.join("settings.json"))
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())

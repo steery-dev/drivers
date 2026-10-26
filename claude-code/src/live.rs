@@ -9,6 +9,7 @@
 //! permission prompt. The socket says nothing back. The session keeps its own model.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -21,9 +22,12 @@ use tokio::io::AsyncWriteExt;
 use crate::registry;
 use crate::transcripts::Store;
 
-/// How long the conversation's own model has to write a recap: inside the 40 seconds the
-/// runtime waits for one.
+/// How long the conversation's own model has to write a recap, its words read and all:
+/// inside the 40 seconds the runtime waits for one.
 const RECAP_WITHIN: Duration = Duration::from_secs(35);
+
+/// How much of a transcript's end a recap reads.
+const RECAP_TAIL: u64 = 4 * 1024 * 1024;
 
 /// The most of a conversation's words a recap is written from, its newest kept: well
 /// inside the smallest window Claude Code gives a model.
@@ -38,11 +42,11 @@ const POST_WITHIN: Duration = Duration::from_secs(8);
 
 /// `say`: the words into the inbox of the session somebody is in. Claude Code has one
 /// inbox and no way to say when its words go in: a running turn reads them between tool
-/// calls, so `steer` and `queue` both go in there. Where its registry entry says the
-/// session is `idle` as they are handed over, they begin its next turn, which is them
-/// taken; else they are handed over unconfirmed. Words that may go in only while nothing
-/// runs (`immediate`) are refused `harness-busy` while its entry says anything else; its
-/// entry is read before, so a turn its person begins in between may still take them.
+/// calls, so `steer` and `queue` both go in there. The socket says nothing back, so words
+/// handed over are unconfirmed and the runtime looks for them with `receipt/find`. Words
+/// that may go in only while nothing runs (`immediate`) are refused `harness-busy` while
+/// the session's registry entry says anything but `idle`; it is read before, so a turn its
+/// person begins in between may still take them.
 pub async fn say(root: &Path, say: Say) -> Result<Said, Error> {
     let dir = registry::dir(root);
     let live = registry::live(&dir, &say.external_id)
@@ -70,7 +74,7 @@ pub async fn say(root: &Path, say: Say) -> Result<Said, Error> {
         POST_WITHIN,
     )
     .await?;
-    Ok(Said { took: idle })
+    Ok(Said { took: false })
 }
 
 /// One message into a session's inbox: the auth line where a token is known, then the
@@ -130,16 +134,24 @@ async fn post(
 
 /// `recap`: the conversation's own model, as its newest answer names it, run once as
 /// `reader` runs Claude Code ([`crate::drive::reader`]: no tool, no MCP server, nothing of
-/// the machine's own, nothing kept), reads the conversation's words as its transcript
-/// holds them, its newest kept where they are long, and answers what is asked.
-pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
-    let transcript = store
-        .transcript(&recap.external_id)
-        .map_err(|_| Error::refused(refusal::NO_ANSWER, "Claude Code has no such conversation here"))?;
-    let now = crate::context::now(
-        &crate::context::newest_first(&transcript),
-        &crate::context::Window::default(),
-    );
+/// the machine's own, nothing kept), reads the conversation's newest words as its
+/// transcript's end holds them and answers what is asked, all within [`RECAP_WITHIN`].
+pub async fn recap(store: Arc<Store>, recap: Recap) -> Result<Text, Error> {
+    let deadline = tokio::time::Instant::now() + RECAP_WITHIN;
+    let unanswered = |why: String| Error::refused(refusal::NO_ANSWER, why);
+    let late = || unanswered("the conversation's model wrote no recap in time".into());
+    let id = recap.external_id.clone();
+    let (now, words) = tokio::time::timeout_at(
+        deadline,
+        crate::blocking(move || {
+            let transcript = store.transcript(&id).map_err(|_| {
+                Error::refused(refusal::NO_ANSWER, "Claude Code has no such conversation here")
+            })?;
+            Ok((store.now(&transcript), conversation(&store, &id)?))
+        }),
+    )
+    .await
+    .map_err(|_| late())??;
     let model = now.model.ok_or_else(|| {
         Error::refused(
             refusal::MODEL_MISSING,
@@ -149,7 +161,6 @@ pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
     let thinking = now
         .thinking
         .filter(|level| crate::turn::efforts(&model).contains(&level.as_str()));
-    let words = conversation(store, &recap.external_id)?;
     let plan = crate::drive::reader(Reader {
         system: None,
         model: Some(model),
@@ -169,7 +180,6 @@ pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let unanswered = |why: String| Error::refused(refusal::NO_ANSWER, why);
     let mut child = command
         .spawn()
         .map_err(|e| unanswered(format!("starting {binary}: {e}")))?;
@@ -178,14 +188,14 @@ pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
          Do not carry on with its work. {}",
         recap.asked
     );
-    let written = tokio::time::timeout(RECAP_WITHIN, async {
+    let written = tokio::time::timeout_at(deadline, async {
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(asked.as_bytes()).await?;
         }
         child.wait_with_output().await
     })
     .await
-    .map_err(|_| unanswered("the conversation's model wrote no recap in time".into()))?
+    .map_err(|_| late())?
     .map_err(|e| unanswered(format!("running {binary}: {e}")))?;
     let text = String::from_utf8_lossy(&written.stdout).trim().to_owned();
     if !written.status.success() || text.is_empty() {
@@ -197,9 +207,9 @@ pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
     Ok(Text { text })
 }
 
-/// What was said in a conversation, one paragraph per voice: the person's words, the
-/// agent's, the harness's summaries, and the start of each call's result, the newest
-/// [`RECAP_READS`] bytes of it.
+/// What was said in a conversation's newest [`RECAP_TAIL`] bytes, one paragraph per voice:
+/// the person's words, the agent's, the harness's summaries, and the start of each call's
+/// result, the newest [`RECAP_READS`] bytes of it.
 fn conversation(store: &Store, id: &str) -> Result<String, Error> {
     let mut said = String::new();
     let mut cursor = None;
@@ -207,8 +217,8 @@ fn conversation(store: &Store, id: &str) -> Result<String, Error> {
         let read = store.read(Read {
             external_id: id.to_owned(),
             sub_agent: None,
+            tail: cursor.is_none().then_some(RECAP_TAIL),
             cursor,
-            tail: None,
         })?;
         for event in read.events {
             let Event::Words { voice, text, .. } = event else {

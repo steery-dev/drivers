@@ -107,9 +107,14 @@ impl ClaudeCode {
     }
 
     fn store(&self) -> Result<&transcripts::Store, Error> {
+        self.shared().map(|store| &**store)
+    }
+
+    /// The store, to hand to work off the async threads.
+    fn shared(&self) -> Result<&Arc<transcripts::Store>, Error> {
         self.place()?
             .store
-            .as_deref()
+            .as_ref()
             .map_err(|why| Error::refused(refusal::REFUSED, why.clone()))
     }
 
@@ -118,20 +123,31 @@ impl ClaudeCode {
     }
 }
 
+/// Run blocking work off the async threads.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, Error> + Send + 'static,
+) -> Result<T, Error> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| Error::refused(refusal::REFUSED, e.to_string()))?
+}
+
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_sdk::pick(&params.protocol)
             .ok_or_else(|| Error::invalid("this driver speaks protocols 3 and 4"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
-        if let Ok(store) = &store
-            && self.place.get().is_none()
+        let place = Place {
+            home: params.home.clone(),
+            store,
+        };
+        // The first `initialize` places the driver and starts the one watcher, which runs
+        // until the process ends; the SDK says nothing to a program as it shuts down.
+        if self.place.set(place).is_ok()
+            && let Ok(store) = &self.place()?.store
         {
             state::watch(store.root(), Arc::clone(store), self.notifier.clone());
         }
-        let _ = self.place.set(Place {
-            home: params.home.clone(),
-            store,
-        });
         Ok(wire::Initialized {
             protocol,
             program: wire::ProgramInfo {
@@ -176,7 +192,11 @@ impl Program for ClaudeCode {
                 self.root()?,
                 given(params)?,
             )),
-            method::HOOK_READ => result(hooks::read(self.root()?, given(params)?)?),
+            method::HOOK_READ => {
+                let store = Arc::clone(self.shared()?);
+                let read = given(params)?;
+                result(blocking(move || hooks::read(&store, read)).await?)
+            }
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
             method::HELD => result(drive::held(self.root()?, self.store()?, given(params)?)),
             method::IDLE => result(
@@ -207,7 +227,7 @@ impl Program for ClaudeCode {
                     "Claude Code's inbox keeps the session's own model",
                 ))
             }
-            method::RECAP => result(live::recap(self.store()?, given(params)?).await?),
+            method::RECAP => result(live::recap(Arc::clone(self.shared()?), given(params)?).await?),
             // A reader's output is its answer whole: there is no `reader/read`.
             _ => Err(Error::Unknown),
         }
