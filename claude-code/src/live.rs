@@ -1,5 +1,5 @@
 //! Claude Code's own door into a live conversation: the inbox socket of the session its
-//! registry names in it.
+//! registry names in it, and a recap its own model writes ([`recap`]).
 //!
 //! One connection carries one `{"type":"auth","token":…}` line, where the session
 //! published a peer token, and one `{"type":"user","message":{"role":"user","content":…}}`
@@ -13,11 +13,25 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::json;
-use steery_sdk::wire::harness::{Said, Say, SayMode};
+use steery_sdk::wire::harness::{
+    Event, Read, Reader, ReaderTools, Recap, Said, Say, SayMode, Text, Voice,
+};
 use steery_sdk::{Error, refusal};
 use tokio::io::AsyncWriteExt;
 
 use crate::registry;
+use crate::transcripts::Store;
+
+/// How long the conversation's own model has to write a recap: inside the 40 seconds the
+/// runtime waits for one.
+const RECAP_WITHIN: Duration = Duration::from_secs(35);
+
+/// The most of a conversation's words a recap is written from, its newest kept: well
+/// inside the smallest window Claude Code gives a model.
+const RECAP_READS: usize = 400_000;
+
+/// The most of one call's result a recap is written from.
+const RESULT_READS: usize = 400;
 
 /// How long the socket has to take the two lines. The harness closes a connection that
 /// has not sent a complete line in 30 seconds; these are ready before it opens.
@@ -105,6 +119,122 @@ async fn post(
             ),
         )),
     }
+}
+
+/// `recap`: the conversation's own model, as its newest answer names it, run once as
+/// `reader` runs Claude Code ([`crate::drive::reader`]: no tool, no MCP server, nothing of
+/// the machine's own, nothing kept), reads the conversation's words as its transcript
+/// holds them, its newest kept where they are long, and answers what is asked.
+pub async fn recap(store: &Store, recap: Recap) -> Result<Text, Error> {
+    let transcript = store
+        .transcript(&recap.external_id)
+        .map_err(|_| Error::refused(refusal::NO_ANSWER, "Claude Code has no such conversation here"))?;
+    let now = crate::context::now(
+        &crate::context::newest_first(&transcript),
+        &crate::context::Window::default(),
+    );
+    let model = now.model.ok_or_else(|| {
+        Error::refused(
+            refusal::MODEL_MISSING,
+            "the conversation's model has not answered in it yet",
+        )
+    })?;
+    let thinking = now
+        .thinking
+        .filter(|level| crate::turn::efforts(&model).contains(&level.as_str()));
+    let words = conversation(store, &recap.external_id)?;
+    let plan = crate::drive::reader(Reader {
+        system: None,
+        model: Some(model),
+        thinking,
+        tools: ReaderTools::None,
+        cwd: std::env::temp_dir(),
+        asked: String::new(),
+    })?;
+    let (binary, args) = plan
+        .argv
+        .split_first()
+        .ok_or_else(|| Error::refused(refusal::NO_ANSWER, "no command to run"))?;
+    let mut command = steery_driver_common::program::helper(Path::new(binary));
+    command
+        .args(args)
+        .current_dir(&plan.cwd)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let unanswered = |why: String| Error::refused(refusal::NO_ANSWER, why);
+    let mut child = command
+        .spawn()
+        .map_err(|e| unanswered(format!("starting {binary}: {e}")))?;
+    let asked = format!(
+        "This is a conversation with an agent, as its transcript holds it:\n\n{words}\n\n\
+         Do not carry on with its work. {}",
+        recap.asked
+    );
+    let written = tokio::time::timeout(RECAP_WITHIN, async {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(asked.as_bytes()).await?;
+        }
+        child.wait_with_output().await
+    })
+    .await
+    .map_err(|_| unanswered("the conversation's model wrote no recap in time".into()))?
+    .map_err(|e| unanswered(format!("running {binary}: {e}")))?;
+    let text = String::from_utf8_lossy(&written.stdout).trim().to_owned();
+    if !written.status.success() || text.is_empty() {
+        return Err(unanswered(format!(
+            "the conversation's model wrote no recap: {}",
+            String::from_utf8_lossy(&written.stderr).trim()
+        )));
+    }
+    Ok(Text { text })
+}
+
+/// What was said in a conversation, one paragraph per voice: the person's words, the
+/// agent's, the harness's summaries, and the start of each call's result, the newest
+/// [`RECAP_READS`] bytes of it.
+fn conversation(store: &Store, id: &str) -> Result<String, Error> {
+    let mut said = String::new();
+    let mut cursor = None;
+    loop {
+        let read = store.read(Read {
+            external_id: id.to_owned(),
+            sub_agent: None,
+            cursor,
+            tail: None,
+        })?;
+        for event in read.events {
+            let Event::Words { voice, text, .. } = event else {
+                continue;
+            };
+            let (who, text) = match voice {
+                Voice::Person => ("Person", text.as_str()),
+                Voice::Agent => ("Agent", text.as_str()),
+                Voice::Summary => ("Summary of what came before", text.as_str()),
+                Voice::Tool => ("Call result", cut(&text, RESULT_READS)),
+                _ => continue,
+            };
+            said.push_str(&format!("{who}: {text}\n\n"));
+        }
+        if !read.more {
+            break;
+        }
+        cursor = Some(read.cursor);
+    }
+    let start = said.len().saturating_sub(RECAP_READS);
+    let start = (start..=said.len())
+        .find(|at| said.is_char_boundary(*at))
+        .unwrap_or(said.len());
+    Ok(said.split_off(start))
+}
+
+/// The first `most` bytes of `text`, at a character's edge.
+fn cut(text: &str, most: usize) -> &str {
+    let end = (0..=most.min(text.len()))
+        .rev()
+        .find(|at| text.is_char_boundary(*at))
+        .unwrap_or(0);
+    &text[..end]
 }
 
 #[cfg(test)]

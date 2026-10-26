@@ -207,8 +207,8 @@ impl Program for ClaudeCode {
                     "Claude Code's inbox keeps the session's own model",
                 ))
             }
-            // A reader's output is its answer whole, and Claude Code has no recap of its
-            // own a live session gives.
+            method::RECAP => result(live::recap(self.store()?, given(params)?).await?),
+            // A reader's output is its answer whole: there is no `reader/read`.
             _ => Err(Error::Unknown),
         }
     }
