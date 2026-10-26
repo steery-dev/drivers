@@ -12,36 +12,50 @@
 //!   an interactive background session, which waits on it, not a `-p` run, which skips it.
 //!
 //! An entry with a `url` and no `type`, or of `type: "sdk"`, Claude Code skips, and so does
-//! this list. The list is incomplete where an administrator's managed configuration is
-//! here, a plugin is turned on, or a claude.ai account is signed in, whose connectors
-//! Claude Code fetches as it starts.
+//! this list. Ahead of everything: the servers an administrator provides, `managedMcpServers`
+//! in managed settings. Where an administrator deployed `managed-mcp.json`, it has
+//! exclusive control (https://code.claude.com/docs/en/managed-mcp, "Exclusive control"):
+//! only its servers and the provided ones load. The list is incomplete where managed
+//! settings are here, whose allow- and denylists it does not apply, where `managed-mcp.json`
+//! does not read, and outside exclusive control where a plugin is turned on or a claude.ai
+//! account is signed in, whose connectors Claude Code fetches as it starts.
 
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use steery_driver_common::mcp::{self, Servers};
 use steery_sdk::wire::harness::{McpList, McpServers};
-
-/// Where an administrator's managed configuration sits on this system.
-#[cfg(target_os = "macos")]
-const MANAGED: &str = "/Library/Application Support/ClaudeCode";
-#[cfg(not(target_os = "macos"))]
-const MANAGED: &str = "/etc/claude-code";
 
 /// The servers a conversation started in `asked.cwd`, or anywhere, loads, for the person
 /// whose home is `home` and whose Claude Code configuration root is `root`.
 pub fn list(home: &Path, root: &Path, asked: McpList) -> McpServers {
     let state_file = crate::state_file(home, root);
     let state = mcp::json(&state_file).unwrap_or(Value::Null);
-    let managed = Path::new(MANAGED);
-    let mut watch = vec![
-        state_file,
-        root.join("settings.json"),
-        managed.join("managed-mcp.json"),
-        managed.join("managed-settings.json"),
-    ];
-    let mut settings: Vec<Value> = mcp::json(&root.join("settings.json")).into_iter().collect();
+    let exclusive = crate::drive::managed_folder().join("managed-mcp.json");
+    let managed = crate::drive::managed_files();
+    let mut watch = vec![state_file, root.join("settings.json"), exclusive.clone()];
+    watch.extend(managed.iter().cloned());
+    let administered = managed.iter().any(|file| file.exists());
     let mut servers = Servers::default();
+    // The last managed file that provides a server decides it, as Claude Code merges them.
+    for file in managed.iter().rev() {
+        if let Some(provided) = mcp::json(file).and_then(|said| said.get("managedMcpServers").cloned())
+        {
+            add(&mut servers, &json!({ "mcpServers": provided }), |_| true);
+        }
+    }
+    if exclusive.exists() {
+        let read = mcp::json(&exclusive);
+        if let Some(file) = &read {
+            add(&mut servers, file, |_| true);
+        }
+        return McpServers {
+            servers: servers.on(),
+            complete: read.is_some() && !administered,
+            watch,
+        };
+    }
+    let mut settings: Vec<Value> = mcp::json(&root.join("settings.json")).into_iter().collect();
     let mut off = Vec::new();
     if let Some(cwd) = asked.cwd.as_deref() {
         let project = cwd
@@ -92,10 +106,9 @@ pub fn list(home: &Path, root: &Path, asked: McpList) -> McpServers {
             .and_then(Value::as_object)
             .is_some_and(|plugins| plugins.values().any(|on| on.as_bool() == Some(true)))
     });
-    let managed = watch[2..4].iter().any(|file| file.exists());
     McpServers {
         servers: servers.on(),
-        complete: !plugins && !managed && state.get("oauthAccount").is_none(),
+        complete: !plugins && !administered && state.get("oauthAccount").is_none(),
         watch,
     }
 }

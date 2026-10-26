@@ -484,10 +484,10 @@ const ALIASES: [(&str, &str, &[&str]); 8] = [
     ("sonnet[1m]", "Sonnet, 1M context", &["sonnet"]),
 ];
 
-/// Where an administrator's managed settings files are (https://code.claude.com/docs/en/managed-settings,
+/// Where an administrator's managed files are (https://code.claude.com/docs/en/managed-settings,
 /// "File-based"): `managed-settings.json`, then each `*.json` of `managed-settings.d/` in
-/// alphabetical order, merged in that order.
-fn managed_folder() -> &'static Path {
+/// alphabetical order, merged in that order, and `managed-mcp.json`.
+pub(crate) fn managed_folder() -> &'static Path {
     if cfg!(target_os = "macos") {
         Path::new("/Library/Application Support/ClaudeCode")
     } else {
