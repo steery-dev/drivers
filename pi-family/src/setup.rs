@@ -48,16 +48,22 @@ pub async fn plan(
         Err(why) => return Ok(refused(why)),
     };
     let Some(binary) = harness.binary() else {
+        // Where the harness's installer cannot run here, say why: the runtime shows it where
+        // a person names the harness, and offers nothing.
+        let (install, refused) = match harness.install().await {
+            Ok(install) => (Some(install), None),
+            Err(why) => (None, Some(why)),
+        };
         return Ok(Planned {
             found: None,
-            refused: None,
+            refused,
             entries: Vec::new(),
             notes: vec![
                 "Not installed here: no executable found, and a configuration directory is not \
                  evidence of one."
                     .into(),
             ],
-            install: harness.install().await,
+            install,
         });
     };
     // omp and pi read the same variable for their folder, and one folder holds one skill
@@ -76,6 +82,7 @@ pub async fn plan(
     if release.is_none() {
         notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
     }
+    notes.extend(harness.others_note(&binary));
     let found = Found {
         binary,
         release: release

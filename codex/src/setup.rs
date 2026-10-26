@@ -43,16 +43,20 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
         }
     };
     let Some(binary) = crate::home::binary() else {
+        let (install, refused) = match crate::home::install() {
+            Ok(install) => (Some(install), None),
+            Err(why) => (None, Some(why)),
+        };
         return Ok(Planned {
             found: None,
-            refused: None,
+            refused,
             entries: Vec::new(),
             notes: vec![
                 "Not installed here: no executable found, and a configuration directory is not \
                  evidence of one."
                     .into(),
             ],
-            install: crate::home::install(),
+            install,
         });
     };
     let mut notes = Vec::new();
@@ -60,6 +64,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
     if release.is_none() {
         notes.push("`--version` named no release, so nothing about this build is claimed.".into());
     }
+    notes.extend(crate::home::others_note(&binary));
     let hooks_file = root.join("hooks.json");
     let config = root.join("config.toml");
     let mut entries = vec![

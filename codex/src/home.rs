@@ -32,26 +32,41 @@ pub(crate) fn default_root(home: &Path) -> PathBuf {
     home.join(".codex")
 }
 
-/// Codex's executable: the first `codex` on `PATH`, else the one its own installer writes,
-/// in `CODEX_INSTALL_DIR`, else `~/.local/bin`, which a shell that has not read its
-/// profile since may not have on `PATH`.
+/// The folder Codex's own installer writes its executable to: `CODEX_INSTALL_DIR`, else
+/// `~/.local/bin`, which a shell that has not read its profile since may not have on
+/// `PATH`.
+fn installer_folder() -> Option<PathBuf> {
+    match std::env::var_os("CODEX_INSTALL_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/bin")),
+    }
+}
+
+/// Codex's executable: the first `codex` on `PATH`, else the one in its installer's folder.
 pub(crate) fn binary() -> Option<PathBuf> {
-    on_path("codex").or_else(|| {
-        let installed = match std::env::var_os("CODEX_INSTALL_DIR").filter(|v| !v.is_empty()) {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(std::env::var_os("HOME")?).join(".local/bin"),
-        };
-        executable(installed.join("codex"))
-    })
+    on_path("codex").or_else(|| executable(installer_folder()?.join("codex")))
+}
+
+/// A line for a person where `codex` is installed in more than one place here: which one
+/// Steery runs and which it does not.
+pub(crate) fn others_note(used: &Path) -> Option<String> {
+    steery_driver_common::program::others_note(
+        "codex",
+        "codex",
+        installer_folder().as_deref(),
+        used,
+    )
 }
 
 /// Codex's own installer, where `sh` and `curl` are here: its release into
 /// `~/.local/bin`, asking nothing (`CODEX_NON_INTERACTIVE`: it would offer to start Codex).
-pub(crate) fn install() -> Option<steery_sdk::wire::harness::Install> {
-    on_path("sh")?;
-    on_path("curl")?;
+/// Where not, why, in one line.
+pub(crate) fn install() -> Result<steery_sdk::wire::harness::Install, String> {
+    if let Some(why) = steery_driver_common::program::lacks(&["sh", "curl"]) {
+        return Err(format!("codex's installer {why}"));
+    }
     let line = "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
-    Some(steery_sdk::wire::harness::Install {
+    Ok(steery_sdk::wire::harness::Install {
         argv: vec!["sh".into(), "-c".into(), line.into()],
         about: format!("Codex's own installer, its release into ~/.local/bin: {line}"),
     })

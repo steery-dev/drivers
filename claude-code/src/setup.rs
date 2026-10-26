@@ -13,16 +13,20 @@ use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 /// The plan for this machine.
 pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Error> {
     let Some(binary) = crate::binary() else {
+        let (install, refused) = match crate::install() {
+            Ok(install) => (Some(install), None),
+            Err(why) => (None, Some(why)),
+        };
         return Ok(Planned {
             found: None,
-            refused: None,
+            refused,
             entries: Vec::new(),
             notes: vec![
                 "Not installed here: no executable found, and a configuration directory is not \
                  evidence of one."
                     .into(),
             ],
-            install: crate::install(),
+            install,
         });
     };
     let release = named(version(&binary).await.as_deref().and_then(release_within));
@@ -30,6 +34,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
     if release.is_none() {
         notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
     }
+    notes.extend(crate::others_note(&binary));
     Ok(Planned {
         found: Some(Found {
             binary,
