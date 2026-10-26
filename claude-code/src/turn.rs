@@ -126,13 +126,18 @@ impl Turn {
 
     /// The command line that starts a background session for the act, before `--` and
     /// the words. A folder outside its own the session reads is granted it (`--add-dir`):
-    /// Claude Code asks its person before a read anywhere else. Bypass mode is made
-    /// available, never turned on, so a person's "everything, this session" in Steery,
-    /// a `setMode` to `bypassPermissions`, takes effect: Claude Code ignores that update in
-    /// a session launched without it (https://code.claude.com/docs/en/hooks, "Permission
-    /// update entries").
-    fn launching(&self) -> Result<Vec<String>, String> {
-        let mut args: Vec<String> = vec!["--bg".into(), "--allow-dangerously-skip-permissions".into()];
+    /// Claude Code asks its person before a read anywhere else. Where its person accepted
+    /// Claude Code's bypass disclaimer (`bypass`, [`bypass_accepted`]), bypass mode is made
+    /// available, never turned on, so a person's "everything, this session" in Steery, a
+    /// `setMode` to `bypassPermissions`, takes effect: Claude Code ignores that update in a
+    /// session launched without it (https://code.claude.com/docs/en/hooks, "Permission
+    /// update entries"). Before that acceptance Claude Code refuses to start a background
+    /// session that names the flag at all.
+    fn launching(&self, bypass: bool) -> Result<Vec<String>, String> {
+        let mut args: Vec<String> = vec!["--bg".into()];
+        if bypass {
+            args.push("--allow-dangerously-skip-permissions".into());
+        }
         match (self.act, self.id.as_deref()) {
             (Act::New, _) => {}
             (Act::Continue, Some(id)) => args.extend(["--resume".into(), id.into()]),
@@ -174,6 +179,25 @@ fn text(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("{} is not text", path.display()))
 }
 
+/// Whether the person accepted Claude Code's bypass-permissions disclaimer, as Claude Code
+/// 2.1.310 reads it before a `--bg` launch may name bypass: `skipDangerousModePermissionPrompt`
+/// in their user, local or managed settings, or `bypassPermissionsModeAccepted` in its
+/// state file. `place` is the folder the session starts in, whose local settings count.
+fn bypass_accepted(home: &Path, root: &Path, place: &Path) -> bool {
+    let set = |file: &Path, key: &str| {
+        std::fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|value| value.get(key) == Some(&Value::Bool(true)))
+    };
+    let mut settings = vec![root.join("settings.json"), place.join(".claude/settings.local.json")];
+    settings.extend(crate::drive::managed_files());
+    settings
+        .iter()
+        .any(|file| set(file, "skipDangerousModePermissionPrompt"))
+        || set(&crate::state_file(home, root), "bypassPermissionsModeAccepted")
+}
+
 /// The turn mode: run the turn its arguments say, the words on standard input. Exits 0
 /// once the turn settled, 1 with Claude Code's words on standard error where it did not.
 /// A runtime stops a turn by signalling its process group, so a SIGTERM, a SIGINT or a
@@ -186,6 +210,8 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
             .map_err(|e| format!("reading the words: {e}"))?;
         let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
         let root = crate::root(Path::new(&home))?;
+        let place = std::env::current_dir().map_err(|e| format!("finding the place: {e}"))?;
+        let bypass = bypass_accepted(Path::new(&home), &root, &place);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -198,7 +224,7 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
                 let mut hup = hear(SignalKind::hangup())?;
                 let mut out = std::io::stdout();
                 tokio::select! {
-                    followed = follow(&turn, &root, &words, &mut out) => followed,
+                    followed = follow(&turn, &root, bypass, &words, &mut out) => followed,
                     _ = term.recv() => Err("stopped by SIGTERM".to_owned()),
                     _ = int.recv() => Err("stopped by SIGINT".to_owned()),
                     _ = hup.recv() => Err("stopped by SIGHUP".to_owned()),
@@ -215,8 +241,15 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
 }
 
 /// [`run`], the words in hand: start the session, then follow it to where its turn
-/// stopped, writing each change to `out`.
-async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> Result<(), String> {
+/// stopped, writing each change to `out`. `bypass`: whether the launch may make bypass
+/// mode available ([`Turn::launching`]).
+async fn follow(
+    turn: &Turn,
+    root: &Path,
+    bypass: bool,
+    words: &str,
+    out: &mut impl Write,
+) -> Result<(), String> {
     let registry = crate::registry::dir(root);
     if turn.act == Act::Continue
         && let Some(id) = turn.id.as_deref()
@@ -233,7 +266,7 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
     // this turn, never a helper's.
     let mut command = tokio::process::Command::new(&turn.binary);
     command.stdin(std::process::Stdio::null());
-    command.args(turn.launching()?);
+    command.args(turn.launching(bypass)?);
     if let Some(heard) = &heard {
         command.args(heard.settings()?);
     }
@@ -556,7 +589,7 @@ mod tests {
         );
         assert_eq!(Turn::parse(args.into_iter()).unwrap(), picked);
         assert_eq!(
-            picked.launching().unwrap(),
+            picked.launching(true).unwrap(),
             [
                 "--bg",
                 "--allow-dangerously-skip-permissions",
@@ -571,18 +604,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            turn(Act::Fork, Some("s-1"), true).launching().unwrap(),
-            ["--bg", "--allow-dangerously-skip-permissions", "--resume", "s-1", "--fork-session", "-w"]
+            turn(Act::Fork, Some("s-1"), true).launching(false).unwrap(),
+            ["--bg", "--resume", "s-1", "--fork-session", "-w"]
         );
         let new = Turn {
             reads: vec![PathBuf::from("/a/2026/09"), PathBuf::from("/a/2026/10")],
             ..turn(Act::New, None, false)
         };
         assert_eq!(
-            new.launching().unwrap(),
-            ["--bg", "--allow-dangerously-skip-permissions", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
+            new.launching(false).unwrap(),
+            ["--bg", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
         );
-        assert!(turn(Act::Continue, None, false).launching().is_err());
+        assert!(turn(Act::Continue, None, false).launching(false).is_err());
     }
 
     /// The session's own turn ends reach the follower through the hooks its launch gives
@@ -682,7 +715,7 @@ mod tests {
             ..turn(Act::Continue, Some(session), false)
         };
         let mut out = Vec::new();
-        let error = follow(&continued, dir.path(), "go", &mut out)
+        let error = follow(&continued, dir.path(), false, "go", &mut out)
             .await
             .expect_err("a live session holds it");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
@@ -695,7 +728,7 @@ mod tests {
             "note: session {session} is already running in the background, so this started a copy as 186b32ef.\nbackgrounded · 186b32ef"
         );
         crate::tests::stand_in(&binary, &script("[]", &copy));
-        let error = follow(&continued, dir.path(), "go", &mut out)
+        let error = follow(&continued, dir.path(), false, "go", &mut out)
             .await
             .expect_err("a copy is no continue");
         assert_eq!(agents::refusal_of(&error), "harness-busy");

@@ -433,7 +433,7 @@ fn managed_folder() -> &'static Path {
 }
 
 /// The managed settings files, in the order Claude Code merges them.
-fn managed_files() -> Vec<PathBuf> {
+pub(crate) fn managed_files() -> Vec<PathBuf> {
     let folder = managed_folder();
     let mut drop_ins: Vec<PathBuf> = std::fs::read_dir(folder.join("managed-settings.d"))
         .into_iter()
