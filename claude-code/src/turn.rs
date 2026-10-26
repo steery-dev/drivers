@@ -38,6 +38,21 @@ use crate::agents::{self, Follow, RUNNING};
 /// The levels `claude --effort` takes, least first (`claude --help`).
 pub const EFFORT: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// The effort levels Claude Code takes for `model`, least first
+/// (https://code.claude.com/docs/en/model-config, "Adjust effort level"): none for Haiku 4.5,
+/// which the `haiku` alias runs where the account's provider serves no newer Haiku; every
+/// level but `xhigh` for the 4.6 models; every level for the rest.
+pub fn efforts(model: &str) -> &'static [&'static str] {
+    let model = model.strip_suffix("[1m]").unwrap_or(model);
+    if model == "haiku" || model.contains("claude-haiku-4-5") {
+        &[]
+    } else if model.contains("-4-6") {
+        &["low", "medium", "high", "max"]
+    } else {
+        &EFFORT
+    }
+}
+
 /// The word that starts the turn mode, as `start`'s plan runs this binary.
 pub const MODE: &str = "turn";
 
@@ -158,7 +173,12 @@ impl Turn {
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.clone()]);
         }
-        if let Some(thinking) = &self.thinking {
+        if let Some(thinking) = &self.thinking
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|model| !efforts(model).is_empty())
+        {
             args.extend(["--effort".into(), thinking.clone()]);
         }
         Ok(args)
@@ -601,6 +621,16 @@ mod tests {
             ["--bg", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
         );
         assert!(turn(Act::Continue, None, false).launching(false).is_err());
+        // Haiku 4.5 takes no effort: the level picked is not passed.
+        let haiku = Turn {
+            model: Some("claude-haiku-4-5-20251001".into()),
+            thinking: Some("high".into()),
+            ..turn(Act::New, None, false)
+        };
+        assert_eq!(
+            haiku.launching(false).unwrap(),
+            ["--bg", "--model", "claude-haiku-4-5-20251001"]
+        );
     }
 
     /// The session's own turn ends reach the follower through the hooks its launch gives

@@ -526,16 +526,24 @@ async fn signed_in() -> Option<bool> {
     })
 }
 
+/// Whether an administrator's allowlist (`availableModels`, [`allowed`]) lets `model` run:
+/// every model where none is set.
+fn allows(allowed: Option<&[String]>, model: &str) -> bool {
+    allowed.is_none_or(|allowed| allowed.iter().any(|entry| permits(entry, model)))
+}
+
 /// `models`: Claude Code names no models on its command line. It lists its documented
 /// aliases ([`ALIASES`]), the one this machine chose in its own settings (`model` in
-/// `settings.json`) first, each with every effort level, any other model it runs taking the
-/// same levels; only those an administrator's managed settings allow. It says whether
-/// Claude Code is logged in ([`signed_in`]), so a login made in a terminal lifts a sign-in
-/// failure on its own (Ali's first run, #product Slack thread 2026-10-19), and watches the
-/// files a login, a model choice and a policy change rewrite.
+/// `settings.json`) first, each with the effort levels it takes ([`turn::efforts`]), any
+/// other model it runs taking every level; only those an administrator's managed settings
+/// allow. It says whether Claude Code is logged in ([`signed_in`]), so a login made in a
+/// terminal lifts a sign-in failure on its own (Ali's first run, #product Slack thread
+/// 2026-10-19), and watches the files a login, a model choice and a policy change rewrite.
 pub async fn models(home: &Path, root: &Path) -> Models {
     let settings = root.join("settings.json");
-    let thinking: Vec<String> = EFFORT.map(String::from).to_vec();
+    let thinking = |model: &str| -> Vec<String> {
+        turn::efforts(model).iter().map(|&level| level.to_owned()).collect()
+    };
     let chosen = std::fs::read(&settings)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -543,18 +551,13 @@ pub async fn models(home: &Path, root: &Path) -> Models {
         .filter(|model| !model.is_empty() && model != "default");
     let managed = managed_files();
     let allowed = allowed(&managed);
-    let runs = |model: &str| {
-        allowed
-            .as_ref()
-            .is_none_or(|allowed| allowed.iter().any(|entry| permits(entry, model)))
-    };
     let mut models: Vec<Model> = ALIASES
         .iter()
         .map(|(alias, label, _)| Model {
             provider: None,
             model: (*alias).to_owned(),
             label: Some((*label).to_owned()),
-            thinking: thinking.clone(),
+            thinking: thinking(*alias),
             cost: None,
         })
         .collect();
@@ -563,15 +566,15 @@ pub async fn models(home: &Path, root: &Path) -> Models {
             Some(at) => models.remove(at),
             None => Model {
                 provider: None,
+                thinking: thinking(&chosen),
                 model: chosen,
                 label: None,
-                thinking: thinking.clone(),
                 cost: None,
             },
         };
         models.insert(0, first);
     }
-    models.retain(|model| runs(&model.model));
+    models.retain(|model| allows(allowed.as_deref(), &model.model));
     let mut watch = vec![
         settings,
         crate::state_file(home, root),
@@ -581,7 +584,9 @@ pub async fn models(home: &Path, root: &Path) -> Models {
     watch.extend(managed);
     Models {
         models,
-        unlisted: Some(Unlisted { thinking }),
+        unlisted: Some(Unlisted {
+            thinking: EFFORT.map(String::from).to_vec(),
+        }),
         watch,
         signed_in: signed_in().await,
     }
@@ -589,7 +594,9 @@ pub async fn models(home: &Path, root: &Path) -> Models {
 
 /// `start`: the plan of a turn this driver's own binary runs in its turn mode
 /// ([`turn`]), the words on standard input. A continue or a fork names a conversation
-/// Claude Code has here; an effort is one of Claude's own levels.
+/// Claude Code has here; a model is one an administrator's managed settings let run, as
+/// `models` lists it or as any other model it runs; an effort is one of Claude's own
+/// levels.
 pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
@@ -616,6 +623,14 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
             format!("Claude Code takes no effort {thinking}"),
+        ));
+    }
+    if let Some(model) = &start.model
+        && (model.trim().is_empty() || !allows(allowed(&managed_files()).as_deref(), model))
+    {
+        return Err(Error::refused(
+            refusal::MODEL_MISSING,
+            format!("Claude Code does not run {model} here"),
         ));
     }
     let me = std::env::current_exe()
