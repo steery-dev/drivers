@@ -6,8 +6,7 @@
 //! line, and the session takes the message as a person's: a turn starts if it is idle,
 //! and a running one reads it between tool calls. Delivered by default; a session that
 //! bypasses permission prompts holds it for its person, and a message never answers a
-//! permission prompt. The socket says nothing back, so words handed over are unconfirmed
-//! and the runtime looks for them with `receipt/find`. The session keeps its own model.
+//! permission prompt. The socket says nothing back. The session keeps its own model.
 
 use std::path::Path;
 use std::time::Duration;
@@ -37,19 +36,27 @@ const RESULT_READS: usize = 400;
 /// has not sent a complete line in 30 seconds; these are ready before it opens.
 const POST_WITHIN: Duration = Duration::from_secs(8);
 
-/// `say`: the words into the inbox of the session somebody is in. Claude Code's inbox
-/// checks nothing idle, so words that may go in only while nothing runs never go through
-/// it.
+/// `say`: the words into the inbox of the session somebody is in. Claude Code has one
+/// inbox and no way to say when its words go in: a running turn reads them between tool
+/// calls, so `steer` and `queue` both go in there. Where its registry entry says the
+/// session is `idle` as they are handed over, they begin its next turn, which is them
+/// taken; else they are handed over unconfirmed. Words that may go in only while nothing
+/// runs (`immediate`) are refused `harness-busy` while its entry says anything else; its
+/// entry is read before, so a turn its person begins in between may still take them.
 pub async fn say(root: &Path, say: Say) -> Result<Said, Error> {
-    if say.mode == SayMode::Immediate {
-        return Err(Error::refused(
-            refusal::REFUSED,
-            "Claude Code's inbox would queue them: it checks nothing idle",
-        ));
-    }
     let dir = registry::dir(root);
     let live = registry::live(&dir, &say.external_id)
         .ok_or_else(|| Error::refused(refusal::NO_DOOR, "no Claude Code session is in it now"))?;
+    let idle = live.status.as_deref() == Some("idle");
+    if say.mode == SayMode::Immediate && !idle {
+        return Err(Error::refused(
+            refusal::HARNESS_BUSY,
+            match live.status.as_deref() {
+                Some(status) => format!("the Claude Code session in it is {status}"),
+                None => "the Claude Code session in it says nothing of a turn".to_owned(),
+            },
+        ));
+    }
     let socket = live.socket.ok_or_else(|| {
         Error::refused(
             refusal::NO_DOOR,
@@ -63,7 +70,7 @@ pub async fn say(root: &Path, say: Say) -> Result<Said, Error> {
         POST_WITHIN,
     )
     .await?;
-    Ok(Said { took: false })
+    Ok(Said { took: idle })
 }
 
 /// One message into a session's inbox: the auth line where a token is known, then the

@@ -53,6 +53,8 @@ pub struct Live {
     pub socket: Option<PathBuf>,
     /// The short id of the background session it is, when it is one.
     pub job: Option<String>,
+    /// Where it stands: `busy`, `waiting` or `idle`, where it says.
+    pub status: Option<String>,
 }
 
 /// Where the registry is: `sessions/` under Claude Code's configuration root.
@@ -93,6 +95,7 @@ fn live_in(dir: &Path, external_id: &str, alive: impl Fn(&Registered) -> bool) -
             job: (registered.kind.as_deref() == Some("bg"))
                 .then_some(registered.job_id)
                 .flatten(),
+            status: registered.status,
         })
 }
 

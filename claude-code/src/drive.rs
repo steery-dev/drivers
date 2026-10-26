@@ -909,6 +909,7 @@ mod tests {
             pid: i32::try_from(me).unwrap(),
             socket: socket.map(PathBuf::from),
             job: job.map(str::to_owned),
+            status: None,
         };
         let started = |_| Some(1_790_000_000_000);
         assert!(
