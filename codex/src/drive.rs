@@ -630,11 +630,12 @@ impl Drive {
         })
     }
 
-    /// `models`: what Codex's own app server lists (`model/list`), the default first.
+    /// `models`: what Codex's own app server lists (`model/list`), the default first, and
+    /// whether Codex is signed in ([`signed_in`]).
     pub async fn models(&self) -> Result<Models, Error> {
         let codex = binary()?;
         let root = self.store.root();
-        let listed = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+        let ask = tokio::time::timeout(std::time::Duration::from_secs(25), async {
             let mut command = steery_driver_common::program::helper(&codex);
             command.env("CODEX_HOME", root);
             let mut server = AppServer::open(command, false)
@@ -643,10 +644,11 @@ impl Drive {
             let listed = list(&mut server).await;
             server.close().await;
             listed
-        })
-        .await
-        .map_err(|_| Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time"))?
-        .map_err(|line| Error::refused(refusal::REFUSED, line))?;
+        });
+        let (listed, signed_in) = tokio::join!(ask, signed_in(&codex, root));
+        let listed = listed
+            .map_err(|_| Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time"))?
+            .map_err(|line| Error::refused(refusal::REFUSED, line))?;
         let mut watch: Vec<PathBuf> = ["config.toml", "auth.json", "models_cache.json"]
             .iter()
             .map(|name| root.join(name))
@@ -658,8 +660,60 @@ impl Drive {
             models: listed,
             unlisted: None,
             watch,
-            signed_in: None,
+            signed_in,
         })
+    }
+}
+
+/// Whether Codex is signed in here, as `codex login status` says it: exit 0 signed in; exit
+/// 1 with the line `Not logged in` (on standard error) not. None, with why written to
+/// standard error, the program's log (`Models` has no field for a reason): it did not start
+/// or end within [`steery_driver_common::program::PROBE`] (it is killed then); it failed
+/// otherwise (exit 1 also reports a `config.toml` it cannot read: its own line is what is
+/// logged); or `config.toml` names a `model_provider` of its own, whose key Codex takes from
+/// its environment, which `login status` never counts, so its `Not logged in` says nothing
+/// of that provider. Run in Codex's home, as `models` is.
+async fn signed_in(codex: &Path, root: &Path) -> Option<bool> {
+    let mut command = steery_driver_common::program::helper(codex);
+    command.args(["login", "status"]).env("CODEX_HOME", root);
+    let answer = match steery_driver_common::program::ask(command).await {
+        Ok(answer) => answer,
+        Err(why) => {
+            eprintln!("codex login status: {why}, so nothing is claimed of its sign-in");
+            return None;
+        }
+    };
+    match (answer.code, answer.said.as_str()) {
+        (Some(0), _) => Some(true),
+        (Some(1), "Not logged in") => {
+            let provider = std::fs::read_to_string(root.join("config.toml"))
+                .ok()
+                .and_then(|text| text.parse::<toml::Table>().ok())
+                .and_then(|config| config.get("model_provider")?.as_str().map(str::to_owned));
+            match provider.filter(|name| name != "openai") {
+                Some(name) => {
+                    eprintln!(
+                        "codex login status: not logged in, but config.toml names the model \
+                         provider `{name}`, which may need no login, so nothing is claimed of \
+                         its sign-in"
+                    );
+                    None
+                }
+                None => Some(false),
+            }
+        }
+        (code, said) => {
+            eprintln!(
+                "codex login status: exit {}{}, so nothing is claimed of its sign-in",
+                code.map_or("by signal".to_owned(), |code| code.to_string()),
+                if said.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (it said: {said})")
+                }
+            );
+            None
+        }
     }
 }
 

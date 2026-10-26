@@ -58,7 +58,7 @@ async fn list(client: &Client, params: Value) -> Value {
 /// input and output by its name alone, an entry Claude Code skips left out. In a trusted
 /// folder, its local-scope server and the one `.mcp.json` server approved come first, and
 /// the server the folder turns off is gone; in a folder never trusted, its own approval of
-/// its `.mcp.json` counts for nothing. A runtime offering 3 alone is answered 3.
+/// its `.mcp.json` counts for nothing. A runtime offering 3 alone is refused.
 #[tokio::test]
 async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
     let home = std::env::temp_dir().join(format!("steery-claude-mcp-{}", std::process::id()));
@@ -146,13 +146,7 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
         json!({"enabledPlugins": {"tools@market": true}}),
     );
     let old = start(&home).await;
-    assert_eq!(
-        old.initialize(&offer(vec![3], &home))
-            .await
-            .unwrap()
-            .protocol,
-        3
-    );
+    assert!(old.initialize(&offer(vec![3], &home)).await.is_err());
     old.shutdown().await.unwrap();
     let plugged = start(&home).await;
     plugged.initialize(&offer(vec![3, 4], &home)).await.unwrap();

@@ -73,8 +73,8 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_sdk::pick(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 3 and 4"))?;
+        let protocol = steery_driver_common::program::protocol(&params.protocol)
+            .ok_or_else(|| Error::invalid("this driver speaks protocol 4"))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
             home: params.home.clone(),

@@ -134,8 +134,8 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_sdk::pick(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 3 and 4"))?;
+        let protocol = steery_driver_common::program::protocol(&params.protocol)
+            .ok_or_else(|| Error::invalid("this driver speaks protocol 4"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             home: params.home.clone(),
@@ -341,13 +341,21 @@ pub(crate) fn state_file(home: &Path, root: &Path) -> PathBuf {
     }
 }
 
+/// A line for a person where `claude` is installed in more than one place here: which one
+/// Steery runs and which it does not.
+pub(crate) fn others_note(used: &Path) -> Option<String> {
+    let installer = PathBuf::from(std::env::var_os("HOME")?).join(".local/bin");
+    steery_driver_common::program::others_note("claude", "claude", Some(&installer), used)
+}
+
 /// Claude Code's own installer, where `bash` and `curl` are here: its native build into
-/// `~/.local/bin`.
-pub(crate) fn install() -> Option<steery_sdk::wire::harness::Install> {
-    on_path("bash")?;
-    on_path("curl")?;
+/// `~/.local/bin`. Where not, why, in one line.
+pub(crate) fn install() -> Result<steery_sdk::wire::harness::Install, String> {
+    if let Some(why) = steery_driver_common::program::lacks(&["bash", "curl"]) {
+        return Err(format!("claude's installer {why}"));
+    }
     let line = "curl -fsSL https://claude.ai/install.sh | bash";
-    Some(steery_sdk::wire::harness::Install {
+    Ok(steery_sdk::wire::harness::Install {
         argv: vec!["bash".into(), "-c".into(), line.into()],
         about: format!("Claude Code's own installer, its native build into ~/.local/bin: {line}"),
     })

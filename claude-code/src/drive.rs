@@ -560,30 +560,40 @@ fn permits(entry: &str, model: &str) -> bool {
     }
 }
 
-/// Whether Claude Code is logged in here, as `claude auth status` says it: its JSON's
-/// `loggedIn`, else its exit (0 logged in, 1 not); none where it is not here or did not
-/// answer within [`steery_driver_common::program::PROBE`]. `claude auth status --help`:
-/// "Show authentication status". It writes nothing a login does not also write.
+/// Whether Claude Code is logged in here, as `claude auth status --json` says it: its
+/// `loggedIn`. None where it is not here, or it gave no such answer: it did not start, did
+/// not end within [`steery_driver_common::program::PROBE`] (it is killed then), or printed
+/// no `loggedIn` whatever its exit. Why is written to standard error, the program's log the
+/// runtime keeps: `Models` has no field for a reason (PROTOCOL.md §4.2), so a person sees
+/// none. `claude auth status --help`: "Show authentication status". It writes nothing a
+/// login does not also write.
 async fn signed_in() -> Option<bool> {
     let binary = crate::binary()?;
-    let output = tokio::time::timeout(
-        steery_driver_common::program::PROBE,
-        steery_driver_common::program::helper(&binary)
-            .args(["auth", "status", "--json"])
-            .stdout(std::process::Stdio::piped())
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let said = serde_json::from_slice::<Value>(&output.stdout)
+    let mut command = steery_driver_common::program::helper(&binary);
+    command.args(["auth", "status", "--json"]);
+    let answer = match steery_driver_common::program::ask(command).await {
+        Ok(answer) => answer,
+        Err(why) => {
+            eprintln!("claude auth status: {why}, so nothing is claimed of its sign-in");
+            return None;
+        }
+    };
+    let said = serde_json::from_slice::<Value>(&answer.stdout)
         .ok()
         .and_then(|status| status.get("loggedIn")?.as_bool());
-    said.or(match output.status.code() {
-        Some(0) => Some(true),
-        Some(1) => Some(false),
-        _ => None,
-    })
+    if said.is_none() {
+        eprintln!(
+            "claude auth status: exit {}, no `loggedIn` in its output{}, so nothing is claimed of \
+             its sign-in",
+            answer.code.map_or("by signal".to_owned(), |code| code.to_string()),
+            if answer.said.is_empty() {
+                String::new()
+            } else {
+                format!(" (it said: {})", answer.said)
+            }
+        );
+    }
+    said
 }
 
 /// Whether an administrator's allowlist (`availableModels`, [`allowed`]) lets `model` run:
