@@ -18,7 +18,7 @@ use steery_driver_common::quiet::Stamp;
 use steery_sdk::Notifier;
 use steery_sdk::wire::harness::{Dialog, DialogKind, LiveState, LiveTurn, SessionChanged};
 
-use crate::context::{self, Now};
+use crate::context::{self, Now, Window};
 use crate::registry::{self, Registered};
 use crate::transcripts::Store;
 
@@ -33,11 +33,13 @@ const HEADLESS: &str = "sdk-cli";
 /// Follow every live session under `root` on a thread of its own, for as long as the
 /// driver runs.
 pub fn watch(root: &Path, store: Arc<Store>, notifier: Notifier) {
-    let dir = registry::dir(root);
+    let root = root.to_owned();
     std::thread::spawn(move || {
+        let dir = registry::dir(&root);
         let mut followed: HashMap<String, Followed> = HashMap::new();
         loop {
-            look(&dir, &store, &notifier, &mut followed);
+            let window = Window::read(&root);
+            look(&dir, &store, &window, &notifier, &mut followed);
             std::thread::sleep(EVERY);
         }
     });
@@ -51,6 +53,8 @@ struct Followed {
     began: Option<u64>,
     transcript: Option<PathBuf>,
     stamp: Option<Stamp>,
+    /// The window [`Followed::now`] was read against.
+    window: Window,
     now: Now,
 }
 
@@ -59,6 +63,7 @@ struct Followed {
 fn look(
     dir: &Path,
     store: &Store,
+    window: &Window,
     notifier: &Notifier,
     followed: &mut HashMap<String, Followed>,
 ) {
@@ -79,7 +84,7 @@ fn look(
     });
     for entry in live {
         let follow = followed.entry(entry.session_id.clone()).or_default();
-        let state = follow.state(&entry, store);
+        let state = follow.state(&entry, store, window);
         if follow.said.as_ref() != Some(&state) {
             say(notifier, &entry.session_id, state.clone());
             follow.said = Some(state);
@@ -89,16 +94,17 @@ fn look(
 
 impl Followed {
     /// Where the session stands now: its registry entry's status, and what its
-    /// transcript's end says, read again only once the transcript changed.
-    fn state(&mut self, entry: &Registered, store: &Store) -> LiveState {
+    /// transcript's end says, read again only once the transcript or the window changed.
+    fn state(&mut self, entry: &Registered, store: &Store, window: &Window) -> LiveState {
         if self.transcript.is_none() {
             self.transcript = store.transcript(&entry.session_id).ok();
         }
         if let Some(transcript) = &self.transcript {
             let stamp = Stamp::at(transcript);
-            if stamp.is_none() || stamp != self.stamp {
-                self.now = context::now(&context::newest_first(transcript));
+            if stamp.is_none() || stamp != self.stamp || *window != self.window {
+                self.now = context::now(&context::newest_first(transcript), window);
                 self.stamp = stamp;
+                self.window = window.clone();
             }
         }
         let since = entry.status_updated_at.unwrap_or_else(now);
@@ -117,6 +123,7 @@ impl Followed {
             },
             model: self.now.model.clone(),
             thinking: self.now.thinking.clone(),
+            context_left: self.now.context_left,
             dialog: (entry.status.as_deref() == Some("waiting"))
                 .then(|| entry.waiting_for.as_deref())
                 .flatten()

@@ -4,7 +4,7 @@
 //! on standard input, the conversation's own id in its `session_id`, and reads the
 //! hook's standard output as JSON.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use steery_sdk::Error;
@@ -145,15 +145,15 @@ pub fn table() -> Vec<Hook> {
 }
 
 /// The moment a hook's document says, or none for an event Steery is not hooked on or a
-/// document that names no conversation.
-pub fn read(read: HookRead) -> Result<HookMoment, Error> {
+/// document that names no conversation. Claude Code's configuration root is `root`.
+pub fn read(root: &Path, read: HookRead) -> Result<HookMoment, Error> {
     let document = parse(&read.document)?;
     Ok(HookMoment {
-        moment: moment(&read.event, &document),
+        moment: moment(root, &read.event, &document),
     })
 }
 
-fn moment(name: &str, document: &Value) -> Option<Moment> {
+fn moment(root: &Path, name: &str, document: &Value) -> Option<Moment> {
     let event = event(name)?;
     let external_id = text(document, "session_id")?.to_owned();
     let tool_input = || document.get("tool_input").cloned().unwrap_or(Value::Null);
@@ -209,7 +209,21 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()
             .map(str::to_owned),
-        context_left: None,
+        // No document carries the window; the conversation's own transcript, which the
+        // document names, says how full it is. A sub-agent's names its lead's: none.
+        context_left: text(document, "agent_id")
+            .is_none()
+            .then(|| text(document, "transcript_path"))
+            .flatten()
+            .map(Path::new)
+            .filter(|transcript| transcript.is_absolute())
+            .and_then(|transcript| {
+                crate::context::now(
+                    &crate::context::newest_first(transcript),
+                    &crate::context::Window::read(root),
+                )
+                .context_left
+            }),
         model: match name {
             "SessionStart" => text(document, "model"),
             "PostModelSwitch" => text(document, "to_model"),
@@ -510,7 +524,7 @@ mod tests {
     use steery_sdk::wire::harness::FailureKind;
 
     fn read_one(event: &str, document: Value, env: &[(&str, &str)]) -> Option<Moment> {
-        read(HookRead {
+        read(Path::new("/nowhere"), HookRead {
             event: event.to_owned(),
             document: document.to_string(),
             env: env
@@ -688,7 +702,7 @@ mod tests {
         assert!(read_one("PreCompact", json!({"session_id": "s1"}), &[]).is_none());
         assert!(read_one("Stop", json!({"cwd": "/tmp"}), &[]).is_none());
         assert!(
-            read(HookRead {
+            read(Path::new("/nowhere"), HookRead {
                 event: "Stop".into(),
                 document: "not json".into(),
                 env: BTreeMap::new(),

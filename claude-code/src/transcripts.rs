@@ -25,6 +25,7 @@ use steery_driver_common::tree::{Cursor, Trees};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
+use crate::context::Window;
 use crate::events::{self, Reading, Turn, agent_file, agent_id, millis, one_line, text};
 use crate::tree::Records;
 
@@ -231,7 +232,11 @@ impl Store {
         let events = read_from(
             &self.trees,
             &file,
-            &Reading { own, agents },
+            &Reading {
+                own,
+                agents,
+                window: Window::read(&self.root),
+            },
             read.cursor.as_deref(),
             read.tail,
         )?;

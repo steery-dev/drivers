@@ -25,6 +25,7 @@ use steery_sdk::wire::harness::{
 };
 
 use crate::calls;
+use crate::context::Window;
 
 /// What Claude Code names what it writes itself — an API error, a filler reply — in place
 /// of a model.
@@ -36,6 +37,8 @@ pub struct Reading {
     pub own: bool,
     /// The folder the conversation's sub-agents are filed in, `<conversation>/subagents`.
     pub agents: PathBuf,
+    /// The context window a count is measured against.
+    pub window: Window,
 }
 
 /// One whole record of a transcript, and where it starts: `None` where it is no JSON.
@@ -99,12 +102,20 @@ pub fn spent(record: &Value) -> Option<Event> {
         text(message, "id")?.to_owned(),
         model.filter(|model| !model.is_empty()),
         message.get("usage")?,
+        None,
     ))
 }
 
 /// One response's `usage`: what it read fresh, wrote to a cache and read from one are all
-/// of `input`; its thinking is of `output`.
-fn tokens(at: u64, response: String, model: Option<&str>, usage: &Value) -> Event {
+/// of `input`; its thinking is of `output`. `context_left` is the share of the window left
+/// after it, where it is on the conversation's path.
+fn tokens(
+    at: u64,
+    response: String,
+    model: Option<&str>,
+    usage: &Value,
+    context_left: Option<f64>,
+) -> Event {
     let number = |value: Option<&Value>| value.and_then(Value::as_u64).unwrap_or(0);
     let cached = number(usage.get("cache_read_input_tokens"));
     let cache_write = usage
@@ -120,7 +131,7 @@ fn tokens(at: u64, response: String, model: Option<&str>, usage: &Value) -> Even
         cache_write,
         output: number(usage.get("output_tokens")),
         reasoning: number(usage.pointer("/output_tokens_details/thinking_tokens")),
-        context_left: None,
+        context_left,
     }
 }
 
@@ -305,7 +316,14 @@ impl State<'_> {
             }
         }
         if let (Some(response), Some(usage)) = (response, message.get("usage")) {
-            self.tokens(response, model, usage);
+            let left = model.map(|model| {
+                self.reading.window.left(
+                    model,
+                    text(record, "requestedModel"),
+                    crate::context::used(usage),
+                )
+            });
+            self.tokens(response, model, usage, left);
         }
         if text(message, "stop_reason").is_some_and(|reason| ENDS.contains(&reason)) {
             self.end(TurnState::Finished, None);
@@ -440,12 +458,12 @@ impl State<'_> {
     }
 
     /// One response's count, said once however many of its blocks repeat it unchanged.
-    fn tokens(&mut self, response: String, model: Option<&str>, usage: &Value) {
+    fn tokens(&mut self, response: String, model: Option<&str>, usage: &Value, left: Option<f64>) {
         let said = (response, usage.clone());
         if self.tokens.as_ref() == Some(&said) {
             return;
         }
-        self.out.push(tokens(self.at, said.0.clone(), model, usage));
+        self.out.push(tokens(self.at, said.0.clone(), model, usage, left));
         self.tokens = Some(said);
     }
 
@@ -768,6 +786,7 @@ mod tests {
         Reading {
             own,
             agents: PathBuf::from("/nowhere/c/subagents"),
+            window: Window::default(),
         }
     }
 
@@ -1126,6 +1145,14 @@ mod tests {
                 ("m2", 1003, 1000, Some(0), 20, 0),
             ]
         );
+        // What the last response held of Claude Opus 4's 200K window.
+        assert_eq!(
+            read.iter().rev().find_map(|event| match event {
+                Event::Tokens { context_left, .. } => *context_left,
+                _ => None,
+            }),
+            Some(1.0 - 1023.0 / 200_000.0)
+        );
     }
 
     /// A sub-agent its lead started in the background, and the notice Claude Code posted
@@ -1145,7 +1172,11 @@ mod tests {
         .unwrap();
         let notice = "<task-notification>\n<task-id>f00d</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n<status>failed</status>\n<summary>Agent \"Slice two\" failed: Agent terminated early due to an API error: 429 Too Many Requests</summary>\n</task-notification>";
         let shell = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>";
-        let reading = Reading { own: false, agents };
+        let reading = Reading {
+            own: false,
+            agents,
+            window: Window::default(),
+        };
         let read = read(
             &reading,
             &records(&[

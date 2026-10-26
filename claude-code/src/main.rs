@@ -176,7 +176,7 @@ impl Program for ClaudeCode {
                 self.root()?,
                 given(params)?,
             )),
-            method::HOOK_READ => result(hooks::read(given(params)?)?),
+            method::HOOK_READ => result(hooks::read(self.root()?, given(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
             method::HELD => result(drive::held(self.root()?, self.store()?, given(params)?)),
             method::IDLE => result(drive::idle(self.root()?, &self.listing, given(params)?).await),
