@@ -452,27 +452,12 @@ fn failed_on(end: &Value) -> Option<String> {
         .filter(|line| !line.is_empty())
 }
 
-/// How much of a transcript's end is read for the last thing said in it.
-const LAST_SAID: u64 = 1024 * 1024;
-
 /// What Claude Code said went wrong, when the last assistant record of a transcript is
 /// its own error (`isApiErrorMessage`) rather than the model's words.
 fn stopped_on(transcript: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(transcript).ok()?;
-    let start = file.metadata().ok()?.len().saturating_sub(LAST_SAID);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let whole = if start > 0 {
-        &bytes[bytes.iter().position(|byte| *byte == b'\n')? + 1..]
-    } else {
-        &bytes[..]
-    };
-    let last = whole
-        .split(|byte| *byte == b'\n')
-        .rev()
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+    let records = crate::context::newest_first(transcript);
+    let last = records
+        .iter()
         .find(|record| record.get("type").and_then(Value::as_str) == Some("assistant"))?;
     if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
         return None;

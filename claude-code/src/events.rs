@@ -28,7 +28,7 @@ use crate::calls;
 
 /// What Claude Code names what it writes itself — an API error, a filler reply — in place
 /// of a model.
-const SYNTHETIC: &str = "<synthetic>";
+pub(crate) const SYNTHETIC: &str = "<synthetic>";
 
 /// What reading one transcript needs besides its records.
 pub struct Reading {

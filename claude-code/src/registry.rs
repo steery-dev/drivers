@@ -31,6 +31,19 @@ pub struct Registered {
     /// When the session started, in milliseconds: the process in it had started by then.
     #[serde(default)]
     pub started_at: Option<i64>,
+    /// How Claude Code was started: `sdk-cli` where a program runs it.
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// Where the session stands: `busy`, `waiting` on its person, or `idle`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// What a `waiting` session waits on: `permission prompt`, `input needed`, `sandbox
+    /// request`, `worker request` or `dialog open`.
+    #[serde(default)]
+    pub waiting_for: Option<String>,
+    /// When `status` last changed, in milliseconds.
+    #[serde(default)]
+    pub status_updated_at: Option<u64>,
 }
 
 /// One session somebody is in right now: a registry entry whose process is alive.
@@ -63,6 +76,11 @@ fn entries(dir: &Path) -> impl Iterator<Item = Registered> {
 /// The registry entry for one session, when its process is alive.
 pub fn live(dir: &Path, external_id: &str) -> Option<Live> {
     live_in(dir, external_id, alive)
+}
+
+/// Every registry entry whose process is alive.
+pub fn living(dir: &Path) -> impl Iterator<Item = Registered> {
+    entries(dir).filter(alive)
 }
 
 /// [`live`], with `alive` answering for an entry — the kernel, or a test's own answer.

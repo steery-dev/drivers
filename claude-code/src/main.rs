@@ -1,13 +1,15 @@
 //! Steery's `claude-code` driver, at observe, drive and live. It reads Claude
 //! Code's conversations from their transcripts, plans the entries that set Claude Code up
-//! for Steery, answers its hooks, plans and follows its background sessions' turns, and
-//! reaches a live session through the inbox socket Claude Code opens for it.
+//! for Steery, answers its hooks, plans and follows its background sessions' turns,
+//! reaches a live session through the inbox socket Claude Code opens for it, and says how
+//! each live session stands ([`state`]).
 //!
 //! Run as `steery-driver-claude-code turn …`, it is one turn's follower ([`turn`]), which
 //! `start` plans.
 
 mod agents;
 mod calls;
+mod context;
 mod drive;
 mod events;
 mod hooks;
@@ -15,17 +17,18 @@ mod live;
 mod mcp;
 mod registry;
 mod setup;
+mod state;
 mod transcripts;
 mod tree;
 mod turn;
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 use steery_driver_common::program::{executable, on_path};
 use steery_sdk::wire::{self, harness};
-use steery_sdk::{Error, Program, method, refusal, result};
+use steery_sdk::{Error, Notifier, Program, method, refusal, result};
 
 /// Claude Code's mark: one SVG path's `d` in a 24 by 24 box, filled with the even-odd rule.
 const MARK: &str = "M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z";
@@ -43,7 +46,7 @@ fn main() -> std::process::ExitCode {
     let served = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .and_then(|runtime| runtime.block_on(steery_sdk::serve(|_notifier| ClaudeCode::default())));
+        .and_then(|runtime| runtime.block_on(steery_sdk::serve(ClaudeCode::new)));
     match served {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -73,22 +76,30 @@ const TRANSCRIPT: &str = "One JSON record per line: `user` and `assistant` recor
                           and each names the one before it in `parentUuid`, so the last record's chain is \
                           the conversation.";
 
-/// The driver: where Claude Code keeps everything, from `initialize`, and the last
-/// listing of its background sessions.
-#[derive(Default)]
+/// The driver: where Claude Code keeps everything, from `initialize`, the last listing of
+/// its background sessions, and where it says how live sessions stand ([`state`]).
 struct ClaudeCode {
     place: OnceLock<Place>,
     listing: drive::Listing,
+    notifier: Notifier,
 }
 
 /// The person's home, and Claude Code's configuration root with its conversations, or
 /// why there is none.
 struct Place {
     home: PathBuf,
-    store: Result<transcripts::Store, String>,
+    store: Result<Arc<transcripts::Store>, String>,
 }
 
 impl ClaudeCode {
+    fn new(notifier: Notifier) -> Self {
+        Self {
+            place: OnceLock::new(),
+            listing: drive::Listing::default(),
+            notifier,
+        }
+    }
+
     fn place(&self) -> Result<&Place, Error> {
         self.place
             .get()
@@ -98,7 +109,7 @@ impl ClaudeCode {
     fn store(&self) -> Result<&transcripts::Store, Error> {
         self.place()?
             .store
-            .as_ref()
+            .as_deref()
             .map_err(|why| Error::refused(refusal::REFUSED, why.clone()))
     }
 
@@ -111,9 +122,15 @@ impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_sdk::pick(&params.protocol)
             .ok_or_else(|| Error::invalid("this driver speaks protocols 3 and 4"))?;
+        let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
+        if let Ok(store) = &store
+            && self.place.get().is_none()
+        {
+            state::watch(store.root(), Arc::clone(store), self.notifier.clone());
+        }
         let _ = self.place.set(Place {
             home: params.home.clone(),
-            store: root(&params.home).map(transcripts::Store::new),
+            store,
         });
         Ok(wire::Initialized {
             protocol,
