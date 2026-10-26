@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
-    Always, Answer, Append, Decision, Failure, Hook, HookAnswer, HookAnswered, HookKind,
-    HookMoment, HookRead, Moment, Says, Suggestion, TurnState, Via,
+    Always, Answer, Append, Decision, Failure, FailureKind, Hook, HookAnswer, HookAnswered,
+    HookKind, HookMoment, HookRead, Moment, Says, Suggestion, TurnState, Via,
 };
 
 /// The file Claude Code hands a `SessionStart` hook; its shell sources what is appended
@@ -263,7 +263,11 @@ pub(crate) fn failure(document: &Value) -> Failure {
         .map(crate::events::one_line)
         .unwrap_or_default();
     Failure {
-        kind: crate::events::failure_kind(None, code),
+        kind: if crate::events::context_full(None, &line) {
+            FailureKind::ContextFull
+        } else {
+            crate::events::failure_kind(None, code)
+        },
         line,
         service: true,
         http_status: None,

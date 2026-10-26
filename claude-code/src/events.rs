@@ -517,8 +517,9 @@ const AGENTS: [&str; 2] = ["Task", "Agent"];
 /// The `stop_reason`s of a response that ends its turn: any but a call.
 const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
 
-/// Why a turn failed, as Claude Code recorded it: the API's status (`apiErrorStatus`) and
-/// its own code (`error`), its words in the message ([`failure_kind`]). Every such failure
+/// Why a turn failed, as Claude Code recorded it: a context over the model's limit
+/// ([`context_full`]), else by the API's status (`apiErrorStatus`) and its own code
+/// (`error`) ([`failure_kind`]), its words in the message. Every such failure
 /// is the model service's. A limit's end is the quota Claude Code says refused it
 /// (`quotaLimits`, `status` `rejected`): its `resetsAt`, in seconds.
 fn failure(record: &Value, message: &Value) -> Failure {
@@ -530,13 +531,17 @@ fn failure(record: &Value, message: &Value) -> Failure {
     let code = text(record, "error")
         .filter(|code| !code.is_empty())
         .map(str::to_owned);
-    let kind = failure_kind(http_status, code.as_deref());
-    let limited = kind == FailureKind::RateLimit;
     let line = blocks(message.get("content").unwrap_or(&Value::Null))
         .iter()
         .find_map(|block| text(block, "text"))
         .map(one_line)
         .unwrap_or_default();
+    let kind = if context_full(text(record, "apiError"), &line) {
+        FailureKind::ContextFull
+    } else {
+        failure_kind(http_status, code.as_deref())
+    };
+    let limited = kind == FailureKind::RateLimit;
     let retry_at = limited
         .then(|| record.get("quotaLimits"))
         .flatten()
@@ -578,6 +583,17 @@ pub fn failure_kind(http_status: Option<u16>, code: Option<&str>) -> FailureKind
     } else {
         FailureKind::Other
     }
+}
+
+/// Whether Claude Code gave up because the context is over the model's limit: its code for
+/// compaction failing over and over (`apiError` `autocompact_thrashing`), or the words it
+/// writes for a prompt over the limit, which carry no code of their own beside
+/// `invalid_request` (https://code.claude.com/docs/en/errors, "Prompt is too long").
+pub fn context_full(api_error: Option<&str>, said: &str) -> bool {
+    api_error == Some("autocompact_thrashing")
+        || ["Prompt is too long", "Input is too long"]
+            .iter()
+            .any(|opening| said.trim_start().starts_with(opening))
 }
 
 /// What a person put in a record, and what it carried: only a message Claude Code marks
@@ -1022,6 +1038,34 @@ mod tests {
             "a service that answered other than 401 took the sign-in"
         );
         assert_eq!(failed(None, "invalid_request").kind, FailureKind::Other);
+
+        // A context over the limit, as Claude Code 2.1.281 wrote it: the prompt too long
+        // for compaction to save, and compaction thrashing.
+        let full = |extra: Value, said: &str| {
+            let mut record = json!({"type":"assistant","isApiErrorMessage":true,"error":"invalid_request",
+                "message":{"model":"<synthetic>","content":[{"type":"text","text":said}]}});
+            record.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            match events(&[
+                json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
+                record,
+            ])
+            .pop()
+            {
+                Some(Event::TurnEnded {
+                    failure: Some(failure),
+                    ..
+                }) => failure.kind,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            full(json!({}), "Prompt is too long · automatic compaction failed: Please run /login · API Error: 403"),
+            FailureKind::ContextFull
+        );
+        assert_eq!(
+            full(json!({"apiError": "autocompact_thrashing"}), "Autocompact is thrashing: the context refilled"),
+            FailureKind::ContextFull
+        );
 
         // Claude Code 2.1.296's weekly limit, as it wrote it: the quota that refused names
         // when it resets; a quota it took names nothing to wait for.
