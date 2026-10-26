@@ -25,10 +25,11 @@ use steery_sdk::wire::harness::{
 };
 
 use crate::calls;
+use crate::context::Window;
 
 /// What Claude Code names what it writes itself — an API error, a filler reply — in place
 /// of a model.
-const SYNTHETIC: &str = "<synthetic>";
+pub(crate) const SYNTHETIC: &str = "<synthetic>";
 
 /// What reading one transcript needs besides its records.
 pub struct Reading {
@@ -36,6 +37,11 @@ pub struct Reading {
     pub own: bool,
     /// The folder the conversation's sub-agents are filed in, `<conversation>/subagents`.
     pub agents: PathBuf,
+    /// The context window a count is measured against.
+    pub window: Window,
+    /// Where the conversation is a fork: its parent, and the uuid of its own first record,
+    /// before which every record is a copy of the parent's.
+    pub fork: Option<(String, String)>,
 }
 
 /// One whole record of a transcript, and where it starts: `None` where it is no JSON.
@@ -99,12 +105,20 @@ pub fn spent(record: &Value) -> Option<Event> {
         text(message, "id")?.to_owned(),
         model.filter(|model| !model.is_empty()),
         message.get("usage")?,
+        None,
     ))
 }
 
 /// One response's `usage`: what it read fresh, wrote to a cache and read from one are all
-/// of `input`; its thinking is of `output`.
-fn tokens(at: u64, response: String, model: Option<&str>, usage: &Value) -> Event {
+/// of `input`; its thinking is of `output`. `context_left` is the share of the window left
+/// after it, where it is on the conversation's path.
+fn tokens(
+    at: u64,
+    response: String,
+    model: Option<&str>,
+    usage: &Value,
+    context_left: Option<f64>,
+) -> Event {
     let number = |value: Option<&Value>| value.and_then(Value::as_u64).unwrap_or(0);
     let cached = number(usage.get("cache_read_input_tokens"));
     let cache_write = usage
@@ -120,7 +134,7 @@ fn tokens(at: u64, response: String, model: Option<&str>, usage: &Value) -> Even
         cache_write,
         output: number(usage.get("output_tokens")),
         reasoning: number(usage.pointer("/output_tokens_details/thinking_tokens")),
-        context_left: None,
+        context_left,
     }
 }
 
@@ -150,6 +164,14 @@ impl State<'_> {
             return;
         }
         let id = text(record, "uuid").map_or_else(|| format!("@{start}"), str::to_owned);
+        if let Some((parent, own)) = &self.reading.fork
+            && id == *own
+        {
+            self.out.push(Event::Fork {
+                at: self.at,
+                parent: parent.clone(),
+            });
+        }
         match text(record, "type") {
             Some("user") => self.user(id, record),
             Some("assistant") => self.assistant(id, record),
@@ -305,7 +327,14 @@ impl State<'_> {
             }
         }
         if let (Some(response), Some(usage)) = (response, message.get("usage")) {
-            self.tokens(response, model, usage);
+            let left = model.map(|model| {
+                self.reading.window.left(
+                    model,
+                    text(record, "requestedModel"),
+                    crate::context::used(usage),
+                )
+            });
+            self.tokens(response, model, usage, left);
         }
         if text(message, "stop_reason").is_some_and(|reason| ENDS.contains(&reason)) {
             self.end(TurnState::Finished, None);
@@ -440,12 +469,12 @@ impl State<'_> {
     }
 
     /// One response's count, said once however many of its blocks repeat it unchanged.
-    fn tokens(&mut self, response: String, model: Option<&str>, usage: &Value) {
+    fn tokens(&mut self, response: String, model: Option<&str>, usage: &Value, left: Option<f64>) {
         let said = (response, usage.clone());
         if self.tokens.as_ref() == Some(&said) {
             return;
         }
-        self.out.push(tokens(self.at, said.0.clone(), model, usage));
+        self.out.push(tokens(self.at, said.0.clone(), model, usage, left));
         self.tokens = Some(said);
     }
 
@@ -497,10 +526,11 @@ impl State<'_> {
 const AGENTS: [&str; 2] = ["Task", "Agent"];
 
 /// The `stop_reason`s of a response that ends its turn: any but a call.
-const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
+pub(crate) const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
 
-/// Why a turn failed, as Claude Code recorded it: the API's status (`apiErrorStatus`) and
-/// its own code (`error`), its words in the message ([`failure_kind`]). Every such failure
+/// Why a turn failed, as Claude Code recorded it: a context over the model's limit
+/// ([`context_full`]), else by the API's status (`apiErrorStatus`) and its own code
+/// (`error`) ([`failure_kind`]), its words in the message. Every such failure
 /// is the model service's. A limit's end is the quota Claude Code says refused it
 /// (`quotaLimits`, `status` `rejected`): its `resetsAt`, in seconds.
 fn failure(record: &Value, message: &Value) -> Failure {
@@ -512,13 +542,17 @@ fn failure(record: &Value, message: &Value) -> Failure {
     let code = text(record, "error")
         .filter(|code| !code.is_empty())
         .map(str::to_owned);
-    let kind = failure_kind(http_status, code.as_deref());
-    let limited = kind == FailureKind::RateLimit;
     let line = blocks(message.get("content").unwrap_or(&Value::Null))
         .iter()
         .find_map(|block| text(block, "text"))
         .map(one_line)
         .unwrap_or_default();
+    let kind = if context_full(text(record, "apiError"), &line) {
+        FailureKind::ContextFull
+    } else {
+        failure_kind(http_status, code.as_deref())
+    };
+    let limited = kind == FailureKind::RateLimit;
     let retry_at = limited
         .then(|| record.get("quotaLimits"))
         .flatten()
@@ -560,6 +594,17 @@ pub fn failure_kind(http_status: Option<u16>, code: Option<&str>) -> FailureKind
     } else {
         FailureKind::Other
     }
+}
+
+/// Whether Claude Code gave up because the context is over the model's limit: its code for
+/// compaction failing over and over (`apiError` `autocompact_thrashing`), or the words it
+/// writes for a prompt over the limit, which carry no code of their own beside
+/// `invalid_request` (https://code.claude.com/docs/en/errors, "Prompt is too long").
+pub fn context_full(api_error: Option<&str>, said: &str) -> bool {
+    api_error == Some("autocompact_thrashing")
+        || ["Prompt is too long", "Input is too long"]
+            .iter()
+            .any(|opening| said.trim_start().starts_with(opening))
 }
 
 /// What a person put in a record, and what it carried: only a message Claude Code marks
@@ -768,6 +813,8 @@ mod tests {
         Reading {
             own,
             agents: PathBuf::from("/nowhere/c/subagents"),
+            window: Window::default(),
+            fork: None,
         }
     }
 
@@ -1004,6 +1051,34 @@ mod tests {
         );
         assert_eq!(failed(None, "invalid_request").kind, FailureKind::Other);
 
+        // A context over the limit, as Claude Code 2.1.281 wrote it: the prompt too long
+        // for compaction to save, and compaction thrashing.
+        let full = |extra: Value, said: &str| {
+            let mut record = json!({"type":"assistant","isApiErrorMessage":true,"error":"invalid_request",
+                "message":{"model":"<synthetic>","content":[{"type":"text","text":said}]}});
+            record.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            match events(&[
+                json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
+                record,
+            ])
+            .pop()
+            {
+                Some(Event::TurnEnded {
+                    failure: Some(failure),
+                    ..
+                }) => failure.kind,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            full(json!({}), "Prompt is too long · automatic compaction failed: Please run /login · API Error: 403"),
+            FailureKind::ContextFull
+        );
+        assert_eq!(
+            full(json!({"apiError": "autocompact_thrashing"}), "Autocompact is thrashing: the context refilled"),
+            FailureKind::ContextFull
+        );
+
         // Claude Code 2.1.296's weekly limit, as it wrote it: the quota that refused names
         // when it resets; a quota it took names nothing to wait for.
         let quota = |status: &str| {
@@ -1126,6 +1201,14 @@ mod tests {
                 ("m2", 1003, 1000, Some(0), 20, 0),
             ]
         );
+        // What the last response held of Claude Opus 4's 200K window.
+        assert_eq!(
+            read.iter().rev().find_map(|event| match event {
+                Event::Tokens { context_left, .. } => *context_left,
+                _ => None,
+            }),
+            Some(1.0 - 1023.0 / 200_000.0)
+        );
     }
 
     /// A sub-agent its lead started in the background, and the notice Claude Code posted
@@ -1145,7 +1228,12 @@ mod tests {
         .unwrap();
         let notice = "<task-notification>\n<task-id>f00d</task-id>\n<tool-use-id>toolu_9</tool-use-id>\n<status>failed</status>\n<summary>Agent \"Slice two\" failed: Agent terminated early due to an API error: 429 Too Many Requests</summary>\n</task-notification>";
         let shell = "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>";
-        let reading = Reading { own: false, agents };
+        let reading = Reading {
+            own: false,
+            agents,
+            window: Window::default(),
+            fork: None,
+        };
         let read = read(
             &reading,
             &records(&[

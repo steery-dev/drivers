@@ -12,7 +12,7 @@ use steery_driver_common::receipt::{self, End};
 use steery_sdk::wire::harness::{
     Act, Beyond, Door, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked,
     Model, Models, ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark,
-    Sample, Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, Unlisted,
+    Sample, Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, TurnState, Unlisted,
 };
 use steery_sdk::{Error, refusal};
 use tokio::sync::Mutex;
@@ -160,8 +160,10 @@ impl Listing {
 /// transcript nobody holds, is a conversation nobody is in (`if_unheld`). Anything else is
 /// uncertain, and has no sample. Vacant where it runs nothing and no live session is
 /// registered in it — a terminal killed mid-turn leaves exactly that; an idle registered
-/// owner is somebody in it: its person may be reading the answer.
-pub async fn idle(root: &Path, listing: &Listing, held: Held) -> Sampled {
+/// owner is somebody in it: its person may be reading the answer. A background session's
+/// run began and ended where its job's timeline says ([`run_times`]); the model and effort
+/// are its transcript's newest answer's.
+pub async fn idle(root: &Path, store: &Store, listing: &Listing, held: Held) -> Sampled {
     let Some(binary) = crate::binary() else {
         return Sampled { sample: None };
     };
@@ -179,14 +181,68 @@ pub async fn idle(root: &Path, listing: &Listing, held: Held) -> Sampled {
     ) else {
         return Sampled { sample: None };
     };
-    Sampled {
-        sample: sample(&listed, id, owners.remove(id).as_ref(), observed_at),
+    let Some(mut found) = sample(&listed, id, owners.remove(id).as_ref(), observed_at) else {
+        return Sampled { sample: None };
+    };
+    if let Some(job) = listed_once(&listed, id)
+        .and_then(|entry| entry.get("id")?.as_str())
+        .filter(|job| plain_job(job))
+    {
+        (found.started_at, found.ended_at) = run_times(root, job, found.state);
     }
+    if let Ok(transcript) = store.transcript(id) {
+        let now = store.now(&transcript);
+        found.model = now.model;
+        found.thinking = now.thinking;
+    }
+    Sampled {
+        sample: Some(found),
+    }
+}
+
+/// The one row a listing has of conversation `id`.
+fn listed_once<'a>(listed: &'a [Value], id: &str) -> Option<&'a Value> {
+    let mut rows = listed
+        .iter()
+        .filter(|entry| entry.get("sessionId").and_then(Value::as_str) == Some(id));
+    let first = rows.next()?;
+    rows.next().is_none().then_some(first)
+}
+
+/// When a background session's latest run began and, where it no longer runs, ended, in
+/// milliseconds: the times its job's timeline (`jobs/<job>/timeline.jsonl`, one `{at,
+/// state}` row per change) gives the latest stretch of `working` rows and the row after.
+fn run_times(root: &Path, job: &str, state: Execution) -> (Option<u64>, Option<u64>) {
+    let Ok(timeline) = std::fs::read(root.join("jobs").join(job).join("timeline.jsonl")) else {
+        return (None, None);
+    };
+    let rows: Vec<(u64, bool)> = timeline
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter_map(|row| {
+            let at = crate::events::millis(row.get("at")?.as_str()?)?;
+            Some((at, row.get("state")?.as_str()? == "working"))
+        })
+        .collect();
+    let Some(last_working) = rows.iter().rposition(|(_, working)| *working) else {
+        return (None, None);
+    };
+    let began = rows[..=last_working]
+        .iter()
+        .rev()
+        .take_while(|(_, working)| *working)
+        .last()
+        .map(|(at, _)| *at);
+    let ended = (state != Execution::Running)
+        .then(|| rows.get(last_working + 1))
+        .flatten()
+        .map(|(at, _)| *at);
+    (began, ended)
 }
 
 /// What a listing asked for at `observed_at` and the session the registry names say of
 /// `id`: first as it stands whoever holds its transcript, then as it stands only where
-/// nobody does.
+/// nobody does. A turn that stopped on an error of Claude Code's own failed, in its words.
 fn sample(
     listed: &[Value],
     id: &str,
@@ -197,18 +253,22 @@ fn sample(
         Some(running) => (running, false),
         None => (agents::execution(listed, id, owner, true)?, true),
     };
+    let failed = (!running)
+        .then(|| listed_once(listed, id).and_then(agents::end))
+        .flatten()
+        .filter(|ended| ended.state == TurnState::Failed);
     Some(Sample {
-        state: if running {
-            Execution::Running
-        } else {
-            Execution::Finished
+        state: match (running, &failed) {
+            (true, _) => Execution::Running,
+            (false, Some(_)) => Execution::Failed,
+            (false, None) => Execution::Finished,
         },
         observed_at,
         started_at: None,
         ended_at: None,
         model: None,
         thinking: None,
-        error: None,
+        error: failed.and_then(|ended| ended.error),
         vacant: !running && owner.is_none(),
         if_unheld,
     })
@@ -421,10 +481,10 @@ const ALIASES: [(&str, &str, &[&str]); 8] = [
     ("sonnet[1m]", "Sonnet, 1M context", &["sonnet"]),
 ];
 
-/// Where an administrator's managed settings files are (https://code.claude.com/docs/en/managed-settings,
+/// Where an administrator's managed files are (https://code.claude.com/docs/en/managed-settings,
 /// "File-based"): `managed-settings.json`, then each `*.json` of `managed-settings.d/` in
-/// alphabetical order, merged in that order.
-fn managed_folder() -> &'static Path {
+/// alphabetical order, merged in that order, and `managed-mcp.json`.
+pub(crate) fn managed_folder() -> &'static Path {
     if cfg!(target_os = "macos") {
         Path::new("/Library/Application Support/ClaudeCode")
     } else {
@@ -433,7 +493,7 @@ fn managed_folder() -> &'static Path {
 }
 
 /// The managed settings files, in the order Claude Code merges them.
-fn managed_files() -> Vec<PathBuf> {
+pub(crate) fn managed_files() -> Vec<PathBuf> {
     let folder = managed_folder();
     let mut drop_ins: Vec<PathBuf> = std::fs::read_dir(folder.join("managed-settings.d"))
         .into_iter()
@@ -536,16 +596,24 @@ async fn signed_in() -> Option<bool> {
     said
 }
 
+/// Whether an administrator's allowlist (`availableModels`, [`allowed`]) lets `model` run:
+/// every model where none is set.
+fn allows(allowed: Option<&[String]>, model: &str) -> bool {
+    allowed.is_none_or(|allowed| allowed.iter().any(|entry| permits(entry, model)))
+}
+
 /// `models`: Claude Code names no models on its command line. It lists its documented
 /// aliases ([`ALIASES`]), the one this machine chose in its own settings (`model` in
-/// `settings.json`) first, each with every effort level, any other model it runs taking the
-/// same levels; only those an administrator's managed settings allow. It says whether
-/// Claude Code is logged in ([`signed_in`]), so a login made in a terminal lifts a sign-in
-/// failure on its own (Ali's first run, #product Slack thread 2026-10-19), and watches the
-/// files a login, a model choice and a policy change rewrite.
+/// `settings.json`) first, each with the effort levels it takes ([`turn::efforts`]), any
+/// other model it runs taking every level; only those an administrator's managed settings
+/// allow. It says whether Claude Code is logged in ([`signed_in`]), so a login made in a
+/// terminal lifts a sign-in failure on its own (Ali's first run, #product Slack thread
+/// 2026-10-19), and watches the files a login, a model choice and a policy change rewrite.
 pub async fn models(home: &Path, root: &Path) -> Models {
     let settings = root.join("settings.json");
-    let thinking: Vec<String> = EFFORT.map(String::from).to_vec();
+    let thinking = |model: &str| -> Vec<String> {
+        turn::efforts(model).iter().map(|&level| level.to_owned()).collect()
+    };
     let chosen = std::fs::read(&settings)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
@@ -553,18 +621,13 @@ pub async fn models(home: &Path, root: &Path) -> Models {
         .filter(|model| !model.is_empty() && model != "default");
     let managed = managed_files();
     let allowed = allowed(&managed);
-    let runs = |model: &str| {
-        allowed
-            .as_ref()
-            .is_none_or(|allowed| allowed.iter().any(|entry| permits(entry, model)))
-    };
     let mut models: Vec<Model> = ALIASES
         .iter()
         .map(|(alias, label, _)| Model {
             provider: None,
             model: (*alias).to_owned(),
             label: Some((*label).to_owned()),
-            thinking: thinking.clone(),
+            thinking: thinking(*alias),
             cost: None,
         })
         .collect();
@@ -573,15 +636,15 @@ pub async fn models(home: &Path, root: &Path) -> Models {
             Some(at) => models.remove(at),
             None => Model {
                 provider: None,
+                thinking: thinking(&chosen),
                 model: chosen,
                 label: None,
-                thinking: thinking.clone(),
                 cost: None,
             },
         };
         models.insert(0, first);
     }
-    models.retain(|model| runs(&model.model));
+    models.retain(|model| allows(allowed.as_deref(), &model.model));
     let mut watch = vec![
         settings,
         crate::state_file(home, root),
@@ -591,7 +654,9 @@ pub async fn models(home: &Path, root: &Path) -> Models {
     watch.extend(managed);
     Models {
         models,
-        unlisted: Some(Unlisted { thinking }),
+        unlisted: Some(Unlisted {
+            thinking: EFFORT.map(String::from).to_vec(),
+        }),
         watch,
         signed_in: signed_in().await,
     }
@@ -599,7 +664,9 @@ pub async fn models(home: &Path, root: &Path) -> Models {
 
 /// `start`: the plan of a turn this driver's own binary runs in its turn mode
 /// ([`turn`]), the words on standard input. A continue or a fork names a conversation
-/// Claude Code has here; an effort is one of Claude's own levels.
+/// Claude Code has here; a model is one an administrator's managed settings let run, as
+/// `models` lists it or as any other model it runs; an effort is one of Claude's own
+/// levels.
 pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
@@ -626,6 +693,14 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
             format!("Claude Code takes no effort {thinking}"),
+        ));
+    }
+    if let Some(model) = &start.model
+        && (model.trim().is_empty() || !allows(allowed(&managed_files()).as_deref(), model))
+    {
+        return Err(Error::refused(
+            refusal::MODEL_MISSING,
+            format!("Claude Code does not run {model} here"),
         ));
     }
     let me = std::env::current_exe()
@@ -841,6 +916,7 @@ mod tests {
             pid: i32::try_from(me).unwrap(),
             socket: socket.map(PathBuf::from),
             job: job.map(str::to_owned),
+            status: None,
         };
         let started = |_| Some(1_790_000_000_000);
         assert!(
@@ -910,6 +986,17 @@ mod tests {
         .unwrap();
         assert!(!done.vacant, "its person may be reading the answer");
         assert!(sample(&[], "s", Some(&owner), 7).is_none());
+        let failed = sample(
+            &[json!({"sessionId": "s", "state": "failed", "error": "Credit balance is too low"})],
+            "s",
+            None,
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            (failed.state, failed.error.as_deref()),
+            (Execution::Failed, Some("Credit balance is too low"))
+        );
     }
 
     /// Only one person's input carrying the whole marker is a receipt; a marker quoted in

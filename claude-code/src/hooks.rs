@@ -4,14 +4,16 @@
 //! on standard input, the conversation's own id in its `session_id`, and reads the
 //! hook's standard output as JSON.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
-    Always, Answer, Append, Decision, Failure, Hook, HookAnswer, HookAnswered, HookKind,
-    HookMoment, HookRead, Moment, Says, Suggestion, TurnState, Via,
+    Always, Answer, Append, Decision, Failure, FailureKind, Hook, HookAnswer, HookAnswered,
+    HookKind, HookMoment, HookRead, Moment, Says, Suggestion, TurnState, Via,
 };
+
+use crate::transcripts::Store;
 
 /// The file Claude Code hands a `SessionStart` hook; its shell sources what is appended
 /// there before every command the agent runs.
@@ -145,28 +147,29 @@ pub fn table() -> Vec<Hook> {
 }
 
 /// The moment a hook's document says, or none for an event Steery is not hooked on or a
-/// document that names no conversation.
-pub fn read(read: HookRead) -> Result<HookMoment, Error> {
+/// document that names no conversation. `store` holds Claude Code's conversations.
+pub fn read(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
     let document = parse(&read.document)?;
     Ok(HookMoment {
-        moment: moment(&read.event, &document),
+        moment: moment(store, &read.event, &document),
     })
 }
 
-fn moment(name: &str, document: &Value) -> Option<Moment> {
+fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
     let event = event(name)?;
     let external_id = text(document, "session_id")?.to_owned();
-    let call = match event.kind {
-        HookKind::BeforeCall | HookKind::AfterCall | HookKind::Permission => {
-            match (text(document, "tool_use_id"), text(document, "tool_name")) {
-                (Some(id), Some(tool)) => Some(crate::calls::call(
-                    id,
-                    tool,
-                    document.get("tool_input").cloned().unwrap_or(Value::Null),
-                )),
-                _ => None,
-            }
-        }
+    let tool_input = || document.get("tool_input").cloned().unwrap_or(Value::Null);
+    let call = match (event.kind, text(document, "tool_name")) {
+        (HookKind::BeforeCall | HookKind::AfterCall, Some(tool)) => text(document, "tool_use_id")
+            .map(|id| crate::calls::call(id, tool, tool_input())),
+        // Claude Code hands `PermissionRequest` the tool and its input but no `tool_use_id`
+        // (https://code.claude.com/docs/en/hooks, "PermissionRequest input"): the call is
+        // still the one a person decides on, under no id.
+        (HookKind::Permission, Some(tool)) => Some(crate::calls::call(
+            text(document, "tool_use_id").unwrap_or_default(),
+            tool,
+            tool_input(),
+        )),
         _ => None,
     };
     let at_end = event.kind == HookKind::TurnEnd;
@@ -208,7 +211,23 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()
             .map(str::to_owned),
-        context_left: None,
+        // No document carries the window; the conversation's own transcript, which the
+        // document names, says how full it is, read on the moments a person is shown: a
+        // start, a model change, a prompt for them, a turn's end. A sub-agent's document
+        // names its lead's transcript: none.
+        context_left: (matches!(
+            event.kind,
+            HookKind::SessionStart
+                | HookKind::Changed
+                | HookKind::Permission
+                | HookKind::Notification
+                | HookKind::TurnEnd
+        ) && text(document, "agent_id").is_none())
+        .then(|| text(document, "transcript_path"))
+        .flatten()
+        .map(Path::new)
+        .filter(|transcript| transcript.is_absolute())
+        .and_then(|transcript| store.now(transcript).context_left),
         model: match name {
             "SessionStart" => text(document, "model"),
             "PostModelSwitch" => text(document, "to_model"),
@@ -248,7 +267,11 @@ pub(crate) fn failure(document: &Value) -> Failure {
         .map(crate::events::one_line)
         .unwrap_or_default();
     Failure {
-        kind: crate::events::failure_kind(None, code),
+        kind: if crate::events::context_full(None, &line) {
+            FailureKind::ContextFull
+        } else {
+            crate::events::failure_kind(None, code)
+        },
         line,
         service: true,
         http_status: None,
@@ -323,7 +346,9 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
         .ok_or_else(|| Error::invalid(format!("Steery is not hooked on Claude Code's {name}")))?;
     let output = match (event.kind, decision) {
         (_, None) => say.map(|say| context(event, say)).transpose()?,
-        (HookKind::BeforeCall, Some(decision)) => Some(before_call(decision, say)?),
+        (HookKind::BeforeCall, Some(decision)) => {
+            Some(before_call(decision, say, &parse(&document)?)?)
+        }
         (HookKind::Permission, Some(decision)) => {
             if say.is_some() {
                 return Err(Error::invalid(
@@ -374,8 +399,11 @@ fn context(event: &Event, say: String) -> Result<Value, Error> {
 /// `PreToolUse`'s decision: the call runs without Claude Code asking, or is blocked, the
 /// reason being what the model reads. A paragraph beside it (a person's words on an
 /// approved plan) is context, not a reason. Claude Code applies no standing permission
-/// from this moment.
-fn before_call(decision: Decision, say: Option<String>) -> Result<Value, Error> {
+/// from this moment. An allow of `ExitPlanMode`, a plan waiting for its person's yes,
+/// carries the call's own input back as `updatedInput`: on an allow alone Claude Code
+/// still waits on its person (https://code.claude.com/docs/en/hooks, "Allow with
+/// updatedInput").
+fn before_call(decision: Decision, say: Option<String>, document: &Value) -> Result<Value, Error> {
     let (verdict, reason) = match decision {
         Decision::Allow {
             reason,
@@ -395,6 +423,12 @@ fn before_call(decision: Decision, say: Option<String>) -> Result<Value, Error> 
         "permissionDecision": verdict,
         "permissionDecisionReason": reason,
     });
+    if verdict == "allow"
+        && text(document, "tool_name") == Some("ExitPlanMode")
+        && let Some(input) = document.get("tool_input").filter(|input| input.is_object())
+    {
+        output["updatedInput"] = input.clone();
+    }
     if let Some(say) = say {
         output["additionalContext"] = json!(say);
     }
@@ -498,7 +532,7 @@ mod tests {
     use steery_sdk::wire::harness::FailureKind;
 
     fn read_one(event: &str, document: Value, env: &[(&str, &str)]) -> Option<Moment> {
-        read(HookRead {
+        read(&Store::new(PathBuf::from("/nowhere")), HookRead {
             event: event.to_owned(),
             document: document.to_string(),
             env: env
@@ -676,7 +710,7 @@ mod tests {
         assert!(read_one("PreCompact", json!({"session_id": "s1"}), &[]).is_none());
         assert!(read_one("Stop", json!({"cwd": "/tmp"}), &[]).is_none());
         assert!(
-            read(HookRead {
+            read(&Store::new(PathBuf::from("/nowhere")), HookRead {
                 event: "Stop".into(),
                 document: "not json".into(),
                 env: BTreeMap::new(),
@@ -739,12 +773,20 @@ mod tests {
 
     #[test]
     fn a_tool_call_that_needs_a_decision_is_answered_in_claude_codes_shape() {
+        // As Claude Code documents it: the tool and its input, no `tool_use_id`.
         let event = json!({
             "hook_event_name": "PermissionRequest",
             "session_id": "abc",
             "tool_name": "Bash",
             "tool_input": {"command": "cargo check"},
         });
+        let asked = read_one("PermissionRequest", event.clone(), &[])
+            .and_then(|moment| moment.call)
+            .expect("the call a person decides on");
+        assert_eq!(
+            (asked.id.as_str(), asked.tool.as_str(), &asked.input),
+            ("", "Bash", &json!({"command": "cargo check"}))
+        );
         let run = printed(
             "PermissionRequest",
             event.clone(),
@@ -880,7 +922,7 @@ mod tests {
 
         let approved = printed(
             "PreToolUse",
-            json!({"session_id": "s1", "tool_name": "ExitPlanMode"}),
+            json!({"session_id": "s1", "tool_name": "ExitPlanMode", "tool_input": {"plan": "1. Ship"}}),
             Answer {
                 say: Some("They said: ship it".into()),
                 decision: Some(Decision::Allow {
@@ -894,6 +936,7 @@ mod tests {
         assert_eq!(out["hookEventName"], "PreToolUse");
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(out["additionalContext"], "They said: ship it");
+        assert_eq!(out["updatedInput"], json!({"plan": "1. Ship"}), "the plan, so Claude Code asks nobody");
     }
 
     /// Claude Code's shell sources what a start hook appends to `CLAUDE_ENV_FILE` before

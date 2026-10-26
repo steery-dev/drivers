@@ -31,6 +31,19 @@ pub struct Registered {
     /// When the session started, in milliseconds: the process in it had started by then.
     #[serde(default)]
     pub started_at: Option<i64>,
+    /// How Claude Code was started: `sdk-cli` where a program runs it.
+    #[serde(default)]
+    pub entrypoint: Option<String>,
+    /// Where the session stands: `busy`, `waiting` on its person, or `idle`.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// What a `waiting` session waits on: `permission prompt`, `input needed`, `sandbox
+    /// request`, `worker request` or `dialog open`.
+    #[serde(default)]
+    pub waiting_for: Option<String>,
+    /// When `status` last changed, in milliseconds.
+    #[serde(default)]
+    pub status_updated_at: Option<u64>,
 }
 
 /// One session somebody is in right now: a registry entry whose process is alive.
@@ -40,6 +53,8 @@ pub struct Live {
     pub socket: Option<PathBuf>,
     /// The short id of the background session it is, when it is one.
     pub job: Option<String>,
+    /// Where it stands: `busy`, `waiting` or `idle`, where it says.
+    pub status: Option<String>,
 }
 
 /// Where the registry is: `sessions/` under Claude Code's configuration root.
@@ -65,6 +80,11 @@ pub fn live(dir: &Path, external_id: &str) -> Option<Live> {
     live_in(dir, external_id, alive)
 }
 
+/// Every registry entry whose process is alive.
+pub fn living(dir: &Path) -> impl Iterator<Item = Registered> {
+    entries(dir).filter(alive)
+}
+
 /// [`live`], with `alive` answering for an entry — the kernel, or a test's own answer.
 fn live_in(dir: &Path, external_id: &str, alive: impl Fn(&Registered) -> bool) -> Option<Live> {
     entries(dir)
@@ -75,6 +95,7 @@ fn live_in(dir: &Path, external_id: &str, alive: impl Fn(&Registered) -> bool) -
             job: (registered.kind.as_deref() == Some("bg"))
                 .then_some(registered.job_id)
                 .flatten(),
+            status: registered.status,
         })
 }
 

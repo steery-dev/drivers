@@ -38,6 +38,21 @@ use crate::agents::{self, Follow, RUNNING};
 /// The levels `claude --effort` takes, least first (`claude --help`).
 pub const EFFORT: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// The effort levels Claude Code takes for `model`, least first
+/// (https://code.claude.com/docs/en/model-config, "Adjust effort level"): none for Haiku 4.5,
+/// which the `haiku` alias runs where the account's provider serves no newer Haiku; every
+/// level but `xhigh` for the 4.6 models; every level for the rest.
+pub fn efforts(model: &str) -> &'static [&'static str] {
+    let model = model.strip_suffix("[1m]").unwrap_or(model);
+    if model == "haiku" || model.contains("claude-haiku-4-5") {
+        &[]
+    } else if model.contains("-4-6") {
+        &["low", "medium", "high", "max"]
+    } else {
+        &EFFORT
+    }
+}
+
 /// The word that starts the turn mode, as `start`'s plan runs this binary.
 pub const MODE: &str = "turn";
 
@@ -126,9 +141,18 @@ impl Turn {
 
     /// The command line that starts a background session for the act, before `--` and
     /// the words. A folder outside its own the session reads is granted it (`--add-dir`):
-    /// Claude Code asks its person before a read anywhere else.
-    fn launching(&self) -> Result<Vec<String>, String> {
+    /// Claude Code asks its person before a read anywhere else. Where its person accepted
+    /// Claude Code's bypass disclaimer (`bypass`, [`bypass_accepted`]), bypass mode is made
+    /// available, never turned on, so a person's "everything, this session" in Steery, a
+    /// `setMode` to `bypassPermissions`, takes effect: Claude Code ignores that update in a
+    /// session launched without it (https://code.claude.com/docs/en/hooks, "Permission
+    /// update entries"). Before that acceptance Claude Code refuses to start a background
+    /// session that names the flag at all.
+    fn launching(&self, bypass: bool) -> Result<Vec<String>, String> {
         let mut args: Vec<String> = vec!["--bg".into()];
+        if bypass {
+            args.push("--allow-dangerously-skip-permissions".into());
+        }
         match (self.act, self.id.as_deref()) {
             (Act::New, _) => {}
             (Act::Continue, Some(id)) => args.extend(["--resume".into(), id.into()]),
@@ -149,7 +173,12 @@ impl Turn {
         if let Some(model) = &self.model {
             args.extend(["--model".into(), model.clone()]);
         }
-        if let Some(thinking) = &self.thinking {
+        if let Some(thinking) = &self.thinking
+            && self
+                .model
+                .as_deref()
+                .is_none_or(|model| !efforts(model).is_empty())
+        {
             args.extend(["--effort".into(), thinking.clone()]);
         }
         Ok(args)
@@ -170,6 +199,25 @@ fn text(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("{} is not text", path.display()))
 }
 
+/// Whether the person accepted Claude Code's bypass-permissions disclaimer, as Claude Code
+/// 2.1.310 reads it before a `--bg` launch may name bypass: `skipDangerousModePermissionPrompt`
+/// in their user, local or managed settings, or `bypassPermissionsModeAccepted` in its
+/// state file. `place` is the folder the session starts in, whose local settings count.
+fn bypass_accepted(home: &Path, root: &Path, place: &Path) -> bool {
+    let set = |file: &Path, key: &str| {
+        std::fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|value| value.get(key) == Some(&Value::Bool(true)))
+    };
+    let mut settings = vec![root.join("settings.json"), place.join(".claude/settings.local.json")];
+    settings.extend(crate::drive::managed_files());
+    settings
+        .iter()
+        .any(|file| set(file, "skipDangerousModePermissionPrompt"))
+        || set(&crate::state_file(home, root), "bypassPermissionsModeAccepted")
+}
+
 /// The turn mode: run the turn its arguments say, the words on standard input. Exits 0
 /// once the turn settled, 1 with Claude Code's words on standard error where it did not.
 /// A runtime stops a turn by signalling its process group, so a SIGTERM, a SIGINT or a
@@ -182,6 +230,8 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
             .map_err(|e| format!("reading the words: {e}"))?;
         let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
         let root = crate::root(Path::new(&home))?;
+        let place = std::env::current_dir().map_err(|e| format!("finding the place: {e}"))?;
+        let bypass = bypass_accepted(Path::new(&home), &root, &place);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -194,7 +244,7 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
                 let mut hup = hear(SignalKind::hangup())?;
                 let mut out = std::io::stdout();
                 tokio::select! {
-                    followed = follow(&turn, &root, &words, &mut out) => followed,
+                    followed = follow(&turn, &root, bypass, &words, &mut out) => followed,
                     _ = term.recv() => Err("stopped by SIGTERM".to_owned()),
                     _ = int.recv() => Err("stopped by SIGINT".to_owned()),
                     _ = hup.recv() => Err("stopped by SIGHUP".to_owned()),
@@ -211,8 +261,15 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
 }
 
 /// [`run`], the words in hand: start the session, then follow it to where its turn
-/// stopped, writing each change to `out`.
-async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> Result<(), String> {
+/// stopped, writing each change to `out`. `bypass`: whether the launch may make bypass
+/// mode available ([`Turn::launching`]).
+async fn follow(
+    turn: &Turn,
+    root: &Path,
+    bypass: bool,
+    words: &str,
+    out: &mut impl Write,
+) -> Result<(), String> {
     let registry = crate::registry::dir(root);
     if turn.act == Act::Continue
         && let Some(id) = turn.id.as_deref()
@@ -229,7 +286,7 @@ async fn follow(turn: &Turn, root: &Path, words: &str, out: &mut impl Write) -> 
     // this turn, never a helper's.
     let mut command = tokio::process::Command::new(&turn.binary);
     command.stdin(std::process::Stdio::null());
-    command.args(turn.launching()?);
+    command.args(turn.launching(bypass)?);
     if let Some(heard) = &heard {
         command.args(heard.settings()?);
     }
@@ -415,28 +472,12 @@ fn failed_on(end: &Value) -> Option<String> {
         .filter(|line| !line.is_empty())
 }
 
-/// How much of a transcript's end is read for the last thing said in it.
-const LAST_SAID: u64 = 1024 * 1024;
-
 /// What Claude Code said went wrong, when the last assistant record of a transcript is
 /// its own error (`isApiErrorMessage`) rather than the model's words.
 fn stopped_on(transcript: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(transcript).ok()?;
-    let start = file.metadata().ok()?.len().saturating_sub(LAST_SAID);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let whole = if start > 0 {
-        &bytes[bytes.iter().position(|byte| *byte == b'\n')? + 1..]
-    } else {
-        &bytes[..]
-    };
-    let last = whole
-        .split(|byte| *byte == b'\n')
-        .rev()
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-        .find(|record| record.get("type").and_then(Value::as_str) == Some("assistant"))?;
+    let last = crate::context::newest(transcript, |record| {
+        record.get("type").and_then(Value::as_str) == Some("assistant")
+    })?;
     if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
         return None;
     }
@@ -552,9 +593,10 @@ mod tests {
         );
         assert_eq!(Turn::parse(args.into_iter()).unwrap(), picked);
         assert_eq!(
-            picked.launching().unwrap(),
+            picked.launching(true).unwrap(),
             [
                 "--bg",
+                "--allow-dangerously-skip-permissions",
                 "--resume",
                 "s-1",
                 "--add-dir",
@@ -566,7 +608,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            turn(Act::Fork, Some("s-1"), true).launching().unwrap(),
+            turn(Act::Fork, Some("s-1"), true).launching(false).unwrap(),
             ["--bg", "--resume", "s-1", "--fork-session", "-w"]
         );
         let new = Turn {
@@ -574,10 +616,20 @@ mod tests {
             ..turn(Act::New, None, false)
         };
         assert_eq!(
-            new.launching().unwrap(),
+            new.launching(false).unwrap(),
             ["--bg", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
         );
-        assert!(turn(Act::Continue, None, false).launching().is_err());
+        assert!(turn(Act::Continue, None, false).launching(false).is_err());
+        // Haiku 4.5 takes no effort: the level picked is not passed.
+        let haiku = Turn {
+            model: Some("claude-haiku-4-5-20251001".into()),
+            thinking: Some("high".into()),
+            ..turn(Act::New, None, false)
+        };
+        assert_eq!(
+            haiku.launching(false).unwrap(),
+            ["--bg", "--model", "claude-haiku-4-5-20251001"]
+        );
     }
 
     /// The session's own turn ends reach the follower through the hooks its launch gives
@@ -677,7 +729,7 @@ mod tests {
             ..turn(Act::Continue, Some(session), false)
         };
         let mut out = Vec::new();
-        let error = follow(&continued, dir.path(), "go", &mut out)
+        let error = follow(&continued, dir.path(), false, "go", &mut out)
             .await
             .expect_err("a live session holds it");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
@@ -690,7 +742,7 @@ mod tests {
             "note: session {session} is already running in the background, so this started a copy as 186b32ef.\nbackgrounded · 186b32ef"
         );
         crate::tests::stand_in(&binary, &script("[]", &copy));
-        let error = follow(&continued, dir.path(), "go", &mut out)
+        let error = follow(&continued, dir.path(), false, "go", &mut out)
             .await
             .expect_err("a copy is no continue");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
