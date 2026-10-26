@@ -10,7 +10,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
-    Act, Beyond, Door, Ended, Event, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look,
+    Act, Beyond, Door, Ended, Event, Execution, FailureKind, Held, HeldBy, Holder, HolderStop,
+    Launch, Look,
     Looked, Marked, Model, Models, Pick, Picked, ReadAs, Reader, ReaderPlan, ReaderRead,
     ReaderTools, Receipt, ReceiptFind, ReceiptMark, Said, Sample, Sampled, Say, SayMode, Start,
     Stdin, Stop, Stopped, Stream, Terminal, TerminalCommand, Text, TurnLine, TurnRead, TurnState,
@@ -818,7 +819,11 @@ fn sample(state: Execution, now: u64, vacant: bool, if_unheld: bool) -> Sample {
 }
 
 /// Where a rollout's newest records say its conversation stands, standing only while no
-/// process holds the rollout: a turn begun and not ended runs; one ended is how it ended.
+/// process holds the rollout (`if_unheld`): a turn ended is how it ended; a turn begun and
+/// never ended with nothing holding the rollout was cut off, so it is `Interrupted` at the
+/// rollout's last record and vacant. Every live Codex is caught before this: the app's
+/// windows and a running app server answer in `idle` first, and a terminal or IDE session
+/// holds its rollout, which the runtime reads as held.
 fn stands(events: &[Event], now: u64) -> Option<Sample> {
     let mut model = None;
     let mut thinking = None;
@@ -858,6 +863,10 @@ fn stands(events: &[Event], now: u64) -> Option<Sample> {
         }
     }
     let (state, started_at, ended_at, error) = last?;
+    let (state, ended_at) = match state {
+        Execution::Running => (Execution::Interrupted, events.iter().map(written).max()),
+        state => (state, ended_at),
+    };
     Some(Sample {
         state,
         observed_at: now,
@@ -866,9 +875,26 @@ fn stands(events: &[Event], now: u64) -> Option<Sample> {
         model,
         thinking,
         error,
-        vacant: state != Execution::Running,
+        vacant: true,
         if_unheld: true,
     })
+}
+
+/// When a rollout record was written.
+fn written(event: &Event) -> u64 {
+    match event {
+        Event::TurnBegan { at, .. }
+        | Event::TurnEnded { at, .. }
+        | Event::Words { at, .. }
+        | Event::Rollback { at, .. }
+        | Event::CallBegan { at, .. }
+        | Event::CallEnded { at, .. }
+        | Event::Tokens { at, .. }
+        | Event::Model { at, .. }
+        | Event::SubAgent { at, .. }
+        | Event::Fork { at, .. }
+        | Event::Compacted { at, .. } => *at,
+    }
 }
 
 /// `turn/read`: one line of a turn's output, as the turn mode writes it — every message
@@ -896,7 +922,7 @@ pub fn turn_line(read: TurnRead) -> TurnLine {
                     .filter(|delivery| took(&line, delivery))
                     .map(|_| true),
                 ended: ended(&line),
-                refused: None,
+                refused: class_of(&line).map(str::to_owned),
                 events,
                 title,
             }
@@ -919,6 +945,24 @@ fn took(line: &Value, delivery: &str) -> bool {
             .flatten()
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .any(|text| marked(text, &marker))
+}
+
+/// The runtime's word for a failed turn's class, said so a turn that ends before it names a
+/// conversation still carries it: `signed-out` or `limited`, by the app server's own
+/// error info (`codexErrorInfo`, its HTTP status), never its wording.
+fn class_of(line: &Value) -> Option<&'static str> {
+    if line.get("method").and_then(Value::as_str) != Some("turn/completed") {
+        return None;
+    }
+    let turn = line.pointer("/params/turn")?;
+    if turn.get("status").and_then(Value::as_str) != Some("failed") {
+        return None;
+    }
+    match crate::events::failure_of(turn.get("error")?).kind {
+        FailureKind::SignIn => Some("signed-out"),
+        FailureKind::RateLimit => Some("limited"),
+        _ => None,
+    }
 }
 
 /// `turn/completed` is how each turn ends: `completed`, `failed` with the error the app
@@ -1222,6 +1266,20 @@ mod tests {
                 error: Some("unexpected status 401 Unauthorized".into())
             })
         );
+        assert_eq!(line(Stream::Stdout, failed, None).refused, None, "wording is no class");
+        let classed = |info: &str| {
+            let failed = format!(
+                r#"{{"method":"turn/completed","params":{{"turn":{{"id":"u","status":"failed","error":{{"message":"x","codexErrorInfo":{info}}}}}}}}}"#
+            );
+            line(Stream::Stdout, &failed, None).refused
+        };
+        assert_eq!(classed(r#""unauthorized""#).as_deref(), Some("signed-out"));
+        assert_eq!(
+            classed(r#"{"httpConnectionFailed":{"httpStatusCode":429}}"#).as_deref(),
+            Some("limited")
+        );
+        assert_eq!(classed(r#""usageLimitExceeded""#).as_deref(), Some("limited"));
+        assert_eq!(classed(r#""other""#), None);
         let done =
             r#"{"method":"turn/completed","params":{"turn":{"id":"u","status":"completed"}}}"#;
         assert_eq!(
@@ -1446,14 +1504,33 @@ mod tests {
         }
     }
 
-    /// Where a rollout says its conversation stands: a turn begun and not ended runs; an
-    /// ended one is vacant, both only while nothing holds the rollout.
+    /// Where a rollout says its conversation stands, only while nothing holds the rollout:
+    /// a turn begun and never ended was cut off (interrupted at the last record, vacant);
+    /// an ended one is how it ended.
     #[test]
     fn a_rollout_s_newest_turn_says_where_it_stands() {
-        let running = stands(&[Event::TurnBegan { at: 5, turn: None }], 9).unwrap();
+        let running = stands(
+            &[
+                Event::TurnBegan { at: 5, turn: None },
+                Event::Model {
+                    at: 8,
+                    model: "m".into(),
+                    provider: None,
+                    thinking: None,
+                },
+            ],
+            9,
+        )
+        .unwrap();
         assert_eq!(
-            (running.state, running.vacant, running.if_unheld),
-            (Execution::Running, false, true)
+            (
+                running.state,
+                running.started_at,
+                running.ended_at,
+                running.vacant,
+                running.if_unheld
+            ),
+            (Execution::Interrupted, Some(5), Some(8), true, true)
         );
         let ended = stands(
             &[
