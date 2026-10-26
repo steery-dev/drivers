@@ -39,6 +39,9 @@ pub struct Reading {
     pub agents: PathBuf,
     /// The context window a count is measured against.
     pub window: Window,
+    /// Where the conversation is a fork: its parent, and the uuid of its own first record,
+    /// before which every record is a copy of the parent's.
+    pub fork: Option<(String, String)>,
 }
 
 /// One whole record of a transcript, and where it starts: `None` where it is no JSON.
@@ -161,6 +164,14 @@ impl State<'_> {
             return;
         }
         let id = text(record, "uuid").map_or_else(|| format!("@{start}"), str::to_owned);
+        if let Some((parent, own)) = &self.reading.fork
+            && id == *own
+        {
+            self.out.push(Event::Fork {
+                at: self.at,
+                parent: parent.clone(),
+            });
+        }
         match text(record, "type") {
             Some("user") => self.user(id, record),
             Some("assistant") => self.assistant(id, record),
@@ -803,6 +814,7 @@ mod tests {
             own,
             agents: PathBuf::from("/nowhere/c/subagents"),
             window: Window::default(),
+            fork: None,
         }
     }
 
@@ -1220,6 +1232,7 @@ mod tests {
             own: false,
             agents,
             window: Window::default(),
+            fork: None,
         };
         let read = read(
             &reading,

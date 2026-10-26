@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, Metadata};
-use std::io::{BufReader, Read as _, Seek, SeekFrom};
+use std::io::{BufRead as _, BufReader, Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::UNIX_EPOCH;
@@ -51,8 +51,9 @@ const CUSTOM_TITLE: &[u8] = br#"{"type":"custom-title""#;
 
 /// Claude Code's conversations here: its configuration root, the other `projects` folders
 /// its moments named, each folder's listing, kept while the folder stands as it did, what
-/// each transcript's head says, kept while the file only grows, each transcript's tree as
-/// far as it was read, and the reads that said nothing.
+/// each transcript's head says, kept while the file only grows, where each fork came from
+/// once that is settled, each transcript's tree as far as it was read, and the reads that
+/// said nothing.
 pub struct Store {
     root: PathBuf,
     named: Mutex<BTreeSet<PathBuf>>,
@@ -62,6 +63,7 @@ pub struct Store {
     filing: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     heads: Mutex<HashMap<PathBuf, Kept<Head>>>,
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
+    origins: Mutex<HashMap<PathBuf, Kept<Option<Origin>>>>,
     trees: Trees<Records>,
     quiet: Quiet,
 }
@@ -71,6 +73,17 @@ struct Kept<T> {
     stamp: Stamp,
     value: T,
 }
+
+/// Where a fork came from: the conversation whose records it opens with, copied under the
+/// uuids they have there, and the uuid of its own first record, once it wrote one.
+#[derive(Clone)]
+struct Origin {
+    parent: String,
+    own: Option<String>,
+}
+
+/// The conversations filed once whose first record has a uuid, by that uuid.
+type Kin = HashMap<String, Vec<(String, PathBuf)>>;
 
 /// Every transcript filed as a conversation, by the id it is filed under.
 struct Filed {
@@ -102,6 +115,7 @@ impl Store {
             filing: Mutex::new(BTreeMap::new()),
             heads: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
+            origins: Mutex::new(HashMap::new()),
             trees: Trees::default(),
             quiet: Quiet::default(),
         }
@@ -132,6 +146,8 @@ impl Store {
         } else {
             BTreeMap::new()
         };
+        let kin = self.kin(&filed.by_id);
+        let kin = |first: &str| kin.get(first).cloned().unwrap_or_default();
         for (id, files) in filed.by_id {
             let mut read = Vec::new();
             for file in files {
@@ -150,7 +166,7 @@ impl Store {
             read.retain(|(_, facts)| !facts.headless);
             match read.as_slice() {
                 [] => excluded.push(id),
-                [(file, facts)] => sessions.push(self.described(&id, file, facts)),
+                [(file, facts)] => sessions.push(self.described(&id, file, facts, &kin)),
                 // Two transcripts answering to one id name it ambiguously: neither is read.
                 _ => complete = false,
             }
@@ -159,6 +175,7 @@ impl Store {
         let listed: HashSet<&PathBuf> = filed.listed.iter().collect();
         lock(&self.listings).retain(|folder, _| listed.contains(folder));
         lock(&self.agents).retain(|file, _| regular(file));
+        lock(&self.origins).retain(|file, _| walked.contains(file));
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
             sessions,
@@ -177,7 +194,7 @@ impl Store {
     /// Conversation `id`, as `sessions/locate` answers it.
     pub fn session(&self, id: &str) -> Result<Session, Error> {
         let (file, facts) = self.find(id)?;
-        Ok(self.described(id, &file, &facts))
+        Ok(self.described(id, &file, &facts, &|first| self.kin_now(first)))
     }
 
     /// The transcript conversation `id` is.
@@ -210,6 +227,12 @@ impl Store {
         let (file, facts) = self.find(&read.external_id)?;
         let mut stands = vec![(file.clone(), facts.stamp)];
         let agents = file.with_extension("").join("subagents");
+        let fork = match read.sub_agent {
+            None => self
+                .origin(&read.external_id, &file, &facts, &|first| self.kin_now(first))
+                .and_then(|origin| Some((origin.parent, origin.own?))),
+            Some(_) => None,
+        };
         let (file, own) = match &read.sub_agent {
             None => (file, false),
             Some(agent) => {
@@ -236,6 +259,7 @@ impl Store {
                 own,
                 agents,
                 window: Window::read(&self.root),
+                fork,
             },
             read.cursor.as_deref(),
             read.tail,
@@ -301,8 +325,15 @@ impl Store {
         }
     }
 
-    /// A conversation as `sessions/list` says it.
-    fn described(&self, id: &str, file: &Path, facts: &Facts) -> Session {
+    /// A conversation as `sessions/list` says it; `kin` names the conversations whose
+    /// first record has a uuid.
+    fn described(
+        &self,
+        id: &str,
+        file: &Path,
+        facts: &Facts,
+        kin: &dyn Fn(&str) -> Vec<(String, PathBuf)>,
+    ) -> Session {
         let head = &facts.head;
         Session {
             external_id: id.to_owned(),
@@ -311,14 +342,129 @@ impl Store {
             created_at: head.created_at,
             updated_at: facts.updated_at,
             transcripts: vec![file.to_owned()],
-            // A fork opens with copies of its parent's records and names nothing.
-            parent: None,
+            parent: self.origin(id, file, facts, kin).map(|origin| origin.parent),
             app: head
                 .entrypoint
                 .as_deref()
                 .is_some_and(|entrypoint| entrypoint.starts_with("claude-desktop")),
             sub_agents: self.sub_agents(file),
         }
+    }
+
+    /// Each conversation filed once, by the uuid of its first record.
+    fn kin(&self, by_id: &BTreeMap<String, Vec<PathBuf>>) -> Kin {
+        let mut kin = Kin::new();
+        for (id, files) in by_id {
+            let [file] = files.as_slice() else {
+                continue;
+            };
+            if let Some(facts) = self.facts(file)
+                && !facts.headless
+                && let Some(first) = facts.head.first_uuid
+            {
+                kin.entry(first).or_default().push((id.clone(), file.clone()));
+            }
+        }
+        kin
+    }
+
+    /// The conversations whose first record is `first`, among those the last
+    /// `sessions/list` filed, else every folder's.
+    fn kin_now(&self, first: &str) -> Vec<(String, PathBuf)> {
+        let filing = lock(&self.filing).clone();
+        let by_id = if filing.is_empty() {
+            self.filed(None).by_id
+        } else {
+            filing
+        };
+        self.kin(&by_id).remove(first).unwrap_or_default()
+    }
+
+    /// Where conversation `id`, filed at `file`, was forked from, if it was: kept once
+    /// settled, which a fork is once it wrote a record of its own, and anything else at
+    /// once.
+    fn origin(
+        &self,
+        id: &str,
+        file: &Path,
+        facts: &Facts,
+        kin: &dyn Fn(&str) -> Vec<(String, PathBuf)>,
+    ) -> Option<Origin> {
+        if let Some(kept) = lock(&self.origins)
+            .get(file)
+            .filter(|kept| kept.stamp.file() == facts.stamp.file())
+        {
+            return kept.value.clone();
+        }
+        let origin = self.trace(id, file, facts, kin);
+        if origin.as_ref().is_none_or(|origin| origin.own.is_some()) {
+            lock(&self.origins).insert(
+                file.to_owned(),
+                Kept {
+                    stamp: facts.stamp,
+                    value: origin.clone(),
+                },
+            );
+        }
+        origin
+    }
+
+    /// Where a conversation was forked from. Claude Code's fork (`--fork-session`) opens a
+    /// new transcript with copies of its parent's records, each under the uuid it has in
+    /// the parent, and names no parent. The parent is a conversation filed before it that
+    /// holds its first record: one whose own first record is that one, or the one an
+    /// opening record says wrote it ([`Head::copied_from`]). Of those, the one holding the
+    /// longest run of its opening records is the parent, the older on a tie (a fork made
+    /// beside it holds no more of them), and the first record after that run is its own.
+    /// A conversation filed later than it is never its parent: a parent that went on after
+    /// the fork reads as the fork's fork otherwise. Only these candidates' transcripts are
+    /// read whole, and only for a conversation that has one.
+    fn trace(
+        &self,
+        id: &str,
+        file: &Path,
+        facts: &Facts,
+        kin: &dyn Fn(&str) -> Vec<(String, PathBuf)>,
+    ) -> Option<Origin> {
+        let forked = born(file)?;
+        let named = facts
+            .head
+            .first_uuid
+            .as_deref()
+            .map(kin)
+            .unwrap_or_default();
+        let writer = facts
+            .head
+            .copied_from
+            .as_ref()
+            .and_then(|writer| Some((writer.clone(), self.find(writer).ok()?.0)));
+        let mut candidates: Vec<(String, PathBuf, std::time::SystemTime)> = Vec::new();
+        for (other, path) in named.into_iter().chain(writer) {
+            if other == id || candidates.iter().any(|(seen, ..)| *seen == other) {
+                continue;
+            }
+            if let Some(when) = born(&path).filter(|when| *when < forked) {
+                candidates.push((other, path, when));
+            }
+        }
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by_key(|(_, _, when)| *when);
+        let own = uuids(file);
+        let mut best: Option<(usize, String)> = None;
+        for (other, path, _) in candidates {
+            let theirs: HashSet<String> = uuids(&path).into_iter().collect();
+            let copied = own.iter().take_while(|uuid| theirs.contains(*uuid)).count();
+            if copied > 0 && best.as_ref().is_none_or(|(most, _)| copied > *most) {
+                best = Some((copied, other));
+            }
+        }
+        let (copied, parent) = best?;
+        Some(Origin {
+            parent,
+            own: own.get(copied).cloned(),
+        })
     }
 
     /// What `file` says of its conversation, its head read on from where it was last read
@@ -531,6 +677,31 @@ fn regular(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
 }
 
+/// When a file was made: a fork's transcript is made after its parent's.
+fn born(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok()?.created().ok()
+}
+
+/// The uuids of a transcript's main-thread records, in the order they were written.
+fn uuids(file: &Path) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        uuid: Option<String>,
+        #[serde(rename = "isSidechain")]
+        sidechain: Option<bool>,
+    }
+    let Ok(open) = File::open(file) else {
+        return Vec::new();
+    };
+    BufReader::new(open)
+        .split(b'\n')
+        .map_while(Result::ok)
+        .filter_map(|line| serde_json::from_slice::<Named>(&line).ok())
+        .filter(|named| named.sidechain != Some(true))
+        .filter_map(|named| named.uuid)
+        .collect()
+}
+
 /// What the head of a conversation's transcript says, and how far it has been read.
 #[derive(Clone, Default)]
 struct Head {
@@ -548,6 +719,12 @@ struct Head {
     title: Option<String>,
     /// What its person asked first, as one short line: its name where they gave none.
     asked: Option<String>,
+    /// The uuid of its first record in the main thread among the opening records: a
+    /// fork's is a record it copied from its parent, under the uuid it has there.
+    first_uuid: Option<String>,
+    /// The conversation that wrote its first record, where an opening record says another
+    /// than itself did (`session_id` beside its own `sessionId`): what a fork copied keeps.
+    copied_from: Option<String>,
     headless: bool,
 }
 
@@ -593,6 +770,18 @@ impl Head {
                 }
                 if self.entrypoint.is_none() {
                     self.entrypoint = text(&record, "entrypoint").map(str::to_owned);
+                }
+                if self.first_uuid.is_none()
+                    && record.get("isSidechain").and_then(Value::as_bool) != Some(true)
+                {
+                    self.first_uuid = text(&record, "uuid").map(str::to_owned);
+                }
+                if self.copied_from.is_none()
+                    && let (Some(by), Some(own)) =
+                        (text(&record, "session_id"), text(&record, "sessionId"))
+                    && by != own
+                {
+                    self.copied_from = Some(by.to_owned());
                 }
             }
             if self.cwd.is_none() {
@@ -1093,7 +1282,10 @@ mod tests {
     /// started it (`entrypoint` `claude-desktop`); its sub-agents are filed under it, each
     /// named by the record beside it, and read by their own transcript (the runtime's
     /// `every_harness_reports_its_sub_agents_in_one_shape`, `born_in_app` and
-    /// `claude_and_codex_sub_agents_are_their_leads`).
+    /// `claude_and_codex_sub_agents_are_their_leads`). A fork made from it later opens with
+    /// its records under their own uuids, as Claude Code 2.1.310's `--fork-session` copies
+    /// them: its parent is the conversation, and its history up to its own first record
+    /// is the parent's.
     #[test]
     fn a_conversation_says_how_it_began_and_who_works_in_it() {
         let root = scratch();
@@ -1103,7 +1295,7 @@ mod tests {
             &folder.join(format!("{lead}.jsonl")),
             &[
                 json!({"type":"queue-operation","operation":"enqueue"}),
-                json!({"type":"user","timestamp":"2026-09-26T10:00:00Z","entrypoint":"claude-desktop","cwd":"/private/tmp","origin":{"kind":"human"},"message":{"role":"user","content":"hi there"}}),
+                json!({"type":"user","uuid":"u1","timestamp":"2026-09-26T10:00:00Z","entrypoint":"claude-desktop","cwd":"/private/tmp","origin":{"kind":"human"},"message":{"role":"user","content":"hi there"}}),
             ],
         );
         write(
@@ -1170,6 +1362,38 @@ mod tests {
                 "{missing:?}"
             );
         }
+        assert_eq!(session.parent, None, "the conversation forked is no fork");
+        // Made later than its parent, as a fork always is.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let fork = "55555555-5555-4555-8555-555555555555";
+        write(
+            &folder.join(format!("{fork}.jsonl")),
+            &[
+                json!({"type":"user","uuid":"u1","sessionId":fork,"timestamp":"2026-09-26T10:00:00Z","entrypoint":"claude-desktop","cwd":"/private/tmp","origin":{"kind":"human"},"message":{"role":"user","content":"hi there"}}),
+                json!({"type":"user","uuid":"f1","parentUuid":"u1","sessionId":fork,"timestamp":"2026-09-26T11:00:00Z","origin":{"kind":"human"},"message":{"role":"user","content":"and now"}}),
+            ],
+        );
+        let listed = listed(&store);
+        let parent = |id: &str| {
+            listed
+                .sessions
+                .iter()
+                .find(|session| session.external_id == id)
+                .map(|session| session.parent.clone())
+        };
+        assert_eq!(parent(fork), Some(Some(lead.to_owned())));
+        assert_eq!(parent(lead), Some(None));
+        assert_eq!(store.session(fork).unwrap().parent.as_deref(), Some(lead));
+        let events = reading(&store, fork, None, None).events;
+        let at = |wanted: &dyn Fn(&Event) -> bool| events.iter().position(wanted);
+        let said = |words: &str| {
+            at(&|event| matches!(event, Event::Words { text, .. } if text == words))
+        };
+        let forked = at(&|event| {
+            matches!(event, Event::Fork { parent, at } if parent == lead && *at == 1_790_420_400_000)
+        });
+        assert!(said("hi there") < forked && forked < said("and now"), "{events:?}");
+        assert!(forked.is_some());
         std::fs::remove_dir_all(root).unwrap();
     }
 
