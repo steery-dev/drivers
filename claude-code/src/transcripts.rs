@@ -6,8 +6,9 @@
 //! the same file, under the same id. A sub-agent's transcript is filed under its
 //! conversation's, `<folder>/<id>/subagents/agent-<agent>.jsonl`, with the
 //! `agent-<agent>.meta.json` Claude Code writes beside it naming its type, the description
-//! its lead gave it and the call that started it: those are the conversation's sub-agents,
-//! never conversations of their own. Nor is a run a program started (`claude -p`, any
+//! its lead gave it, the call that started it and, for one another sub-agent started, that
+//! sub-agent (`parentAgentId`): those are the conversation's sub-agents, never
+//! conversations of their own. Nor is a run a program started (`claude -p`, any
 //! agent-SDK caller), which every record of it says as `entrypoint: sdk-cli` until a
 //! person carries it on, whose records say `cli` from then on.
 
@@ -531,7 +532,7 @@ impl Store {
             };
             found.push(SubAgent {
                 external_id: agent.to_owned(),
-                lead: None,
+                lead: read.lead,
                 name: read.name,
                 task: read.task,
                 started_at: read.started_at,
@@ -871,6 +872,9 @@ struct Agent {
     task: Option<String>,
     started_at: Option<u64>,
     started_by: Option<String>,
+    /// The sub-agent that started it (`parentAgentId`); none where the conversation's own
+    /// agent did.
+    lead: Option<String>,
 }
 
 impl Agent {
@@ -909,6 +913,9 @@ impl Agent {
                 .iter()
                 .find_map(|record| text(record, "timestamp").and_then(millis)),
             started_by: text(&meta, "toolUseId").map(str::to_owned),
+            lead: text(&meta, "parentAgentId")
+                .filter(|lead| agent_id(lead))
+                .map(str::to_owned),
         };
         kept.insert(
             file.to_owned(),
@@ -1315,6 +1322,12 @@ mod tests {
                 json!({"type":"user","isSidechain":true,"timestamp":"2026-09-26T10:00:20Z","message":{"role":"user","content":"\nCheck the docs\nthoroughly"}}),
             ],
         );
+        // Started by sub-agent a1b2, as Claude Code 2.1 files a nested one.
+        std::fs::write(
+            folder.join(format!("{lead}/subagents/agent-c3d4.meta.json")),
+            r#"{"agentType":"Explore","parentAgentId":"a1b2","spawnDepth":2}"#,
+        )
+        .unwrap();
         let store = Store::new(root.clone());
         let session = store.session(lead).unwrap();
         assert!(session.app, "started in the Claude app");
@@ -1334,8 +1347,8 @@ mod tests {
                 },
                 SubAgent {
                     external_id: "c3d4".into(),
-                    lead: None,
-                    name: None,
+                    lead: Some("a1b2".into()),
+                    name: Some("Explore".into()),
                     task: Some("Check the docs".into()),
                     started_at: Some(1_790_416_820_000),
                     started_by: None,
