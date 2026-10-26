@@ -179,7 +179,9 @@ impl Program for ClaudeCode {
             method::HOOK_READ => result(hooks::read(self.root()?, given(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
             method::HELD => result(drive::held(self.root()?, self.store()?, given(params)?)),
-            method::IDLE => result(drive::idle(self.root()?, &self.listing, given(params)?).await),
+            method::IDLE => result(
+                drive::idle(self.root()?, self.store()?, &self.listing, given(params)?).await,
+            ),
             method::MODELS => {
                 let _: wire::Empty = given(params)?;
                 result(drive::models(&self.place()?.home, self.root()?).await)

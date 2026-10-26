@@ -12,7 +12,7 @@ use steery_driver_common::receipt::{self, End};
 use steery_sdk::wire::harness::{
     Act, Beyond, Door, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked,
     Model, Models, ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark,
-    Sample, Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, Unlisted,
+    Sample, Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, TurnState, Unlisted,
 };
 use steery_sdk::{Error, refusal};
 use tokio::sync::Mutex;
@@ -160,8 +160,10 @@ impl Listing {
 /// transcript nobody holds, is a conversation nobody is in (`if_unheld`). Anything else is
 /// uncertain, and has no sample. Vacant where it runs nothing and no live session is
 /// registered in it — a terminal killed mid-turn leaves exactly that; an idle registered
-/// owner is somebody in it: its person may be reading the answer.
-pub async fn idle(root: &Path, listing: &Listing, held: Held) -> Sampled {
+/// owner is somebody in it: its person may be reading the answer. A background session's
+/// run began and ended where its job's timeline says ([`run_times`]); the model and effort
+/// are its transcript's newest answer's.
+pub async fn idle(root: &Path, store: &Store, listing: &Listing, held: Held) -> Sampled {
     let Some(binary) = crate::binary() else {
         return Sampled { sample: None };
     };
@@ -179,14 +181,71 @@ pub async fn idle(root: &Path, listing: &Listing, held: Held) -> Sampled {
     ) else {
         return Sampled { sample: None };
     };
-    Sampled {
-        sample: sample(&listed, id, owners.remove(id).as_ref(), observed_at),
+    let Some(mut found) = sample(&listed, id, owners.remove(id).as_ref(), observed_at) else {
+        return Sampled { sample: None };
+    };
+    if let Some(job) = listed_once(&listed, id)
+        .and_then(|entry| entry.get("id")?.as_str())
+        .filter(|job| plain_job(job))
+    {
+        (found.started_at, found.ended_at) = run_times(root, job, found.state);
     }
+    if let Ok(transcript) = store.transcript(id) {
+        let now = crate::context::now(
+            &crate::context::newest_first(&transcript),
+            &crate::context::Window::default(),
+        );
+        found.model = now.model;
+        found.thinking = now.thinking;
+    }
+    Sampled {
+        sample: Some(found),
+    }
+}
+
+/// The one row a listing has of conversation `id`.
+fn listed_once<'a>(listed: &'a [Value], id: &str) -> Option<&'a Value> {
+    let mut rows = listed
+        .iter()
+        .filter(|entry| entry.get("sessionId").and_then(Value::as_str) == Some(id));
+    let first = rows.next()?;
+    rows.next().is_none().then_some(first)
+}
+
+/// When a background session's latest run began and, where it no longer runs, ended, in
+/// milliseconds: the times its job's timeline (`jobs/<job>/timeline.jsonl`, one `{at,
+/// state}` row per change) gives the latest stretch of `working` rows and the row after.
+fn run_times(root: &Path, job: &str, state: Execution) -> (Option<u64>, Option<u64>) {
+    let Ok(timeline) = std::fs::read(root.join("jobs").join(job).join("timeline.jsonl")) else {
+        return (None, None);
+    };
+    let rows: Vec<(u64, bool)> = timeline
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .filter_map(|row| {
+            let at = crate::events::millis(row.get("at")?.as_str()?)?;
+            Some((at, row.get("state")?.as_str()? == "working"))
+        })
+        .collect();
+    let Some(last_working) = rows.iter().rposition(|(_, working)| *working) else {
+        return (None, None);
+    };
+    let began = rows[..=last_working]
+        .iter()
+        .rev()
+        .take_while(|(_, working)| *working)
+        .last()
+        .map(|(at, _)| *at);
+    let ended = (state != Execution::Running)
+        .then(|| rows.get(last_working + 1))
+        .flatten()
+        .map(|(at, _)| *at);
+    (began, ended)
 }
 
 /// What a listing asked for at `observed_at` and the session the registry names say of
 /// `id`: first as it stands whoever holds its transcript, then as it stands only where
-/// nobody does.
+/// nobody does. A turn that stopped on an error of Claude Code's own failed, in its words.
 fn sample(
     listed: &[Value],
     id: &str,
@@ -197,18 +256,22 @@ fn sample(
         Some(running) => (running, false),
         None => (agents::execution(listed, id, owner, true)?, true),
     };
+    let failed = (!running)
+        .then(|| listed_once(listed, id).and_then(agents::end))
+        .flatten()
+        .filter(|ended| ended.state == TurnState::Failed);
     Some(Sample {
-        state: if running {
-            Execution::Running
-        } else {
-            Execution::Finished
+        state: match (running, &failed) {
+            (true, _) => Execution::Running,
+            (false, Some(_)) => Execution::Failed,
+            (false, None) => Execution::Finished,
         },
         observed_at,
         started_at: None,
         ended_at: None,
         model: None,
         thinking: None,
-        error: None,
+        error: failed.and_then(|ended| ended.error),
         vacant: !running && owner.is_none(),
         if_unheld,
     })
@@ -915,6 +978,17 @@ mod tests {
         .unwrap();
         assert!(!done.vacant, "its person may be reading the answer");
         assert!(sample(&[], "s", Some(&owner), 7).is_none());
+        let failed = sample(
+            &[json!({"sessionId": "s", "state": "failed", "error": "Credit balance is too low"})],
+            "s",
+            None,
+            7,
+        )
+        .unwrap();
+        assert_eq!(
+            (failed.state, failed.error.as_deref()),
+            (Execution::Failed, Some("Credit balance is too low"))
+        );
     }
 
     /// Only one person's input carrying the whole marker is a receipt; a marker quoted in
