@@ -1,7 +1,17 @@
 //! `setup/plan`: what sets Codex up for Steery, each an entry the runtime writes and
-//! records: Steery's MCP server in `config.toml`, Steery's skill, one hook group per
-//! moment in `hooks.json` beside the person's own, and the trust a Steery hook its person
-//! already trusted lost by moving.
+//! records: Steery's MCP server in `config.toml`, its tools approved, Steery's skill, the
+//! rule that runs `steery` outside Codex's sandbox, one hook group per moment in
+//! `hooks.json` beside the person's own, and the trust a Steery hook its person already
+//! trusted lost by moving.
+//!
+//! Codex asks before an MCP tool runs unless the server's entry approves it, and under
+//! `approval_policy = "never"` (every turn Steery starts) asking is refusing: "MCP tool
+//! call requires approval, but approval policy is never" (2026-10-27, every Steery tool).
+//! Steery's tools are Steery's to rule on, so its entry approves them all.
+//!
+//! Codex's macOS sandbox denies `com.apple.securityd.xpc`, so a `steery` run inside it
+//! cannot reach this Mac's Secure Enclave key and refuses every command (2026-10-27).
+//! A command a rule `allow`s runs outside the sandbox; Steery's rule allows `steery`.
 //!
 //! Codex runs a hook only while `config.toml` holds, under `[hooks.state."<file>:<event>:
 //! <group>:<hook>"]`, a `trusted_hash` equal to the hook's current hash, and the key is a
@@ -27,6 +37,9 @@ use crate::hooks;
 
 /// How long Codex's app server has to list its hooks.
 const LIST_WITHIN: Duration = Duration::from_secs(15);
+
+/// Codex's rule that runs `steery` outside its sandbox, without asking.
+const RULE: &str = "prefix_rule(pattern=[\"steery\"], decision=\"allow\", justification=\"Steery's CLI signs with this machine's Keychain key, which Codex's sandbox cannot reach\")\n";
 
 /// The plan for this machine.
 pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
@@ -74,8 +87,20 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
             path: config.clone(),
             format: Format::Toml,
             at: Some("mcp_servers.steery".into()),
-            value: json!({"url": setup.mcp_url, "tool_timeout_sec": setup.timeout}),
+            value: json!({
+                "url": setup.mcp_url,
+                "tool_timeout_sec": setup.timeout,
+                "default_tools_approval_mode": "approve",
+            }),
             carries: vec![Part::Mcp],
+        },
+        // The command the skill teaches, which must run where the Keychain is.
+        Entry {
+            path: root.join("rules/steery.rules"),
+            format: Format::Text,
+            at: None,
+            value: json!(RULE),
+            carries: vec![Part::Skill],
         },
         Entry {
             path: root.join("skills/steery/SKILL.md"),

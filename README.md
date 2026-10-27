@@ -378,8 +378,12 @@ app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`
   with the context left, models and efforts, sub-agents started and how they ended, and
   rollbacks; a rollback that does not say how many turns went is refused.
 - **Setup** (`setup/plan`). The MCP entry in `config.toml` (`mcp_servers.steery`, its
-  `tool_timeout_sec` the runtime's bound), the skill in `skills/steery/SKILL.md`, and one
-  hook group per moment in `hooks.json`, beside the person's own (`/hooks/<Event>/-`).
+  `tool_timeout_sec` the runtime's bound, `default_tools_approval_mode = "approve"`: under
+  `approval_policy = "never"` a tool Codex would ask about is refused), the rule
+  `rules/steery.rules` that runs `steery` outside Codex's sandbox (the macOS sandbox denies
+  the Keychain, so the CLI cannot reach this machine's key inside it), the skill in
+  `skills/steery/SKILL.md`, and one hook group per moment in `hooks.json`, beside the
+  person's own (`/hooks/<Event>/-`).
   Codex runs a hook only once its person trusted it, and keys that trust by the hook's
   place: where a Steery hook its person trusted moved because another tool put a group
   ahead of it, the plan writes the same trust again where it now stands (asked of Codex's
