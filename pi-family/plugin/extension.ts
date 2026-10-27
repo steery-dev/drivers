@@ -444,6 +444,10 @@ type Event = {
   messages?: unknown;
   /** `before_provider_request`: what goes to the model's provider, the harness's to send unless replaced. */
   payload?: unknown;
+  /** omp's `cache_warming_decision`: what this refresh costs, what a lost entry costs, and the time to the next refresh. */
+  warmCost?: unknown;
+  missCost?: unknown;
+  refreshIntervalMs?: unknown;
 };
 
 type Api = {
@@ -1118,6 +1122,8 @@ type Settled = { began_at: number; at: number; says: string[]; failed: boolean; 
 type Kept = {
   asked: boolean;
   parked: boolean;
+  /** When the agent's park said it wakes, by this process's clock; none for a park without a time. */
+  wakeAt: number | undefined;
   /** The turn's last Steery call was a wait: on a resource, a watch, or a place in a queue. */
   waiting: boolean;
   reminded: boolean;
@@ -1175,9 +1181,11 @@ function restored(kept: unknown): Kept {
   const dialog = field("dialog");
   const turning = field("turning") === true;
   const began = field("began");
+  const wakeAt = field("wakeAt");
   return {
     asked: field("asked") === true,
     parked: field("parked") === true,
+    wakeAt: typeof wakeAt === "number" ? wakeAt : undefined,
     waiting: field("waiting") === true,
     reminded: field("reminded") === true,
     turning,
@@ -1411,6 +1419,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // again at every turn the person starts.
   let asked = kept.asked;
   let parked = kept.parked;
+  let wakeAt = kept.wakeAt;
   let waiting = kept.waiting;
   let reminded = kept.reminded;
   // The context the harness last handed a handler: the one the door speaks through.
@@ -2529,8 +2538,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     if (!ctx.abort) return { refused: "selection-unsupported", error: `this ${HARNESS} cannot abort` };
     const running = () => turning || ctx.isIdle?.() === false;
-    // Its person's own stop holds the conversation parked whether or not a turn runs.
-    if (say === undefined) parked = true;
+    // Its person's own stop holds the conversation parked whether or not a turn runs, with
+    // no wake known: nothing keeps its cache warm.
+    if (say === undefined) {
+      parked = true;
+      wakeAt = undefined;
+    }
     if (!running()) return { ok: { stopped: false, running: background(ctx) } };
     if (say !== undefined && !ours.has(say)) {
       const waiting = says.some((one) => idsOf(one).includes(say) && !one.seen);
@@ -2845,7 +2858,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
     reloading().delete(id);
     if (stood) {
-      ({ asked, parked, waiting, reminded, turning, began, retrying, continued, dialog } = stood);
+      ({ asked, parked, wakeAt, waiting, reminded, turning, began, retrying, continued, dialog } = stood);
       says.splice(0, says.length, ...stood.says);
       ours = new Set(stood.ours);
       calls.clear();
@@ -2945,7 +2958,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     waiting = false;
     // A park holds until the person's own words start a turn: Steery's words, a reminder
     // going on, or a background job waking the conversation leave it parked.
-    if (!going && said.theirs) parked = false;
+    if (!going && said.theirs) {
+      parked = false;
+      wakeAt = undefined;
+    }
     reminded = false;
     const prompt = typeof event.prompt === "string" ? { prompt: event.prompt } : {};
     const line = sayOf(await awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS));
@@ -3167,6 +3183,24 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return messages && { messages };
   });
   pi.on("before_provider_request", (event) => unanchored(event.payload));
+  if (HARNESS === "omp") {
+    /**
+     * Warm a parked conversation's cache until its known wake, past omp's safety windows
+     * (`extendWindow`): the refreshes left cost `ceil(left / refreshIntervalMs)` cache
+     * reads, and the miss they prevent one full write. omp without `refreshIntervalMs`
+     * gets no answer: its own decision stands.
+     */
+    pi.on("cache_warming_decision", (event) => {
+      if (!parked || wakeAt === undefined) return undefined;
+      const { refreshIntervalMs: interval, warmCost, missCost } = event;
+      if (typeof interval !== "number" || typeof warmCost !== "number" || typeof missCost !== "number") return undefined;
+      const left = wakeAt - Date.now();
+      if (left > 0 && interval > 0 && Math.ceil(left / interval) * warmCost < missCost) {
+        return { action: "warm", extendWindow: true };
+      }
+      return undefined;
+    });
+  }
   /**
    * Steery's words to keep a turn about to end going, from the runtime (`settle`'s
    * answer, `ok.say`): none where the turn asked its person, its agent parked the
@@ -3276,6 +3310,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       typeof args.park === "object"
     ) {
       parked = true;
+      const wake = "wake" in args.park && !!args.park.wake && typeof args.park.wake === "object" ? args.park.wake : {};
+      const at = "at" in wake && typeof wake.at === "string" ? Date.parse(wake.at) : Number.NaN;
+      wakeAt = Number.isNaN(at) ? undefined : at;
     }
     if (typeof event.parentToolCallId === "string" && event.parentToolCallId) return undefined;
     // The call that came back, by the id the transcript writes it under, and whether it failed.
@@ -3373,6 +3410,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       return {
         asked,
         parked,
+        wakeAt,
         waiting,
         reminded,
         turning,
