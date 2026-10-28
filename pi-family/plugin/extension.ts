@@ -239,6 +239,9 @@ const JOB_LABEL_MAX = 120;
 /** The longest line of a job's output the `state` says, in characters. */
 const JOB_OUTPUT_MAX = 200;
 
+/** The longest error a retry's `state` says, in characters (LiveState `retry`). */
+const RETRY_ERROR_MAX = 600;
+
 /**
  * At most one change of a call's jobs' output per this many milliseconds reaches the
  * `state`: omp says a wait's jobs every 500 ms, and a busy build's newest line changes at
@@ -1124,6 +1127,8 @@ type Kept = {
   turning: boolean;
   began: number | undefined;
   retrying: boolean;
+  /** While it waits to retry: the try that failed, as the harness said it (LiveState `retry`). */
+  retry: Retry | undefined;
   continued: string | undefined;
   says: Say[];
   ours: string[];
@@ -1175,6 +1180,7 @@ function restored(kept: unknown): Kept {
   const dialog = field("dialog");
   const turning = field("turning") === true;
   const began = field("began");
+  const retry = field("retry");
   return {
     asked: field("asked") === true,
     parked: field("parked") === true,
@@ -1183,6 +1189,7 @@ function restored(kept: unknown): Kept {
     turning,
     began: typeof began === "number" ? began : undefined,
     retrying: field("retrying") === true,
+    retry: isRetry(retry) ? retry : undefined,
     continued: typeof continued === "string" ? continued : undefined,
     says: Array.isArray(says) ? says.filter(isSay) : [],
     ours: Array.isArray(ours) ? ours.filter((one): one is string => typeof one === "string") : [],
@@ -1268,6 +1275,36 @@ function isJob(one: unknown): one is Job {
     optional(job.output, "string") &&
     optional(job.output_at, "number")
   );
+}
+
+/** The try a harness waits to retry, as LiveState `retry` says it. */
+type Retry = { attempt: number; of?: number; error?: string };
+
+function isRetry(one: unknown): one is Retry {
+  if (!one || typeof one !== "object") return false;
+  const retry = one as Record<string, unknown>;
+  return (
+    typeof retry.attempt === "number" &&
+    (retry.of === undefined || typeof retry.of === "number") &&
+    (retry.error === undefined || typeof retry.error === "string")
+  );
+}
+
+/**
+ * The try an `auto_retry_start` says failed: which it was, of how many, and the harness's
+ * line for what went wrong, both harnesses naming them `attempt`, `maxAttempts` and
+ * `errorMessage`. Nothing where it names no try.
+ */
+function retryOf(event: unknown): Retry | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const { attempt, maxAttempts, errorMessage } = event as Record<string, unknown>;
+  if (typeof attempt !== "number" || !Number.isInteger(attempt) || attempt < 1) return undefined;
+  const error = typeof errorMessage === "string" ? oneLine(errorMessage, RETRY_ERROR_MAX) : "";
+  return {
+    attempt,
+    ...(typeof maxAttempts === "number" && Number.isInteger(maxAttempts) && maxAttempts > 0 ? { of: maxAttempts } : {}),
+    ...(error ? { error } : {}),
+  };
 }
 
 /** `text` on one line, its whitespace collapsed and its terminal styling gone, cut to `max` characters with `…`. */
@@ -1575,6 +1612,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // goes on by itself (`auto_retry_start` to `auto_retry_end`). pi's run is not over
   // until `agent_settled`, retries included.
   let retrying = kept.retrying;
+  /** While it waits to retry: the try that failed ([`retryOf`]). */
+  let retry = kept.retry;
   /** pi: this run's overflow recovery failed, so it settles with its context full. */
   let overflowed = false;
   /** The calls the agent is inside, by id, oldest first: what the conversation waits on. */
@@ -1673,6 +1712,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       ...known("typing", typing(ctx)),
       compacting: compacting !== undefined,
       retrying,
+      ...(retry ? { retry } : {}),
       ...(running > 0 ? { jobs: running } : {}),
       ...current(ctx),
       ...known("context_left", left(ctx)),
@@ -2845,7 +2885,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
     reloading().delete(id);
     if (stood) {
-      ({ asked, parked, waiting, reminded, turning, began, retrying, continued, dialog } = stood);
+      ({ asked, parked, waiting, reminded, turning, began, retrying, retry, continued, dialog } = stood);
       says.splice(0, says.length, ...stood.says);
       ours = new Set(stood.ours);
       calls.clear();
@@ -2940,6 +2980,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (!starting && (ctx.isIdle?.() ?? false)) starting = Promise.withResolvers<void>();
     turning = true;
     retrying = false;
+    retry = undefined;
     noteState();
     asked = false;
     waiting = false;
@@ -2966,14 +3007,18 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteState();
   });
   // omp's own retries between runs: it goes on by itself, so the conversation is not idle.
-  pi.on("auto_retry_start", (_event, ctx) => {
+  // Each try that failed starts the wait for the next, saying which it was and why; the
+  // end comes once one went through, or the harness gave up.
+  pi.on("auto_retry_start", (event, ctx) => {
     live = ctx;
     retrying = true;
+    retry = retryOf(event);
     noteState();
   });
   pi.on("auto_retry_end", (_event, ctx) => {
     live = ctx;
     retrying = false;
+    retry = undefined;
     noteState();
   });
   // Words the harness took, as they go into the transcript: its queue just changed. A
@@ -3378,6 +3423,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         turning,
         began,
         retrying,
+        retry,
         continued,
         says: [...says],
         ours: [...ours],

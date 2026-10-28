@@ -6,7 +6,7 @@ license = "MIT"
 description = "Steery's driver for Claude Code: it reads Claude Code's conversations, plans its setup, answers its hooks, and starts, reads, reaches and stops its turns."
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.2.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.3.0" }
 steery-driver-common = { path = "../common" }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
