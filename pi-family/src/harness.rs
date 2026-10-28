@@ -387,6 +387,35 @@ pub fn omp_setting(root: &Path, section: &str, key: &str) -> Option<String> {
     })
 }
 
+/// The strings omp's `config.yml` lists under its top-level `key`, as a block (`key:` then
+/// indented `- value` lines) or in flow (`key: [a, b]`), unquoted; none where it lists none.
+pub fn omp_list(root: &Path, key: &str) -> Option<Vec<String>> {
+    let text = OMP_CONFIG
+        .iter()
+        .find_map(|name| std::fs::read_to_string(root.join(name)).ok())?;
+    let unquoted = |value: &str| {
+        let value = value.split(" #").next().unwrap_or_default();
+        value.trim().trim_matches(['"', '\'']).to_owned()
+    };
+    let mut lines = text.lines();
+    let after = lines.find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))?;
+    let after = after.split(" #").next().unwrap_or_default().trim();
+    let listed: Vec<String> = if let Some(flow) = after.strip_prefix('[') {
+        flow.trim_end_matches(']')
+            .split(',')
+            .map(unquoted)
+            .filter(|value| !value.is_empty())
+            .collect()
+    } else {
+        lines
+            .take_while(|line| line.trim().is_empty() || line.starts_with([' ', '\t', '-', '#']))
+            .filter_map(|line| line.trim_start().strip_prefix('-').map(unquoted))
+            .filter(|value| !value.is_empty())
+            .collect()
+    };
+    (!listed.is_empty()).then_some(listed)
+}
+
 /// The oldest Node.js pi's installer accepts.
 const PI_NODE: (u64, u64, u64) = (22, 19, 0);
 
