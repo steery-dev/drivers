@@ -39,12 +39,14 @@ use crate::agents::{self, Follow, RUNNING};
 pub const EFFORT: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The effort levels Claude Code takes for `model`, least first
-/// (https://code.claude.com/docs/en/model-config, "Adjust effort level"): none for Haiku 4.5,
-/// which the `haiku` alias runs where the account's provider serves no newer Haiku; every
-/// level but `xhigh` for the 4.6 models; every level for the rest.
+/// (https://code.claude.com/docs/en/model-config, "Adjust effort level"): none for Haiku 4.5;
+/// every level but `xhigh` for the 4.6 models; every level for the rest, the `haiku` alias
+/// too, which runs Haiku 5.5 on the Anthropic API. Where a provider serves an older Haiku
+/// under it, Claude Code runs a level the model does not take at the highest it does (same
+/// section).
 pub fn efforts(model: &str) -> &'static [&'static str] {
     let model = model.strip_suffix("[1m]").unwrap_or(model);
-    if model == "haiku" || model.contains("claude-haiku-4-5") {
+    if model.contains("claude-haiku-4-5") {
         &[]
     } else if model.contains("-4-6") {
         &["low", "medium", "high", "max"]

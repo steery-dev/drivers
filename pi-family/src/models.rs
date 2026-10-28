@@ -1,6 +1,7 @@
 //! `models`: what the harness runs here, each as its `--model` takes it exactly.
 //!
-//! omp lists its catalog with `omp models --json`, its default being `modelRoles.default`
+//! omp lists its catalog with `omp models --json`, only what its `enabledModels` names where
+//! it names any, its default being `modelRoles.default`
 //! in its `config.yml`. pi lists its models two ways, both needed: `pi --list-models`
 //! prints every model it has a sign-in for, in its own order, and its RPC mode's
 //! `get_available_models` says each one's thinking levels and price. pi names no default.
@@ -148,6 +149,9 @@ async fn ask(harness: Harness, root: &Path) -> Result<Vec<Model>, String> {
         Harness::Omp => {
             let mut models =
                 omp_offers(&said(&binary, &["models", "--json"], LISTED_WITHIN).await?)?;
+            if let Some(enabled) = crate::harness::omp_list(root, "enabledModels") {
+                models = omp_enabled(models, &enabled);
+            }
             if let Some(default) = omp_default(root, &models)
                 && let Some(at) = models.iter().position(|offer| offer.model == default)
             {
@@ -255,6 +259,115 @@ fn price(model: &Value) -> Option<f64> {
         .pointer("/cost/input")
         .and_then(Value::as_f64)
         .filter(|cost| cost.is_finite() && *cost >= 0.0)
+}
+
+/// Of omp's catalog, the models `enabledModels` names: omp offers only those in its picker
+/// and model cycling, while `omp models` lists every model whatever it says. An entry names
+/// models as omp's scope reads it (`resolveModelScope` in omp's code), case aside: a glob
+/// (`*`, `?`, `[…]`) those whose `provider/id` or id it matches; else the one whose selector
+/// or id it is, with or without a `:<thinking>` suffix; else, where it is exactly none,
+/// those whose id holds it (within its provider where it names one), which covers the one
+/// omp's fuzzy match picks. Entries naming nothing leave the catalog whole, as omp leaves
+/// its scope.
+fn omp_enabled(models: Vec<Model>, enabled: &[String]) -> Vec<Model> {
+    let selectors: Vec<String> = models.iter().map(|model| model.model.to_lowercase()).collect();
+    let id = |selector: &str| -> usize { selector.find('/').map_or(0, |at| at + 1) };
+    let mut kept = vec![false; models.len()];
+    for entry in enabled.iter().map(|entry| entry.to_lowercase()) {
+        let mut mark = |names: &dyn Fn(&str, &str) -> bool| -> bool {
+            let mut any = false;
+            for (at, selector) in selectors.iter().enumerate() {
+                if names(selector, &selector[id(selector)..]) {
+                    kept[at] = true;
+                    any = true;
+                }
+            }
+            any
+        };
+        if entry.contains(['*', '?', '[']) {
+            mark(&|selector, id| glob(&entry, selector) || glob(&entry, id));
+            continue;
+        }
+        let base = entry.rsplit_once(':').map_or(entry.as_str(), |(base, _)| base);
+        if mark(&|selector, id| entry == selector || entry == id)
+            || mark(&|selector, id| base == selector || base == id)
+        {
+            continue;
+        }
+        match base.split_once('/') {
+            Some((provider, rest)) => mark(&|selector, id| {
+                selector
+                    .strip_prefix(provider)
+                    .is_some_and(|after| after.starts_with('/'))
+                    && id.contains(rest)
+            }),
+            None => mark(&|_, id| id.contains(base)),
+        };
+    }
+    if !kept.contains(&true) {
+        return models;
+    }
+    models
+        .into_iter()
+        .zip(kept)
+        .filter_map(|(model, kept)| kept.then_some(model))
+        .collect()
+}
+
+/// Whether `pattern` matches all of `text`: `*` any run, `?` one character, `[…]` one of a
+/// set or range, `[!…]` one outside it.
+fn glob(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    // The one class at `at` (just past its `[`): whether `c` is in it, and where it ends.
+    let class = |at: usize, c: char| -> Option<(bool, usize)> {
+        let negated = matches!(pattern.get(at), Some('!' | '^'));
+        let mut i = at + usize::from(negated);
+        let mut found = false;
+        let mut first = true;
+        while let Some(&p) = pattern.get(i) {
+            if p == ']' && !first {
+                return Some((found != negated, i + 1));
+            }
+            if pattern.get(i + 1) == Some(&'-') && pattern.get(i + 2).is_some_and(|&e| e != ']') {
+                found |= (p..=pattern[i + 2]).contains(&c);
+                i += 3;
+            } else {
+                found |= p == c;
+                i += 1;
+            }
+            first = false;
+        }
+        None
+    };
+    let (mut p, mut t) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        let step = match pattern.get(p) {
+            Some('*') => {
+                star = Some((p, t));
+                p += 1;
+                continue;
+            }
+            Some('?') => Some(p + 1),
+            Some('[') => class(p + 1, text[t]).and_then(|(hit, end)| hit.then_some(end)),
+            Some(&c) => (c == text[t]).then_some(p + 1),
+            None => None,
+        };
+        match (step, star) {
+            (Some(next), _) => {
+                p = next;
+                t += 1;
+            }
+            (None, Some((at, from))) => {
+                p = at + 1;
+                t = from + 1;
+                star = Some((at, from + 1));
+            }
+            (None, None) => return false,
+        }
+    }
+    pattern[p..].iter().all(|&c| c == '*')
 }
 
 /// The model omp runs when told none: `modelRoles.default` in its `config.yml`, a
@@ -578,5 +691,49 @@ mod tests {
         assert!(pi_rows("no models\n").is_none());
         assert!(pi_joined(None, Vec::new()).unwrap().is_empty());
         assert!(pi_joined(None, vec![json!({"provider": "a", "id": "b"})]).is_err());
+    }
+
+    /// omp lists only what `enabledModels` names: a selector with or without its thinking
+    /// level, a bare id under every provider serving it, a glob; a list naming nothing
+    /// leaves the catalog whole.
+    #[test]
+    fn omp_lists_only_its_enabled_models() {
+        let root = std::env::temp_dir().join(format!("omp-enabled-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.yml"),
+            "modelRoles:\n  default: easycli/claude-opus-5-5:medium\n\
+             enabledModels:\n  - easycli/claude-opus-5-5:medium\n  # Sonnet anywhere\n\
+             \x20 - claude-sonnet-5-5\n  - \"easycli/claude-haiku-*\" # any Haiku\n\
+             disabledProviders:\n  - anthropic\n",
+        )
+        .unwrap();
+        let rows = [
+            "anthropic/claude-opus-5-5",
+            "easycli/claude-opus-5-5",
+            "easycli/claude-sonnet-5-5",
+            "anthropic/claude-sonnet-5-5",
+            "easycli/claude-haiku-5-5",
+            "easycli/claude-fable-5-1",
+            "openai/gpt-6",
+        ]
+        .map(|selector| json!({"selector": selector}));
+        let catalog = omp_offers(json!({"models": rows}).to_string().as_bytes()).unwrap();
+        let enabled = crate::harness::omp_list(&root, "enabledModels").unwrap();
+        let kept = omp_enabled(catalog.clone(), &enabled);
+        let names: Vec<&str> = kept.iter().map(|m| m.model.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "easycli/claude-opus-5-5",
+                "easycli/claude-sonnet-5-5",
+                "anthropic/claude-sonnet-5-5",
+                "easycli/claude-haiku-5-5"
+            ]
+        );
+        std::fs::write(root.join("config.yml"), "enabledModels: [nobody-here]\n").unwrap();
+        let enabled = crate::harness::omp_list(&root, "enabledModels").unwrap();
+        assert_eq!(omp_enabled(catalog.clone(), &enabled), catalog);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
