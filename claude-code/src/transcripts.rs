@@ -22,7 +22,7 @@ use std::time::UNIX_EPOCH;
 use serde_json::Value;
 use steery_driver_common::lines::{Line, RECORD, capped, consumed, first_whole};
 use steery_driver_common::quiet::{Quiet, Stamp};
-use steery_driver_common::tree::{Cursor, Trees};
+use steery_driver_common::tree::{Cursor, Trees, Walk};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
@@ -995,9 +995,10 @@ fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
 }
 
 /// The events of a transcript's path after `cursor`, or of its records within `tail`
-/// bytes of its end (`Walk::read`). What a branch left behind spent is still spent: once
-/// the path is read to its end, every record off it written since the last read is given
-/// as its `tokens` alone.
+/// bytes of its end (`Walk::read`). Once the path is read to its end, the records off it
+/// written since the last read follow: the results of calls made together ([`batched`])
+/// as the conversation's own, and every other record as what it spent alone, its
+/// `tokens`: a branch a rewind left behind still spent them.
 fn read_from(
     trees: &Trees<Records>,
     file: &Path,
@@ -1017,20 +1018,29 @@ fn read_from(
                 None if read.from == 0 => Turn::Closed,
                 None => Turn::Unknown,
             };
-            let mut said = events::read(reading, &read.records, turn);
-            for record in &read.aside {
-                if let Some(value) = &record.value {
-                    said.events.extend(events::spent(value));
+            let walked = read.from + read.records.len();
+            let mut records = read.records;
+            let mut spent = Vec::new();
+            let mut places = None;
+            for record in read.aside {
+                let Some(value) = &record.value else { continue };
+                let places = places.get_or_insert_with(|| {
+                    path.iter()
+                        .enumerate()
+                        .map(|(place, node)| (*node, place))
+                        .collect::<HashMap<u32, usize>>()
+                });
+                if batched(&walk, &path, places, value)? {
+                    records.push(record);
+                } else {
+                    spent.extend(events::spent(value));
                 }
             }
+            let mut said = events::read(reading, &records, turn);
+            said.events.extend(spent);
             Ok(Events {
                 cursor: walk
-                    .cursor(
-                        &path,
-                        read.from + read.records.len(),
-                        read.through,
-                        turn_mark(said.turn),
-                    )
+                    .cursor(&path, walked, read.through, turn_mark(said.turn))
                     .said(CURSOR),
                 events: said.events,
                 more: read.more,
@@ -1040,6 +1050,38 @@ fn read_from(
             })
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))
+}
+
+/// Whether `record`, off `path`, holds the results of calls made together. Claude Code
+/// writes a response one block a record, each the parent of the next, and files a call's
+/// result under the record of its call (Claude Code 2.1.312): of calls made together, the
+/// path runs through the last one's result alone. Claude Code sends every result back to
+/// the model, so each is the conversation's: a record of results whose parent lies on the
+/// path, followed there by a record of the same response. A branch a rewind leaves behind
+/// starts at a prompt, never inside a response. `places` is each path record's place on it.
+fn batched(
+    walk: &Walk<'_>,
+    path: &[u32],
+    places: &HashMap<u32, usize>,
+    record: &Value,
+) -> Result<bool, String> {
+    if !events::returns(record) {
+        return Ok(false);
+    }
+    let Some((parent, next)) = text(record, "parentUuid")
+        .and_then(|parent| walk.named(parent))
+        .and_then(|parent| Some((parent, *path.get(places.get(&parent)? + 1)?)))
+    else {
+        return Ok(false);
+    };
+    let response = |node: u32| -> Result<Option<String>, String> {
+        let record = walk.record(walk.tree.node(node))?;
+        Ok(record.value.as_ref().and_then(events::response).map(str::to_owned))
+    };
+    Ok(match (response(parent)?, response(next)?) {
+        (Some(parent), Some(next)) => parent == next,
+        _ => false,
+    })
 }
 
 #[cfg(test)]
@@ -1608,6 +1650,74 @@ mod tests {
         assert!(
             !on.reset && on.events.is_empty(),
             "each response given once"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Calls made together are one response written a block a record, each the parent of
+    /// the next, and each result is filed under its own call's record (Claude Code 2.1.312):
+    /// the path runs through the last call's result alone. Every call still comes back,
+    /// once, whichever order the results land in; a result off a branch that does not
+    /// split one response is a rewind's, and never ends a call.
+    #[test]
+    fn every_call_made_together_comes_back() {
+        let root = scratch();
+        let id = "efefefef-efef-4fef-8fef-efefefefefef";
+        let file = root.join(format!("projects/-w/{id}.jsonl"));
+        let start = json!({"type":"user","uuid":"u","parentUuid":null,"origin":{"kind":"human"},"message":{"role":"user","content":"look around"}});
+        let call = |n: u8, parent: &str| {
+            json!({"type":"assistant","uuid":format!("c{n}"),"parentUuid":parent,"message":{"id":"m","role":"assistant",
+                "model":"claude-opus-5","content":[{"type":"tool_use","id":format!("t{n}"),"name":"Bash","input":{"command":"ls"}}],
+                "usage":{"input_tokens":10,"output_tokens":3}}})
+        };
+        let result = |call: &str, parent: &str| {
+            json!({"type":"user","uuid":format!("r-{call}"),"parentUuid":parent,"message":{"role":"user",
+                "content":[{"type":"tool_result","tool_use_id":call,"content":"listed"}]}})
+        };
+        let made = [
+            start.clone(),
+            call(1, "u"),
+            call(2, "c1"),
+            call(3, "c2"),
+            result("t3", "c3"),
+        ];
+        write(&file, &made);
+        let store = Store::new(root.clone());
+        let back = |events: &[Event]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::CallEnded { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let first = reading(&store, id, None, None);
+        assert_eq!(back(&first.events), ["t3"]);
+
+        let mut landed = made.to_vec();
+        landed.extend([
+            result("t1", "c1"),
+            result("t2", "c2"),
+            result("t9", "u"),
+            json!({"type":"assistant","uuid":"d","parentUuid":"r-t3","message":{"id":"n","role":"assistant",
+                "model":"claude-opus-5","stop_reason":"end_turn","content":[{"type":"text","text":"done"}],
+                "usage":{"input_tokens":10,"output_tokens":1}}}),
+        ]);
+        write(&file, &landed);
+        let next = reading(&store, id, Some(&first.cursor), None);
+        assert!(!next.reset);
+        assert_eq!(back(&next.events), ["t1", "t2"], "the results off the path");
+        assert!(
+            reading(&store, id, Some(&next.cursor), None)
+                .events
+                .is_empty(),
+            "each once"
+        );
+        assert_eq!(
+            back(&reading(&store, id, None, None).events),
+            ["t3", "t1", "t2"],
+            "read whole"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
