@@ -513,51 +513,65 @@ pub(crate) fn managed_files() -> Vec<PathBuf> {
     files
 }
 
-/// The models an administrator allows (`availableModels` in managed settings), the last
-/// file that sets it winning; none where no file restricts them. A value that is not a list
-/// allows none but Claude Code's default, as Claude Code enforces it.
-fn allowed(files: &[PathBuf]) -> Option<Vec<String>> {
-    files
+/// The models Claude Code lets run here (`availableModels`,
+/// https://code.claude.com/docs/en/model-config, "Merge behavior"): a managed file's list
+/// where one sets it, the last that does winning, which nothing else extends; else the user
+/// settings' own (`<root>/settings.json`). Project and local settings only add to that list,
+/// for their own folder, so a list for the whole machine leaves them out. None where no file
+/// restricts them. A value that is not a list allows none but Claude Code's default, as
+/// Claude Code enforces it.
+fn allowed(managed: &[PathBuf], root: &Path) -> Option<Vec<String>> {
+    let listed = |file: &Path| -> Option<Vec<String>> {
+        let value: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+        let listed = value.get("availableModels")?;
+        Some(
+            listed
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|entry| entry.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    };
+    managed
         .iter()
-        .filter_map(|file| {
-            let value: Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
-            let listed = value.get("availableModels")?;
-            Some(
-                listed
-                    .as_array()
-                    .map(|entries| {
-                        entries
-                            .iter()
-                            .filter_map(|entry| entry.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            )
-        })
+        .filter_map(|file| listed(file))
         .last()
+        .or_else(|| listed(&root.join("settings.json")))
 }
 
-/// Whether the allowlist entry `entry` lets `model` run, by the page's rule ("Restrict
-/// model selection"): an entry is a family (`sonnet`), a version prefix
-/// (`claude-sonnet-4-5`, also allowing later ids that extend it) or a full id. An alias is
-/// allowed where any version of a family it runs is: Claude Code then runs the newest one
-/// allowed.
-fn permits(entry: &str, model: &str) -> bool {
+/// Whether the allowlist (`availableModels`, [`allowed`]) lets `model` run, by the page's
+/// rules ("Restrict model selection", "Merge behavior"): every model where none is set. An
+/// entry is a family (`sonnet`), a version prefix (`claude-sonnet-4-5`, also allowing later
+/// ids that extend it) or a full id; an entry naming a version of a family turns that
+/// family's own entry off. An alias runs where every family it may run is allowed: Claude
+/// Code then runs the newest version allowed, and `best` with Fable blocked is no Fable.
+fn allows(allowed: Option<&[String]>, model: &str) -> bool {
+    let Some(allowed) = allowed else {
+        return true;
+    };
     let model = model.strip_suffix("[1m]").unwrap_or(model);
-    let families: &[&str] = ALIASES
-        .iter()
-        .find(|(alias, ..)| *alias == model)
-        .map(|(_, _, families)| *families)
-        .unwrap_or_default();
-    let family = |family: &str| entry == family || entry.starts_with(&format!("claude-{family}"));
-    if !families.is_empty() {
-        return families.iter().any(|&one| family(one));
+    let versioned = |family: &str| -> String { format!("claude-{family}") };
+    if let Some((.., families)) = ALIASES.iter().find(|(alias, ..)| *alias == model) {
+        return families.iter().all(|family| {
+            allowed
+                .iter()
+                .any(|entry| entry == family || entry.starts_with(&versioned(family)))
+        });
     }
-    if entry.contains('-') {
-        model == entry || model.starts_with(&format!("{entry}-"))
-    } else {
-        model.starts_with(&format!("claude-{entry}"))
-    }
+    allowed.iter().any(|entry| {
+        if entry.contains('-') {
+            model == entry || model.starts_with(&format!("{entry}-"))
+        } else {
+            model.starts_with(&versioned(entry))
+                && !allowed
+                    .iter()
+                    .any(|other| other.starts_with(&versioned(entry)))
+        }
+    })
 }
 
 /// Whether Claude Code is logged in here, as `claude auth status --json` says it: its
@@ -596,38 +610,52 @@ async fn signed_in() -> Option<bool> {
     said
 }
 
-/// Whether an administrator's allowlist (`availableModels`, [`allowed`]) lets `model` run:
-/// every model where none is set.
-fn allows(allowed: Option<&[String]>, model: &str) -> bool {
-    allowed.is_none_or(|allowed| allowed.iter().any(|entry| permits(entry, model)))
-}
-
 /// `models`: Claude Code names no models on its command line. It lists its documented
 /// aliases ([`ALIASES`]), the one this machine chose in its own settings (`model` in
 /// `settings.json`) first, each with the effort levels it takes ([`turn::efforts`]), any
-/// other model it runs taking every level; only those an administrator's managed settings
-/// allow. It says whether Claude Code is logged in ([`signed_in`]), so a login made in a
-/// terminal lifts a sign-in failure on its own (Ali's first run, #product Slack thread
+/// other model it runs taking every level; only those its `availableModels` allow
+/// ([`allowed`]). It says whether Claude Code is logged in ([`signed_in`]), so a login made
+/// in a terminal lifts a sign-in failure on its own (Ali's first run, #product Slack thread
 /// 2026-10-19), and watches the files a login, a model choice and a policy change rewrite.
 pub async fn models(home: &Path, root: &Path) -> Models {
-    let settings = root.join("settings.json");
+    let managed = managed_files();
+    let models = listed(root, &managed);
+    let mut watch = vec![
+        root.join("settings.json"),
+        crate::state_file(home, root),
+        // Where Claude Code keeps a login's credentials outside a keychain.
+        root.join(".credentials.json"),
+    ];
+    watch.extend(managed);
+    Models {
+        models,
+        unlisted: Some(Unlisted {
+            thinking: EFFORT.map(String::from).to_vec(),
+        }),
+        watch,
+        signed_in: signed_in().await,
+    }
+}
+
+/// The models [`models`] lists, read from the configuration folder `root` and the
+/// `managed` settings files.
+fn listed(root: &Path, managed: &[PathBuf]) -> Vec<Model> {
     let thinking = |model: &str| -> Vec<String> {
         turn::efforts(model).iter().map(|&level| level.to_owned()).collect()
     };
-    let chosen = std::fs::read(&settings)
+    let chosen = std::fs::read(root.join("settings.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .and_then(|value| value.get("model")?.as_str().map(str::to_owned))
         .filter(|model| !model.is_empty() && model != "default");
-    let managed = managed_files();
-    let allowed = allowed(&managed);
+    let allowed = allowed(managed, root);
     let mut models: Vec<Model> = ALIASES
         .iter()
         .map(|(alias, label, _)| Model {
             provider: None,
             model: (*alias).to_owned(),
             label: Some((*label).to_owned()),
-            thinking: thinking(*alias),
+            thinking: thinking(alias),
             cost: None,
         })
         .collect();
@@ -645,26 +673,12 @@ pub async fn models(home: &Path, root: &Path) -> Models {
         models.insert(0, first);
     }
     models.retain(|model| allows(allowed.as_deref(), &model.model));
-    let mut watch = vec![
-        settings,
-        crate::state_file(home, root),
-        // Where Claude Code keeps a login's credentials outside a keychain.
-        root.join(".credentials.json"),
-    ];
-    watch.extend(managed);
-    Models {
-        models,
-        unlisted: Some(Unlisted {
-            thinking: EFFORT.map(String::from).to_vec(),
-        }),
-        watch,
-        signed_in: signed_in().await,
-    }
+    models
 }
 
 /// `start`: the plan of a turn this driver's own binary runs in its turn mode
 /// ([`turn`]), the words on standard input. A continue or a fork names a conversation
-/// Claude Code has here; a model is one an administrator's managed settings let run, as
+/// Claude Code has here; a model is one its `availableModels` let run ([`allows`]), as
 /// `models` lists it or as any other model it runs; an effort is one of Claude's own
 /// levels.
 pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
@@ -696,7 +710,8 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
         ));
     }
     if let Some(model) = &start.model
-        && (model.trim().is_empty() || !allows(allowed(&managed_files()).as_deref(), model))
+        && (model.trim().is_empty()
+            || !allows(allowed(&managed_files(), store.root()).as_deref(), model))
     {
         return Err(Error::refused(
             refusal::MODEL_MISSING,
@@ -997,6 +1012,47 @@ mod tests {
             (failed.state, failed.error.as_deref()),
             (Execution::Failed, Some("Credit balance is too low"))
         );
+    }
+
+    /// A machine lists what `availableModels` allows: the user's own list where no managed
+    /// file sets one, the managed list alone where one does. An alias goes when a model it
+    /// may run is blocked (`best` with Fable out), `haiku` takes every effort, and a version
+    /// entry turns its family's own entry off for the ids a turn may name.
+    #[test]
+    fn the_allowlist_decides_what_is_listed_and_run() {
+        let bench = crate::registry::tests::Scratch::new("allowlist");
+        let root = bench.path();
+        std::fs::write(
+            root.join("settings.json"),
+            r#"{"model": "opus", "availableModels": ["opus", "sonnet", "haiku"]}"#,
+        )
+        .unwrap();
+        let named = |models: &[Model]| models.iter().map(|m| m.model.clone()).collect::<Vec<_>>();
+        let users = listed(root, &[]);
+        assert_eq!(
+            named(&users),
+            ["opus", "sonnet", "haiku", "opusplan", "opus[1m]", "sonnet[1m]"]
+        );
+        let haiku = users.iter().find(|m| m.model == "haiku").unwrap();
+        assert_eq!(haiku.thinking, EFFORT, "Haiku 5.5 takes up to max");
+        let managed = root.join("managed-settings.json");
+        std::fs::write(&managed, r#"{"availableModels": ["sonnet", "claude-opus-4-8"]}"#).unwrap();
+        let managed = [managed];
+        assert_eq!(
+            named(&listed(root, &managed)),
+            ["opus", "sonnet", "opusplan", "opus[1m]", "sonnet[1m]"],
+            "the managed list replaces the user's"
+        );
+        let allowed = allowed(&managed, root);
+        let runs = |model: &str| allows(allowed.as_deref(), model);
+        assert!(runs("claude-opus-4-8") && runs("claude-opus-4-8-20260101"));
+        assert!(!runs("claude-opus-5-5") && !runs("claude-fable-5-1") && !runs("best"));
+        let both = [String::from("opus"), String::from("claude-opus-4-8")];
+        assert!(
+            !allows(Some(&both), "claude-opus-5-5"),
+            "a version entry turns its family's entry off"
+        );
+        assert!(allows(None, "claude-fable-5-1"), "no list, no limit");
     }
 
     /// Only one person's input carrying the whole marker is a receipt; a marker quoted in

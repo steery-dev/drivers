@@ -50,13 +50,13 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
 
 /// Every entry, in the order Claude Code reads them.
 fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
-    let servers = crate::state_file(home, root);
+    let state = crate::state_file(home, root);
     let mut entries = vec![
         // A per-server `timeout`, in milliseconds, is at once the bound on one call and the
         // floor of Claude Code's idle watchdog on an `http` server. Claude Code reads no
         // per-conversation headers from this file.
         Entry {
-            path: servers,
+            path: state.clone(),
             format: Format::Json,
             at: Some(format!("/mcpServers/{}", crate::STEERY)),
             value: json!({
@@ -93,6 +93,19 @@ fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
         }),
         carries: vec![Part::Hooks],
     }));
+    // Claude Code starts a background session only in a folder its person trusted, or one
+    // under it: on a host made for its conversations nobody opens a terminal to answer
+    // that, so the folders the runtime names are trusted as their person would.
+    entries.extend(setup.trusts.iter().filter_map(|folder| {
+        let key = folder.to_str()?.replace('~', "~0").replace('/', "~1");
+        Some(Entry {
+            path: state.clone(),
+            format: Format::Json,
+            at: Some(format!("/projects/{key}/hasTrustDialogAccepted")),
+            value: json!(true),
+            carries: Vec::new(),
+        })
+    }));
     entries
 }
 
@@ -113,6 +126,7 @@ mod tests {
             door: "ws://127.0.0.1:7777/door".into(),
             release: "1.0.0".into(),
             timeout: 120,
+            trusts: Vec::new(),
         }
     }
 
@@ -171,5 +185,32 @@ mod tests {
             );
             assert_eq!(command["timeout"], json!(hook.waits));
         }
+    }
+
+    /// A folder the runtime names is trusted where Claude Code looks for its person's
+    /// answer, and nothing is trusted where it names none: a person's own computer.
+    #[test]
+    fn only_the_folders_the_runtime_names_are_trusted() {
+        let home = Path::new("/home/daytona");
+        let root = home.join(".claude");
+        let trusted = |setup: &Setup| -> Vec<Entry> {
+            entries(home, &root, setup)
+                .into_iter()
+                .filter(|entry| entry.carries.is_empty())
+                .collect()
+        };
+        assert!(trusted(&setup()).is_empty());
+        let made = Setup {
+            trusts: vec![home.to_owned()],
+            ..setup()
+        };
+        let trusts = trusted(&made);
+        assert_eq!(trusts.len(), 1);
+        assert_eq!(trusts[0].path, home.join(".claude.json"));
+        assert_eq!(
+            trusts[0].at.as_deref(),
+            Some("/projects/~1home~1daytona/hasTrustDialogAccepted")
+        );
+        assert_eq!(trusts[0].value, json!(true));
     }
 }

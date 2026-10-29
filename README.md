@@ -235,9 +235,10 @@ What each driver does:
   `terminal`).
   - `held`: no registry, so the runtime looks for processes. In pi it also looks for a
     stray process, since a pi without the plugin holds no file open.
-  - `models`: omp's comes from `omp models --json`, with its default from `config.yml`, or
-    `config.yaml` where that is the only one there (omp itself reads both, in that order,
-    and writes the one it read; omp's code names `config.yaml` its legacy-compatible fallback).
+  - `models`: omp's comes from `omp models --json`, only those its `enabledModels` names
+    where it names any, with its default from `config.yml`, or `config.yaml` where that is
+    the only one there (omp itself reads both, in that order, and writes the one it read;
+    omp's code names `config.yaml` its legacy-compatible fallback).
     pi's comes from `pi --list-models` and its RPC mode's `get_available_models`.
   - `start`: a turn is a kept process, `--mode rpc` (omp's with `--no-ui`) with its
     standard input held: it stays up between turns and takes every turn's words, the first
@@ -337,9 +338,11 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
     the transcript past a mark.
   - `models`: Claude Code's documented aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
     `opusplan`, `opus[1m]`, `sonnet[1m]`), the model in `settings.json` first, only those
-    managed settings' `availableModels` allow, each with Claude Code's effort levels, as any
-    other it runs; and `signed_in` from `claude auth status`, watching the files a login
-    rewrites (`.claude.json`, `.credentials.json`).
+    `availableModels` allows (the managed list where one is set, else the user's
+    `settings.json`; an alias only where every model it may run is allowed), each with
+    Claude Code's effort levels, as any other it runs; and `signed_in` from
+    `claude auth status`, watching the files a login rewrites (`.claude.json`,
+    `.credentials.json`).
   - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode` and no session
     kept.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session

@@ -270,6 +270,7 @@ mod tests {
             door: "ws://127.0.0.1:7777/door".into(),
             release: "1.0.0".into(),
             timeout: 120,
+            trusts: Vec::new(),
         }
     }
 
