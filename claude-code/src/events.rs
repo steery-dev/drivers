@@ -109,6 +109,25 @@ pub fn spent(record: &Value) -> Option<Event> {
     ))
 }
 
+/// The response a record is one block of: an assistant record's `message.id`. Claude Code
+/// writes a response one content block a record, each the parent of the next.
+pub fn response(record: &Value) -> Option<&str> {
+    record
+        .get("message")
+        .filter(|_| text(record, "type") == Some("assistant"))
+        .and_then(|message| text(message, "id"))
+}
+
+/// Whether a record carries calls' results: a user record of `tool_result` blocks.
+pub fn returns(record: &Value) -> bool {
+    text(record, "type") == Some("user")
+        && record.pointer("/message/content").is_some_and(|content| {
+            blocks(content)
+                .iter()
+                .any(|block| text(block, "type") == Some("tool_result"))
+        })
+}
+
 /// One response's `usage`: what it read fresh, wrote to a cache and read from one are all
 /// of `input`; its thinking is of `output`. `context_left` is the share of the window left
 /// after it, where it is on the conversation's path.
