@@ -65,6 +65,12 @@ const FOLLOW_EVERY: Duration = Duration::from_secs(1);
 /// How long a session `claude --bg` started has to be listed.
 const LISTED_WITHIN: Duration = Duration::from_secs(90);
 
+/// How long a turn is followed while its sessions cannot be listed. Claude Code replaces
+/// itself as it updates, and its session goes on meanwhile: an npm global update from
+/// 2.1.314 to 2.1.316 left no `claude` at its path for 35 s, and every turn followed then
+/// read as never started while its session worked on.
+const UNLISTED_FOR: Duration = Duration::from_secs(300);
+
 /// How long Claude Code gives the `heard` hook: it appends one line to a file.
 const HEARD_WAITS: u32 = 5;
 
@@ -322,8 +328,25 @@ async fn follow(
     let listed_by = tokio::time::Instant::now() + LISTED_WITHIN;
     let mut last: Option<Value> = None;
     let mut follow = Follow::default();
+    let mut unlisted_since: Option<tokio::time::Instant> = None;
     loop {
-        let listed = agents::agents(&turn.binary).await?;
+        let listed = match agents::agents(&turn.binary).await {
+            Ok(listed) => {
+                unlisted_since = None;
+                listed
+            }
+            Err(error) => {
+                let since = *unlisted_since.get_or_insert_with(tokio::time::Instant::now);
+                if since.elapsed() >= UNLISTED_FOR {
+                    return Err(format!(
+                        "{error}, and for {} s no listing came",
+                        since.elapsed().as_secs()
+                    ));
+                }
+                tokio::time::sleep(FOLLOW_EVERY).await;
+                continue;
+            }
+        };
         match listed
             .into_iter()
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&short))
@@ -754,5 +777,58 @@ mod tests {
             "the copy is stopped and removed"
         );
         assert!(out.is_empty());
+    }
+
+    /// Claude Code replacing itself mid-turn leaves no `claude` to list its sessions for a
+    /// while, and the session goes on: the follower reads past that stretch to the turn's
+    /// own end instead of reading the turn as never started.
+    #[tokio::test]
+    async fn a_turn_is_followed_through_claude_code_replacing_itself() {
+        let dir = Scratch::new("updating");
+        let binary = dir.path().join("claude");
+        let entry = |state: &str| {
+            format!(
+                r#"[{{"id":"186b32ef","kind":"background","sessionId":"s-1","pid":7,"startedAt":{},"state":"{state}","status":"busy"}}]"#,
+                u64::MAX / 2
+            )
+        };
+        crate::tests::stand_in(
+            &binary,
+            &format!(
+                "#!/bin/sh\nd='{d}'\ncase \"$1\" in\n  --bg) echo 'backgrounded · 186b32ef' ;;\n  agents)\n    n=$(( $(cat \"$d/n\" 2>/dev/null || echo 0) + 1 )); echo $n > \"$d/n\"\n    case $n in\n      1) printf '%s\\n' '{working}' ;;\n      2) mv \"$0\" \"$0.away\"; exit 1 ;;\n      *) printf '%s\\n' '{done}' ;;\n    esac ;;\nesac\n",
+                d = dir.path().display(),
+                working = entry("working"),
+                done = entry("done"),
+            ),
+        );
+        let away = dir.path().join("claude.away");
+        let restore = {
+            let (away, binary) = (away.clone(), binary.clone());
+            tokio::spawn(async move {
+                while !away.exists() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                std::fs::rename(&away, &binary).unwrap();
+            })
+        };
+        let new = Turn {
+            binary: binary.clone(),
+            ..turn(Act::New, None, false)
+        };
+        let mut out = Vec::new();
+        follow(&new, dir.path(), false, "go", &mut out)
+            .await
+            .expect("the turn is followed to its end");
+        restore.await.unwrap();
+        let last: Value =
+            serde_json::from_str(String::from_utf8(out).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(last["settled"]["state"], "done", "{last}");
+        let listings: u32 = std::fs::read_to_string(dir.path().join("n"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(listings >= 3, "it listed again once claude was back");
     }
 }
