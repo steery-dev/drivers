@@ -6,7 +6,9 @@
 //! block of a response each, every one repeating the response's `message.id` and its
 //! `usage`, and `system` records carry the harness's bookkeeping. A sub-agent's records are
 //! marked `isSidechain`: in its own transcript they are its own, and in its lead's (where
-//! older releases inlined them) they are none of the lead's.
+//! older releases inlined them) they are none of the lead's. Words that arrive while a turn
+//! runs — a person typing, another session's message through the inbox — are an
+//! `attachment` record instead ([`queued`]), and the turn goes on with them.
 //!
 //! A turn begins at what the agent is given to work on: a person's message, a command, a
 //! notice from a background task. It ends at the agent's last answer of it, which stops for
@@ -194,6 +196,13 @@ impl State<'_> {
         match text(record, "type") {
             Some("user") => self.user(id, record),
             Some("assistant") => self.assistant(id, record),
+            Some("attachment") => {
+                if let Some(queued) = queued(record)
+                    && let Some((said, clips)) = person(queued, queued.get("prompt"))
+                {
+                    self.words(id, Voice::Person, said, None, clips);
+                }
+            }
             Some("system") if text(record, "subtype") == Some("turn_duration") => {
                 self.end(TurnState::Finished, None);
             }
@@ -267,7 +276,7 @@ impl State<'_> {
         }
         self.notified(&said);
         self.begin();
-        if let Some((said, clips)) = person(record) {
+        if let Some((said, clips)) = person(record, record.pointer("/message/content")) {
             self.words(id, Voice::Person, said, None, clips);
         }
     }
@@ -626,21 +635,36 @@ pub fn context_full(api_error: Option<&str>, said: &str) -> bool {
             .any(|opening| said.trim_start().starts_with(opening))
 }
 
-/// What a person put in a record, and what it carried: only a message Claude Code marks
-/// as theirs (`origin.kind` `human`), never the harness's own notes inside it
-/// (`<system-reminder>`), and never a message that is one element and nothing else, which
-/// is how a harness posts in a person's place.
-fn person(record: &Value) -> Option<(String, Vec<Clip>)> {
-    if record.pointer("/origin/kind").and_then(Value::as_str) != Some("human") {
+/// What a person put in a message, and what it carried: only one Claude Code marks as
+/// theirs (`origin.kind` `human` on `holder`, the record or the attachment that carries
+/// `content`), never the harness's own notes inside it (`<system-reminder>`), and never a
+/// message that is one element and nothing else, which is how a harness posts in a person's
+/// place.
+fn person(holder: &Value, content: Option<&Value>) -> Option<(String, Vec<Clip>)> {
+    if holder.pointer("/origin/kind").and_then(Value::as_str) != Some("human") {
         return None;
     }
-    let content = record.pointer("/message/content")?;
+    let content = content?;
     let said = without_reminders(&texts(content)).trim().to_owned();
     if enveloped(&said) {
         return None;
     }
     let clips: Vec<Clip> = blocks(content).iter().filter_map(carried).collect();
     (!said.is_empty() || !clips.is_empty()).then_some((said, clips))
+}
+
+/// The words Claude Code took in while a turn ran: an `attachment` record whose
+/// `attachment` is a `queued_command` prompt, carrying the words as `prompt` and who sent
+/// them as `origin` (`human`, or `peer` through the inbox). No `user` record repeats them
+/// (Claude Code 2.1.316). A sub-agent's own (`isSidechain`) is none of its lead's.
+pub fn queued(record: &Value) -> Option<&Value> {
+    if text(record, "type") != Some("attachment") || flag(record, "isSidechain") {
+        return None;
+    }
+    let attachment = record.get("attachment")?;
+    (text(attachment, "type") == Some("queued_command")
+        && text(attachment, "commandMode") == Some("prompt"))
+    .then_some(attachment)
 }
 
 /// The words a user record gives the agent to work on: what it says, the harness's notes
@@ -1351,6 +1375,34 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// What a person types while a turn runs is a queued prompt, which no `user` record
+    /// repeats: their words, in the turn that was running. Another session's message queued
+    /// the same way is no person's. The records' shape as Claude Code 2.1.316 wrote them.
+    #[test]
+    fn words_typed_while_a_turn_runs_are_the_persons() {
+        let queued = |uuid: &str, origin: &str, prompt: &str| {
+            json!({"type": "attachment", "uuid": uuid, "isSidechain": false,
+                "attachment": {"type": "queued_command", "commandMode": "prompt",
+                    "origin": {"kind": origin}, "prompt": prompt}})
+        };
+        let read = events(&[
+            json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "review the PR"}}),
+            queued("q1", "human", "I cannot follow this PR, explain it simply"),
+            queued("q2", "peer", "Another Claude session sent a message:\nhello"),
+            json!({"type": "assistant", "message": {"id": "m", "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Here it is, simply."}]}}),
+        ]);
+        assert_eq!(turns(&read), ["began", "Finished"]);
+        assert_eq!(
+            said(&read),
+            [
+                (Voice::Person, "review the PR"),
+                (Voice::Person, "I cannot follow this PR, explain it simply"),
+                (Voice::Agent, "Here it is, simply."),
+            ]
+        );
     }
 
     /// A compaction is its `compact_boundary`: who made it by its `trigger`, and the
