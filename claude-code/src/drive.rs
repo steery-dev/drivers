@@ -428,8 +428,15 @@ pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
 
 /// Whether a record is a person's input whose text carries `marker` whole. Words sent
 /// through a live session's inbox arrive as another session's message: `isMeta`, with a
-/// `peer` origin. They are the input all the same.
+/// `peer` origin. They are the input all the same. Sent while a turn runs, they arrive as
+/// a queued prompt instead ([`crate::events::queued`]), and no `user` record repeats them.
 fn input_carries(record: &Value, marker: &str) -> bool {
+    if let Some(queued) = crate::events::queued(record) {
+        return matches!(
+            queued.pointer("/origin/kind").and_then(Value::as_str),
+            Some("human" | "peer")
+        ) && carries(queued.get("prompt"), marker);
+    }
     let input = record.get("type").and_then(Value::as_str) == Some("user")
         && (record.get("isMeta").and_then(Value::as_bool) != Some(true)
             || record.pointer("/origin/kind").and_then(Value::as_str) == Some("peer"))
@@ -438,10 +445,13 @@ fn input_carries(record: &Value, marker: &str) -> bool {
     let Some(message) = record.get("message").filter(|_| input) else {
         return false;
     };
-    if message.get("role").and_then(Value::as_str) != Some("user") {
-        return false;
-    }
-    match message.get("content") {
+    message.get("role").and_then(Value::as_str) == Some("user")
+        && carries(message.get("content"), marker)
+}
+
+/// Whether a message's content, its text or any of its text parts, carries `marker` whole.
+fn carries(content: Option<&Value>, marker: &str) -> bool {
+    match content {
         Some(Value::String(text)) => receipt::marked(text, marker),
         Some(Value::Array(parts)) => parts.iter().any(|part| {
             part.get("type").and_then(Value::as_str) == Some("text")
@@ -1111,6 +1121,27 @@ mod tests {
             Ok(false),
             "a record not yet ended is left for the next look"
         );
+    }
+
+    /// Words sent through the inbox while a turn runs are a queued prompt, which no `user`
+    /// record repeats: that is the receipt, and the words are never handed again. A task's
+    /// notice queued the same way, or a sub-agent's, is none. The records' shape as Claude
+    /// Code 2.1.316 wrote them.
+    #[test]
+    fn words_queued_while_a_turn_runs_are_their_receipt() {
+        let queued = |origin: &str, mode: &str, sidechain: bool| {
+            json!({"type": "attachment", "isSidechain": sidechain, "uuid": "1a08",
+                "timestamp": "2026-10-31T07:46:00.397Z",
+                "attachment": {"type": "queued_command", "commandMode": mode, "isMeta": true,
+                    "origin": {"kind": origin, "from": "unknown"},
+                    "prompt": "Another Claude session sent a message:\nsteery-delivery:d1 read it back"}})
+            .to_string()
+        };
+        let carried = |record: String| receipt::carried(format!("{record}\n").as_bytes(), "d1", input_carries);
+        assert_eq!(carried(queued("peer", "prompt", false)), Ok(true));
+        assert_eq!(carried(queued("human", "prompt", false)), Ok(true));
+        assert_eq!(carried(queued("task-notification", "task-notification", false)), Ok(false));
+        assert_eq!(carried(queued("peer", "prompt", true)), Ok(false));
     }
 
     /// Every switch the reader claims is passed, and nothing that writes or skips a
