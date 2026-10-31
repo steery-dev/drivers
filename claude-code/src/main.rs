@@ -283,8 +283,11 @@ fn info() -> wire::HarnessInfo {
             by_file: false,
             // Claude Code resumes a conversation by its id from any folder.
             resumes_in_place: false,
-            // `--resume` beside a live session is refused, and with `--bg` starts a copy.
-            forks_beside: false,
+            // `--resume` beside a live session is refused, but `--resume <id> --fork-session`
+            // beside it starts its own copy under a new id, with `--bg` too (Claude Code
+            // 2.1.316, 2026-10-31: forked beside a live background session, it answered with
+            // the whole history in hand).
+            forks_beside: true,
             keeps: wire::Keeps {
                 model: true,
                 thinking: true,
