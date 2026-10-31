@@ -480,7 +480,7 @@ impl Heard {
             .ok()?
             .split(|byte| *byte == b'\n')
             .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-            .last()
+            .next_back()
     }
 }
 

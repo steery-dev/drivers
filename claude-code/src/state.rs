@@ -122,7 +122,7 @@ impl Followed {
             thinking: now.thinking,
             context_left: now.context_left,
             dialog: (entry.status.as_deref() == Some("waiting"))
-                .then(|| entry.waiting_for.as_deref())
+                .then_some(entry.waiting_for.as_deref())
                 .flatten()
                 .map(|waiting| dialog(waiting, since)),
             ..LiveState::default()

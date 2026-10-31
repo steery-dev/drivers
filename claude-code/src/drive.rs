@@ -549,7 +549,7 @@ fn allowed(managed: &[PathBuf], root: &Path) -> Option<Vec<String>> {
     managed
         .iter()
         .filter_map(|file| listed(file))
-        .last()
+        .next_back()
         .or_else(|| listed(&root.join("settings.json")))
 }
 
