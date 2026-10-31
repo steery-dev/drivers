@@ -94,7 +94,7 @@ impl Program for Driver {
             program: wire::ProgramInfo {
                 id: harness.id().parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
-                release: env!("CARGO_PKG_VERSION").into(),
+                release: env!("STEERY_PROGRAM_RELEASE").into(),
                 label: harness.label().into(),
                 short: harness.short().into(),
                 tint: Some(harness.tint().into()),

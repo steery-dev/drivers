@@ -153,7 +153,7 @@ impl Program for ClaudeCode {
             program: wire::ProgramInfo {
                 id: "claude-code".parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
-                release: env!("CARGO_PKG_VERSION").into(),
+                release: env!("STEERY_PROGRAM_RELEASE").into(),
                 label: "Claude Code".into(),
                 short: "CC".into(),
                 tint: Some("#c96a4a".into()),

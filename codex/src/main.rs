@@ -126,7 +126,7 @@ impl Program for Codex {
             program: wire::ProgramInfo {
                 id: "codex".parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
-                release: env!("CARGO_PKG_VERSION").into(),
+                release: env!("STEERY_PROGRAM_RELEASE").into(),
                 label: "Codex".into(),
                 short: "Cx".into(),
                 tint: Some("#2f7d66".into()),
