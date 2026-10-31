@@ -49,6 +49,12 @@ pub struct Reading {
 /// One whole record of a transcript, and where it starts: `None` where it is no JSON.
 pub use steery_driver_common::tree::Record;
 
+/// How long a transcript must stand still before an error Claude Code wrote is read as a
+/// turn's end: until then it may be one it gets past, and a retry writes the answer after
+/// it (Claude Code 2.1.237 wrote `API Error: The socket connection was closed
+/// unexpectedly.` mid-response and went on with the same turn).
+pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Where a turn stands between reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Turn {
@@ -59,34 +65,94 @@ pub enum Turn {
     Unknown,
 }
 
+/// What a read does with an error its records leave undecided at their end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// The transcript may still go on: an error Claude Code may get past is left, with
+    /// everything after it, for the next read.
+    Open,
+    /// The transcript stood still for [`SETTLE`]: an error still undecided is its turn's end.
+    Still,
+    /// What was read stands: a batch that held back everything it read would never move on.
+    Forced,
+}
+
 /// What a run of records came to.
 pub struct Read {
     pub events: Vec<Event>,
     /// Where the turn stands after them.
     pub turn: Turn,
+    /// How many of the records these events are of: an error still undecided and what
+    /// follows it are left for the next read.
+    pub consumed: usize,
 }
 
 /// The events of `records`, the records of the conversation's path in order, read on from
-/// where `turn` says the turn stands.
-pub fn read(reading: &Reading, records: &[Record], turn: Turn) -> Read {
+/// where `turn` says the turn stands. `end` says what becomes of an error the records
+/// leave undecided at their end.
+pub fn read(reading: &Reading, records: &[Record], turn: Turn, end: End) -> Read {
     let mut state = State {
         reading,
         at: 0,
+        index: 0,
         turn,
         model: None,
         tokens: None,
         running: HashSet::new(),
         started: None,
+        handbacks: HashSet::new(),
+        pending: None,
         out: Vec::new(),
     };
-    for record in records {
+    let mut consumed = records.len();
+    for (index, record) in records.iter().enumerate() {
+        state.index = index;
         if let Some(value) = &record.value {
             state.record(record.start, value);
         }
     }
+    match state.pending.take() {
+        Some(pending) if end == End::Open => {
+            state.out.truncate(pending.held.mark);
+            consumed = pending.held.index;
+            state.turn = pending.held.turn;
+        }
+        Some(pending) => {
+            state.out.push(pending.ended());
+            state.turn = Turn::Closed;
+        }
+        None => {}
+    }
     Read {
         events: state.out,
         turn: state.turn,
+        consumed,
+    }
+}
+
+/// A record left for the next read with everything after it: which it is, how many events
+/// came before it, and where the turn stood.
+struct Held {
+    index: usize,
+    mark: usize,
+    turn: Turn,
+}
+
+/// An error Claude Code wrote whose turn may still go on.
+struct Pending {
+    at: u64,
+    failure: Failure,
+    held: Held,
+}
+
+impl Pending {
+    fn ended(self) -> Event {
+        Event::TurnEnded {
+            at: self.at,
+            turn: None,
+            state: TurnState::Failed,
+            failure: Some(self.failure),
+        }
     }
 }
 
@@ -162,6 +228,8 @@ fn tokens(
 struct State<'a> {
     reading: &'a Reading,
     at: u64,
+    /// Which record is being read.
+    index: usize,
     turn: Turn,
     /// The model and effort last said.
     model: Option<(String, Option<String>)>,
@@ -173,6 +241,11 @@ struct State<'a> {
     /// The sub-agent each call started, by the `.meta.json` Claude Code files beside each:
     /// read once, where a call needs it.
     started: Option<HashMap<String, String>>,
+    /// The calls that handed a sub-agent's report back to its lead ([`HANDBACK`]), whose
+    /// result ends the sub-agent's own turn.
+    handbacks: HashSet<String>,
+    /// An error Claude Code wrote that its turn may still go on past.
+    pending: Option<Pending>,
     out: Vec<Event>,
 }
 
@@ -196,13 +269,7 @@ impl State<'_> {
         match text(record, "type") {
             Some("user") => self.user(id, record),
             Some("assistant") => self.assistant(id, record),
-            Some("attachment") => {
-                if let Some(queued) = queued(record)
-                    && let Some((said, clips)) = person(queued, queued.get("prompt"))
-                {
-                    self.words(id, Voice::Person, said, None, clips);
-                }
-            }
+            Some("attachment") => self.attachment(id, record),
             Some("system") if text(record, "subtype") == Some("turn_duration") => {
                 self.end(TurnState::Finished, None);
             }
@@ -232,6 +299,21 @@ impl State<'_> {
             tokens_before: tokens("preTokens"),
             tokens_after: tokens("postTokens"),
         });
+    }
+
+    /// An `attachment` record: the words Claude Code took in while a turn ran
+    /// ([`queued`]), or its own notice that a sub-agent running in the background stopped
+    /// ([`notification`]), which is nobody's words and begins no turn.
+    fn attachment(&mut self, id: String, record: &Value) {
+        if let Some(notice) = notification(record) {
+            self.notified(notice);
+            return;
+        }
+        if let Some(queued) = queued(record)
+            && let Some((said, clips)) = person(queued, queued.get("prompt"))
+        {
+            self.words(id, Voice::Person, said, None, clips);
+        }
     }
 
     fn user(&mut self, id: String, record: &Value) {
@@ -286,7 +368,19 @@ impl State<'_> {
             return;
         };
         if flag(record, "isApiErrorMessage") {
-            self.end(TurnState::Failed, Some(failure(record, message)));
+            // Held back: Claude Code writes the error it may still get past, and a retry's
+            // answer follows it in the same turn. Only a transcript that stood still, or a
+            // batch that would otherwise never move on, makes it the turn's end
+            // ([`read`]).
+            self.pending = Some(Pending {
+                at: self.at,
+                failure: failure(record, message, self.at),
+                held: Held {
+                    index: self.index,
+                    mark: self.out.len(),
+                    turn: self.turn,
+                },
+            });
             return;
         }
         let model = text(message, "model").map(str::trim);
@@ -324,6 +418,16 @@ impl State<'_> {
                 .join("\n")
         };
         let thought = joined("thinking", "thinking");
+        let said = joined("text", "text");
+        // The model answered again: an error before it is one Claude Code got past.
+        if !thought.is_empty()
+            || !said.is_empty()
+            || content
+                .iter()
+                .any(|block| text(block, "type") == Some("tool_use"))
+        {
+            self.pending = None;
+        }
         if !thought.is_empty() {
             self.words(
                 format!("{id}:thought"),
@@ -333,7 +437,6 @@ impl State<'_> {
                 Vec::new(),
             );
         }
-        let said = joined("text", "text");
         if !said.is_empty() {
             self.words(id.clone(), Voice::Agent, said, None, Vec::new());
         }
@@ -352,6 +455,9 @@ impl State<'_> {
                 && let Some(agent) = self.started_by(call)
             {
                 self.sub_agent(agent, Some(call.to_owned()), Execution::Running, None);
+            }
+            if self.reading.own && name == HANDBACK {
+                self.handbacks.insert(call.to_owned());
             }
         }
         if let (Some(response), Some(usage)) = (response, message.get("usage")) {
@@ -419,6 +525,10 @@ impl State<'_> {
                 self.sub_agent(agent, Some(call.to_owned()), state, error);
             }
         }
+        let handed = self
+            .handbacks
+            .contains(call)
+            .then(|| (one_line(&said), failed || refused(result)));
         if !said.is_empty() {
             self.words(
                 format!("{id}:{call}"),
@@ -427,6 +537,9 @@ impl State<'_> {
                 Some(call.to_owned()),
                 Vec::new(),
             );
+        }
+        if let Some((said, failed)) = handed {
+            self.handed(&said, failed);
         }
     }
 
@@ -516,7 +629,14 @@ impl State<'_> {
         }
     }
 
+    /// Ends the turn, where one is open. An error Claude Code wrote and did not get past
+    /// is what ended it, whatever the record that says the turn is over
+    /// (`turn_duration`, a stop of its person's): a turn is failed by its final outcome.
     fn end(&mut self, state: TurnState, failure: Option<Failure>) {
+        let (state, failure) = match self.pending.take() {
+            Some(pending) => (TurnState::Failed, Some(pending.failure)),
+            None => (state, failure),
+        };
         if self.turn != Turn::Closed {
             self.out.push(Event::TurnEnded {
                 at: self.at,
@@ -525,6 +645,26 @@ impl State<'_> {
                 failure,
             });
             self.turn = Turn::Closed;
+        }
+    }
+
+    /// A sub-agent handed its report to its lead ([`HANDBACK`]): its own turn is over,
+    /// failed where Claude Code refused the hand-back, in its words.
+    fn handed(&mut self, said: &str, failed: bool) {
+        let failure = failed.then(|| Failure {
+            kind: FailureKind::Other,
+            line: one_line(said),
+            service: false,
+            http_status: None,
+            code: None,
+            retry_at: None,
+            provider: None,
+            model: None,
+            thinking: None,
+        });
+        match failure {
+            Some(failure) => self.end(TurnState::Failed, Some(failure)),
+            None => self.end(TurnState::Finished, None),
         }
     }
 
@@ -556,12 +696,23 @@ const AGENTS: [&str; 2] = ["Task", "Agent"];
 /// The `stop_reason`s of a response that ends its turn: any but a call.
 pub(crate) const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
 
+/// The tool a sub-agent of Claude Code 2.1.316 hands its report back to its lead with: it
+/// ends the sub-agent's own turn, which writes no answer of its own after it.
+const HANDBACK: &str = "SubagentHandback";
+
+/// Whether Claude Code refused a hand-back: its answer says it did not take the report
+/// (`toolUseResult` `success` false).
+fn refused(result: Option<&Value>) -> bool {
+    result.and_then(|result| result.get("success")?.as_bool()) == Some(false)
+}
+
 /// Why a turn failed, as Claude Code recorded it: a context over the model's limit
 /// ([`context_full`]), else by the API's status (`apiErrorStatus`) and its own code
 /// (`error`) ([`failure_kind`]), its words in the message. Every such failure
 /// is the model service's. A limit's end is the quota Claude Code says refused it
-/// (`quotaLimits`, `status` `rejected`): its `resetsAt`, in seconds.
-fn failure(record: &Value, message: &Value) -> Failure {
+/// (`quotaLimits`, `status` `rejected`): its `resetsAt`, in seconds; else the wait it
+/// named in its own words ([`retry_in`]), from `at`.
+fn failure(record: &Value, message: &Value, at: u64) -> Failure {
     let http_status = record
         .get("apiErrorStatus")
         .and_then(Value::as_u64)
@@ -581,13 +732,17 @@ fn failure(record: &Value, message: &Value) -> Failure {
         failure_kind(http_status, code.as_deref())
     };
     let limited = kind == FailureKind::RateLimit;
+    let quota = || {
+        record
+            .get("quotaLimits")
+            .filter(|quota| text(quota, "status") == Some("rejected"))
+            .and_then(|quota| quota.get("resetsAt"))
+            .and_then(Value::as_u64)
+            .and_then(|seconds| seconds.checked_mul(1000))
+    };
     let retry_at = limited
-        .then(|| record.get("quotaLimits"))
-        .flatten()
-        .filter(|quota| text(quota, "status") == Some("rejected"))
-        .and_then(|quota| quota.get("resetsAt"))
-        .and_then(Value::as_u64)
-        .and_then(|seconds| seconds.checked_mul(1000));
+        .then(|| quota().or_else(|| retry_in(&line).and_then(|wait| at.checked_add(wait))))
+        .flatten();
     Failure {
         kind,
         line,
@@ -603,16 +758,34 @@ fn failure(record: &Value, message: &Value) -> Failure {
     }
 }
 
-/// The kind of a failure Claude Code gave up on, by the API's status where it recorded one
-/// and its own code (the transcript's `error`, the `StopFailure` hook's `error`), never by
-/// wording: a 401 or `authentication_failed` is a sign-in it could not make (a service that
-/// answered other than 401 took the sign-in); a 429, 503 or 529, `rate_limit` or
-/// `overloaded` a limit.
+/// How long Claude Code said to wait before trying again, in milliseconds: the `Retry in
+/// <seconds>s` it writes where a service limited it without saying when the limit lifts
+/// (`API Error: Server is temporarily limiting requests (not your usage limit) · All 3
+/// accounts exhausted. Retry in 3600s.`, Claude Code 2.1.219). A wait over a day is none:
+/// no limit Claude Code waits out is that long.
+fn retry_in(said: &str) -> Option<u64> {
+    const DAY: u64 = 24 * 60 * 60;
+    let rest = said.split_once("Retry in ")?.1;
+    let seconds: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    if !rest[seconds.len()..].starts_with('s') {
+        return None;
+    }
+    seconds
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds > 0 && *seconds <= DAY)
+        .map(|seconds| seconds * 1000)
+}
+
+/// The kind of a failure Claude Code gave up on, by its own code (the transcript's
+/// `error`, the `StopFailure` hook's `error`) and the API's status where it recorded one,
+/// never by wording: `authentication_failed` is a sign-in it could not make, whatever the
+/// status beside it — Claude Code 2.1.237 wrote it with a 403 for `Failed to
+/// authenticate. API Error: 403 Request not allowed`, and 2.1.316 writes it with a 401
+/// for an invalid key and with none at all for `Not logged in · Please run /login` — and
+/// so is a bare 401; a 429, 503 or 529, `rate_limit` or `overloaded` a limit.
 pub fn failure_kind(http_status: Option<u16>, code: Option<&str>) -> FailureKind {
-    let signed_out = match http_status {
-        Some(status) => status == 401,
-        None => code == Some("authentication_failed"),
-    };
+    let signed_out = code == Some("authentication_failed") || http_status == Some(401);
     let limited = http_status.is_some_and(|status| matches!(status, 429 | 503 | 529))
         || matches!(code, Some("rate_limit" | "overloaded"));
     if signed_out {
@@ -665,6 +838,22 @@ pub fn queued(record: &Value) -> Option<&Value> {
     (text(attachment, "type") == Some("queued_command")
         && text(attachment, "commandMode") == Some("prompt"))
     .then_some(attachment)
+}
+
+/// Claude Code's own notice that a sub-agent it ran in the background stopped: a
+/// `queued_command` attachment whose `commandMode` is `task-notification`, carrying the
+/// `<task-notification>` element as its `prompt` (Claude Code 2.1.316 files it there and
+/// repeats it in no `user` record). It is nobody's words: it says how a sub-agent ended
+/// ([`State::notified`]) and nothing else.
+fn notification(record: &Value) -> Option<&str> {
+    if text(record, "type") != Some("attachment") || flag(record, "isSidechain") {
+        return None;
+    }
+    let attachment = record.get("attachment")?;
+    (text(attachment, "type") == Some("queued_command")
+        && text(attachment, "commandMode") == Some("task-notification"))
+    .then(|| text(attachment, "prompt"))
+    .flatten()
 }
 
 /// The words a user record gives the agent to work on: what it says, the harness's notes
@@ -873,7 +1062,7 @@ mod tests {
     }
 
     fn events(lines: &[Value]) -> Vec<Event> {
-        read(&reading(false), &records(lines), Turn::Closed).events
+        read(&reading(false), &records(lines), Turn::Closed, End::Still).events
     }
 
     fn said(events: &[Event]) -> Vec<(Voice, &str)> {
@@ -1027,6 +1216,7 @@ mod tests {
             &reading(false),
             &records(&[answered("end_turn")]),
             Turn::Unknown,
+            End::Still,
         );
         assert_eq!(turns(&middle.events), ["Finished"]);
         assert_eq!(middle.turn, Turn::Closed);
@@ -1089,10 +1279,61 @@ mod tests {
         );
         assert_eq!(
             failed(Some(403), "authentication_failed").kind,
-            FailureKind::Other,
-            "a service that answered other than 401 took the sign-in"
+            FailureKind::SignIn,
+            "Claude Code's own code for a sign-in it could not make, whatever the status \
+             beside it: 2.1.237 wrote `Failed to authenticate. API Error: 403 Request not \
+             allowed` with it"
         );
         assert_eq!(failed(None, "invalid_request").kind, FailureKind::Other);
+
+        // When a limit lifts: the quota Claude Code says refused it, else the wait it
+        // named in its own words (records as 2.1.219 and 2.1.316 wrote them).
+        let limited = |extra: Value, said: &str| {
+            let mut record = json!({"type":"assistant","uuid":"9f31","timestamp":"2026-09-03T13:26:16.609Z",
+                "isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"apiErrorIsTransient":true,
+                "message":{"model":"<synthetic>","content":[{"type":"text","text":said}]}});
+            record.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            match events(&[
+                json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
+                record,
+            ])
+            .pop()
+            {
+                Some(Event::TurnEnded {
+                    failure: Some(failure),
+                    ..
+                }) => (failure.kind, failure.retry_at),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            limited(
+                json!({}),
+                "API Error: Server is temporarily limiting requests (not your usage limit) · All 3 accounts exhausted. Retry in 3600s."
+            ),
+            (FailureKind::RateLimit, Some(1_788_441_976_609 + 3_600_000)),
+            "the wait Claude Code named, from when it said it"
+        );
+        assert_eq!(
+            limited(
+                json!({"quotaLimits": {"status": "rejected", "resetsAt": 1_788_460_000u64, "rateLimitType": "five_hour"}}),
+                "You've hit your session limit · resets 5pm"
+            ),
+            (FailureKind::RateLimit, Some(1_788_460_000_000)),
+            "the quota that refused it outranks any wording"
+        );
+        assert_eq!(
+            limited(json!({}), "API Error: Connection closed mid-response.").1,
+            None,
+            "a limit that said nothing of when it lifts says nothing"
+        );
+        assert_eq!(
+            retry_in("Retry in 0s."),
+            None,
+            "a wait of nothing is no wait"
+        );
+        assert_eq!(retry_in("Retry in 90000s"), None, "longer than any limit");
+        assert_eq!(retry_in("Retry in 60 seconds"), None, "not the form it writes");
 
         // A context over the limit, as Claude Code 2.1.281 wrote it: the prompt too long
         // for compaction to save, and compaction thrashing.
@@ -1287,6 +1528,7 @@ mod tests {
                 json!({"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":shell}}),
             ]),
             Turn::Closed,
+            End::Still,
         );
         std::fs::remove_dir_all(&home).ok();
         let agents: Vec<_> = read
@@ -1334,9 +1576,179 @@ mod tests {
                 json!({"type":"assistant","isSidechain":true,"agentId":"f00d","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Half done"}]}}),
             ]),
             Turn::Closed,
+            End::Still,
         );
         assert_eq!(turns(&read.events), ["began", "Finished"]);
         assert_eq!(said(&read.events), [(Voice::Agent, "Half done")]);
+    }
+
+    /// Claude Code 2.1.316 files the notice of a background sub-agent that stopped as a
+    /// `queued_command` attachment whose `commandMode` is `task-notification`, and repeats
+    /// it in no `user` record: it ends that sub-agent, and is nobody's words.
+    #[test]
+    fn a_notice_filed_as_an_attachment_ends_its_sub_agent() {
+        let home = std::env::temp_dir().join(format!(
+            "steery-cc-notice-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let agents = home.join("lead/subagents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("agent-a77006.jsonl"), "{}\n").unwrap();
+        std::fs::write(
+            agents.join("agent-a77006.meta.json"),
+            r#"{"agentType":"general-purpose","description":"Read the build log","toolUseId":"toolu_01PARITY"}"#,
+        )
+        .unwrap();
+        let notice = "<task-notification>\n<task-id>a77006</task-id>\n<tool-use-id>toolu_01PARITY</tool-use-id>\n<output-file>/tmp/steery-example/tasks/a77006.output</output-file>\n<status>completed</status>\n<summary>Agent \"Read the build log\" finished</summary>\n</task-notification>";
+        let read = read(
+            &Reading {
+                own: false,
+                agents,
+                window: Window::default(),
+                fork: None,
+            },
+            &records(&[
+                json!({"uuid":"u1","type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"Read the build log in the background"}}),
+                json!({"uuid":"a1","type":"assistant","message":{"id":"m1","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_01PARITY","name":"Task","input":{"description":"Read the build log","prompt":"Read it","run_in_background":true}}]}}),
+                json!({"uuid":"u2","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01PARITY","type":"tool_result","content":[{"type":"text","text":"Async agent launched successfully."}]}]},"toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"a77006"}}),
+                json!({"uuid":"a2","type":"assistant","message":{"id":"m2","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"It reads in the background."}]}}),
+                json!({"uuid":"x1","type":"attachment","isSidechain":false,
+                    "attachment":{"type":"queued_command","commandMode":"task-notification","prompt":notice,
+                        "origin":{"kind":"task-notification","producer":"session-task"}}}),
+            ]),
+            Turn::Closed,
+            End::Still,
+        );
+        std::fs::remove_dir_all(&home).ok();
+        let agents: Vec<_> = read
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                Event::SubAgent {
+                    external_id, state, ..
+                } => Some((external_id.as_str(), *state)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            agents,
+            [
+                ("a77006", Some(Execution::Running)),
+                ("a77006", Some(Execution::Finished)),
+            ],
+            "the notice ends the sub-agent its lead started"
+        );
+        assert_eq!(
+            said(&read.events),
+            [
+                (Voice::Person, "Read the build log in the background"),
+                (Voice::Tool, "Async agent launched successfully."),
+                (Voice::Agent, "It reads in the background."),
+            ],
+            "a notice is nobody's words"
+        );
+        assert_eq!(
+            turns(&read.events),
+            ["began", "Finished"],
+            "a notice begins no turn of its own"
+        );
+    }
+
+    /// A sub-agent of Claude Code 2.1.316 ends its turn by handing its report back
+    /// (`SubagentHandback`), and writes no answer of its own after it: the result Claude
+    /// Code wrote for that call ends the turn, failed in its words where it refused it.
+    #[test]
+    fn a_sub_agent_s_turn_ends_at_its_handback() {
+        let handed = |result: Value, error: bool| {
+            read(
+                &reading(true),
+                &records(&[
+                    json!({"uuid":"s1","type":"user","isSidechain":true,"agentId":"a77006","message":{"role":"user","content":"Read the build log"}}),
+                    json!({"uuid":"s2","type":"assistant","isSidechain":true,"agentId":"a77006","message":{"id":"m1","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_01HAND","name":"SubagentHandback","input":{"message":"The build log ends at a linker error."}}]}}),
+                    json!({"uuid":"s3","type":"user","isSidechain":true,"agentId":"a77006","message":{"role":"user","content":[{"tool_use_id":"toolu_01HAND","type":"tool_result","is_error":error,"content":[{"type":"text","text":result.to_string()}]}]},"toolUseResult":result}),
+                ]),
+                Turn::Closed,
+                End::Still,
+            )
+            .events
+        };
+        let delivered = handed(
+            json!({"success": true, "message": "Report delivered to your caller."}),
+            false,
+        );
+        assert_eq!(turns(&delivered), ["began", "Finished"]);
+        let refused = handed(
+            json!({"success": false, "message": "No caller is listening for this report."}),
+            false,
+        );
+        assert_eq!(turns(&refused), ["began", "Failed"]);
+        assert!(
+            matches!(
+                refused.last(),
+                Some(Event::TurnEnded { failure: Some(failure), .. })
+                    if failure.line.contains("No caller is listening") && !failure.service
+            ),
+            "the hand-back Claude Code refused, in its words: {:?}",
+            refused.last()
+        );
+    }
+
+    /// An error Claude Code wrote mid-response is not its turn's end while the turn may go
+    /// on: a retry's answer after it is one it got past (Claude Code 2.1.237 wrote `API
+    /// Error: The socket connection was closed unexpectedly.` and went on with the same
+    /// turn), and a transcript that may still be written holds it back with everything
+    /// after it, until it stood still for [`SETTLE`].
+    #[test]
+    fn an_error_claude_code_got_past_is_no_turn_end() {
+        let dropped = json!({"uuid":"a2","type":"assistant","isApiErrorMessage":true,"error":"unknown",
+            "message":{"id":"m2","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence",
+                "content":[{"type":"text","text":"API Error: The socket connection was closed unexpectedly."}]}});
+        let lines = [
+            json!({"uuid":"u1","type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"Patch the guard"}}),
+            json!({"uuid":"a1","type":"assistant","message":{"id":"m1","role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"toolu_01EDIT","name":"Edit","input":{"file_path":"/tmp/steery-example/guard.rs"}}]}}),
+            dropped.clone(),
+            json!({"uuid":"u2","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01EDIT","type":"tool_result","content":[{"type":"text","text":"Edited guard.rs"}]}]}}),
+            json!({"uuid":"a3","type":"assistant","message":{"id":"m3","role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Patched it."}]}}),
+        ];
+        assert_eq!(
+            turns(&events(&lines)),
+            ["began", "Finished"],
+            "the model answered again: the error is one Claude Code got past"
+        );
+        // The same turn as far as the error, in a transcript that may still be written:
+        // the error and what follows it wait for the next read.
+        let waiting = read(
+            &reading(false),
+            &records(&lines[..3]),
+            Turn::Closed,
+            End::Open,
+        );
+        assert_eq!(turns(&waiting.events), ["began"]);
+        assert_eq!(waiting.consumed, 2, "the error is left for the next read");
+        assert_eq!(waiting.turn, Turn::Open);
+        // Once the transcript stood still, the error is the turn's end.
+        let still = read(
+            &reading(false),
+            &records(&lines[..3]),
+            Turn::Closed,
+            End::Still,
+        );
+        assert_eq!(turns(&still.events), ["began", "Failed"]);
+        assert_eq!(still.consumed, 3);
+        // A turn Claude Code gave up on says so, whatever the record that says it is over:
+        // 2.1.316 writes a `turn_duration` after the error it stopped on.
+        let over = events(&[
+            lines[0].clone(),
+            dropped,
+            json!({"uuid":"s1","type":"system","subtype":"turn_duration","durationMs":1200,"messageCount":2}),
+        ]);
+        assert_eq!(turns(&over), ["began", "Failed"]);
+        assert!(matches!(
+            over.last(),
+            Some(Event::TurnEnded { failure: Some(failure), .. })
+                if failure.line.starts_with("API Error: The socket connection")
+        ));
     }
 
     /// Words another session sent through a live session's inbox are `isMeta` with a

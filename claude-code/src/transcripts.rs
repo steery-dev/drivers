@@ -260,7 +260,8 @@ impl Store {
                 (path, true)
             }
         };
-        let events = read_from(
+        let stamp = stands.last().map(|(_, stamp)| *stamp);
+        let (events, held) = read_from(
             &self.trees,
             &file,
             &Reading {
@@ -269,10 +270,14 @@ impl Store {
                 window: self.tails.window(),
                 fork,
             },
+            stamp,
             read.cursor.as_deref(),
             read.tail,
         )?;
+        // A read that held an error back says the same again only once the transcript
+        // stood still: until then time alone decides it, so nothing is remembered of it.
         if let Some(cursor) = read.cursor.as_deref()
+            && !held
             && events.cursor == cursor
             && events.events.is_empty()
             && !events.more
@@ -999,14 +1004,22 @@ fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
 /// written since the last read follow: the results of calls made together ([`batched`])
 /// as the conversation's own, and every other record as what it spent alone, its
 /// `tokens`: a branch a rewind left behind still spent them.
+///
+/// An error Claude Code wrote at the end of what was read may be one it gets past, so it
+/// is held back, with everything after it, until the transcript stood still for
+/// [`events::SETTLE`] (`stamp` says when it last changed) — else a batch that read
+/// nothing else would never move on. The answer says whether it held anything back: such
+/// a read is decided by time, and says the same again only once the time has passed.
 fn read_from(
     trees: &Trees<Records>,
     file: &Path,
     reading: &Reading,
+    stamp: Option<Stamp>,
     cursor: Option<&str>,
     tail: Option<u64>,
-) -> Result<Events, Error> {
+) -> Result<(Events, bool), Error> {
     let given = cursor.map(parse_cursor).transpose()?;
+    let still = stamp.is_some_and(still);
     trees
         .walk(file, Records { own: reading.own }, |walk| {
             let path = walk.tree.path()?;
@@ -1018,7 +1031,7 @@ fn read_from(
                 None if read.from == 0 => Turn::Closed,
                 None => Turn::Unknown,
             };
-            let walked = read.from + read.records.len();
+            let walked = read.records.len();
             let mut records = read.records;
             let mut spent = Vec::new();
             let mut places = None;
@@ -1036,20 +1049,56 @@ fn read_from(
                     spent.extend(events::spent(value));
                 }
             }
-            let mut said = events::read(reading, &records, turn);
+            let end = if read.rest || !still {
+                events::End::Open
+            } else {
+                events::End::Still
+            };
+            let mut said = events::read(reading, &records, turn, end);
+            // A batch that held back everything it read would never move on: what it held
+            // stands.
+            if read.rest && said.consumed == 0 {
+                said = events::read(reading, &records, turn, events::End::Forced);
+            }
+            // The results of calls made together are read beside the path's own records,
+            // after them: what a read consumed of the path is never more than it held.
+            let consumed = said.consumed.min(walked);
+            let held = consumed < walked;
+            // While anything is held back, the records off the path are read again with
+            // it: each is given under the same id, and folded once.
+            let through = if held {
+                given.as_ref().map_or(0, |given| given.aside)
+            } else {
+                read.through
+            };
             said.events.extend(spent);
-            Ok(Events {
-                cursor: walk
-                    .cursor(&path, walked, read.through, turn_mark(said.turn))
-                    .said(CURSOR),
-                events: said.events,
-                more: read.more,
-                reset: read.reset,
-                whole: read.from == 0,
-                after: None,
-            })
+            Ok((
+                Events {
+                    cursor: walk
+                        .cursor(
+                            &path,
+                            read.from + consumed,
+                            through,
+                            turn_mark(said.turn),
+                        )
+                        .said(CURSOR),
+                    events: said.events,
+                    more: read.more,
+                    reset: read.reset,
+                    whole: read.from == 0,
+                    after: None,
+                },
+                held,
+            ))
         })
         .map_err(|why| Error::refused(refusal::REFUSED, why))
+}
+
+/// Whether the transcript stamped `stamp` stood still for [`events::SETTLE`].
+fn still(stamp: Stamp) -> bool {
+    std::time::SystemTime::now()
+        .duration_since(stamp.modified())
+        .is_ok_and(|still| still >= events::SETTLE)
 }
 
 /// Whether `record`, off `path`, holds the results of calls made together. Claude Code
@@ -1132,6 +1181,60 @@ mod tests {
                 tail,
             })
             .unwrap()
+    }
+
+    /// An error at the end of a transcript still being written is held back: the read says
+    /// the turn began and nothing of its end, and its cursor stands before the error, so
+    /// the retry Claude Code may write after it is read in its place. Once the transcript
+    /// stood still for [`events::SETTLE`], the same read ends the turn as failed.
+    #[test]
+    fn an_error_at_the_end_of_a_transcript_waits_for_what_follows_it() {
+        let root = scratch();
+        let id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let file = root.join("projects/-private-tmp").join(format!("{id}.jsonl"));
+        write(
+            &file,
+            &[
+                json!({"uuid":"u1","parentUuid":null,"type":"user","cwd":"/private/tmp","entrypoint":"cli","origin":{"kind":"human"},"timestamp":"2026-10-31T09:00:00.000Z","message":{"role":"user","content":"Patch the guard"}}),
+                json!({"uuid":"a1","parentUuid":"u1","type":"assistant","timestamp":"2026-10-31T09:00:04.000Z","isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"apiErrorIsTransient":true,
+                    "message":{"id":"m1","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","content":[{"type":"text","text":"API Error: Server is temporarily limiting requests (not your usage limit)"}]}}),
+            ],
+        );
+        let store = Store::new(root.clone());
+        let turns = |events: &[Event]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::TurnBegan { .. } => Some("began".to_owned()),
+                    Event::TurnEnded { state, .. } => Some(format!("{state:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        let waiting = reading(&store, id, None, None);
+        assert_eq!(
+            turns(&waiting.events),
+            ["began"],
+            "an error a retry may answer is no turn end yet"
+        );
+        // Read again from that cursor: still nothing, and nothing remembered of it.
+        let again = reading(&store, id, Some(&waiting.cursor), None);
+        assert!(again.events.is_empty() && again.cursor == waiting.cursor);
+        // The transcript stood still: the error is what ended the turn.
+        let old = std::time::SystemTime::now() - events::SETTLE - std::time::Duration::from_secs(1);
+        let open = File::options().write(true).open(&file).unwrap();
+        open.set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        let settled = Store::new(root.clone());
+        let failed = reading(&settled, id, Some(&waiting.cursor), None);
+        assert_eq!(turns(&failed.events), ["Failed"]);
+        assert!(matches!(
+            failed.events.last(),
+            Some(Event::TurnEnded { failure: Some(failure), .. })
+                if failure.kind == steery_sdk::wire::harness::FailureKind::RateLimit
+        ));
+        assert_ne!(failed.cursor, waiting.cursor, "the error was read now");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A conversation nobody named is named by what its person asked first, never by the

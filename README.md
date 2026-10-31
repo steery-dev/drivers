@@ -304,8 +304,13 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
   task and the call that started it. A run a program started (`entrypoint: sdk-cli`) is
   no conversation until a person carries it on; one the Claude app started
   (`entrypoint: claude-desktop`) is `app`. Events are turns and how they ended (an API
-  error with its status and code), words, calls grouped as Steery groups them, tokens per
-  response, models and sub-agents.
+  error with its status and code, and when a limit lifts where it says so), words, calls
+  grouped as Steery groups them, tokens per response, models and sub-agents: those its
+  lead started, and how each ended as Claude Code's `<task-notification>` told it,
+  whether it came as a person's message or as a queued attachment. A sub-agent's own
+  turn ends where it hands its report back (`SubagentHandback`). An API error is its
+  turn's end only once Claude Code went no further: while the transcript may still gain a
+  retry's answer, the error and what follows it wait for the next read, as in omp.
 - **Setup** (`setup/plan`). Steery's MCP entry in `.claude.json` (beside the root where
   it is `~/.claude`), the skill in `skills/steery/SKILL.md`, and one hook per event in
   `settings.json`, at `/hooks/<event>/-`: one group beside the person's own that runs
