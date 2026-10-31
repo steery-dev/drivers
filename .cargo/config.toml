@@ -2,3 +2,11 @@
 # as in steery-dev/server: install it once per machine (README.md, Building).
 [build]
 rustc-wrapper = "kache"
+
+# The release each driver says it is in `initialize` (`program.release`): release.sh builds
+# a published release with its tag in the environment, which this never overrides; any
+# other build says it is a development one. The runtime reads every session again from its
+# start once a driver says another release, so a fix in how one reads reaches the sessions
+# it already read.
+[env]
+STEERY_PROGRAM_RELEASE = "dev"

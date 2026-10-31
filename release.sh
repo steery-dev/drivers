@@ -23,6 +23,9 @@ done
 root=$(cd "$(dirname "$0")" && pwd)
 cd "$root"
 
+# Each driver says this release in `initialize` (`program.release`, .cargo/config.toml).
+export STEERY_PROGRAM_RELEASE=$tag
+
 # Linux builds link glibc 2.30 at most, so they run in every current Linux image.
 targets=(aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu.2.30 aarch64-unknown-linux-gnu.2.30)
 # Each crate and the executables it builds.
