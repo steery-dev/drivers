@@ -21,14 +21,18 @@ pub fn executable(path: PathBuf) -> Option<PathBuf> {
         .then_some(path)
 }
 
-/// The program protocol the drivers speak. Every runtime Steery supports offers it
-/// (version 4 came in runtime 7.0.130; the oldest supported is later), so no driver answers
-/// an older one.
-pub const PROTOCOL: u32 = 4;
+/// The program protocols the drivers speak, newest first: 5 is 4 with needs. Every runtime
+/// Steery supports offers 4 (it came in runtime 7.0.130; the oldest supported is later), so
+/// no driver answers an older one.
+pub const PROTOCOLS: [u32; 2] = [5, 4];
 
-/// [`PROTOCOL`], where the runtime `offered` it; none where it did not.
+/// The first protocol with needs: `setup/plan`'s `needs` and `needs/give`.
+pub const NEEDS: u32 = 5;
+
+/// The newest of [`PROTOCOLS`] the runtime `offered`; none where it offered neither. A
+/// driver keeps it, and answers needs only where it is [`NEEDS`] or newer.
 pub fn protocol(offered: &[u32]) -> Option<u32> {
-    offered.contains(&PROTOCOL).then_some(PROTOCOL)
+    PROTOCOLS.into_iter().find(|version| offered.contains(version))
 }
 
 /// Why the programs `names` are not all on `PATH`, as a line a person reads (`["sh",

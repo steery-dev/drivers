@@ -52,6 +52,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
                 entries: Vec::new(),
                 notes: Vec::new(),
                 install: None,
+                needs: Vec::new(),
             });
         }
     };
@@ -70,6 +71,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
                     .into(),
             ],
             install,
+            needs: Vec::new(),
         });
     };
     let mut notes = Vec::new();
@@ -151,6 +153,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
         entries,
         notes,
         install: None,
+        needs: Vec::new(),
     })
 }
 

@@ -590,8 +590,9 @@ fn allows(allowed: Option<&[String]>, model: &str) -> bool {
 /// no `loggedIn` whatever its exit. Why is written to standard error, the program's log the
 /// runtime keeps: `Models` has no field for a reason (PROTOCOL.md §4.2), so a person sees
 /// none. `claude auth status --help`: "Show authentication status". It writes nothing a
-/// login does not also write.
-async fn signed_in() -> Option<bool> {
+/// login does not also write. An `ANTHROPIC_API_KEY` in the driver's environment counts:
+/// `"loggedIn": true, "authMethod": "api_key"` (Claude Code 2.1.310).
+pub(crate) async fn signed_in() -> Option<bool> {
     let binary = crate::binary()?;
     let mut command = steery_driver_common::program::helper(&binary);
     command.args(["auth", "status", "--json"]);
