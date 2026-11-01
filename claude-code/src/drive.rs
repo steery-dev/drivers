@@ -591,11 +591,15 @@ fn allows(allowed: Option<&[String]>, model: &str) -> bool {
 /// runtime keeps: `Models` has no field for a reason (PROTOCOL.md §4.2), so a person sees
 /// none. `claude auth status --help`: "Show authentication status". It writes nothing a
 /// login does not also write. An `ANTHROPIC_API_KEY` in the driver's environment counts:
-/// `"loggedIn": true, "authMethod": "api_key"` (Claude Code 2.1.310).
-pub(crate) async fn signed_in() -> Option<bool> {
+/// `"loggedIn": true, "authMethod": "api_key"` (Claude Code 2.1.310); `key: false` asks
+/// with that variable taken away, so it says whether Claude Code is signed in by itself.
+pub(crate) async fn signed_in(key: bool) -> Option<bool> {
     let binary = crate::binary()?;
     let mut command = steery_driver_common::program::helper(&binary);
     command.args(["auth", "status", "--json"]);
+    if !key {
+        command.env_remove(steery_driver_common::anthropic::VARIABLE);
+    }
     let answer = match steery_driver_common::program::ask(command).await {
         Ok(answer) => answer,
         Err(why) => {
@@ -644,7 +648,7 @@ pub async fn models(home: &Path, root: &Path) -> Models {
             thinking: EFFORT.map(String::from).to_vec(),
         }),
         watch,
-        signed_in: signed_in().await,
+        signed_in: signed_in(true).await,
     }
 }
 
