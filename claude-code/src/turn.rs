@@ -296,7 +296,11 @@ async fn follow(
     let mut command = tokio::process::Command::new(&turn.binary);
     command.stdin(std::process::Stdio::null());
     command.args(turn.launching(bypass)?);
-    let keyed = std::env::var_os(anthropic::VARIABLE).is_some_and(|key| !key.is_empty());
+    // The key is read through the helper only where Claude Code has no sign-in of its own:
+    // a helper outranks a plan's sign-in, and a person signed in with their plan who also
+    // exports a key they never approved keeps their plan, as Claude Code itself would.
+    let keyed = std::env::var_os(anthropic::VARIABLE).is_some_and(|key| !key.is_empty())
+        && crate::drive::signed_in(false).await == Some(false);
     if let Some(settings) = settings(heard.as_ref(), keyed)? {
         command.args(["--settings".to_owned(), settings]);
     }
@@ -438,10 +442,11 @@ async fn discard(binary: &Path, job: &str) {
     }
 }
 
-/// What a background session reads its key from where the turn holds `ANTHROPIC_API_KEY`:
-/// that variable, printed by a shell. Claude Code 2.1.310 uses the variable itself only in
-/// `-p`; an interactive session, `--bg` among them, uses it only once its person approved
-/// the key's last 20 characters in `customApiKeyResponses`, and otherwise answered "Not
+/// What a background session reads its key from where the turn holds `ANTHROPIC_API_KEY`
+/// and Claude Code has no sign-in of its own: that variable, printed by a shell. Claude
+/// Code 2.1.310 uses the variable itself only in `-p`; an interactive session, `--bg`
+/// among them, uses it only once its person approved the key's last 20 characters in
+/// `customApiKeyResponses`, and otherwise answered "Not
 /// logged in · Please run /login" (a fake key, a fresh home). With this helper in the
 /// launch's flag settings the same launch sent the key ("401 invalid x-api-key"), with no
 /// prompt, also under a supervisor started without the variable. The key stays out of

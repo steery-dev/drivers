@@ -32,7 +32,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Result
         });
     };
     let release = named(version(&binary).await.as_deref().and_then(release_within));
-    let needs = match needs && crate::drive::signed_in().await == Some(false) {
+    let needs = match needs && crate::drive::signed_in(true).await == Some(false) {
         true => vec![crate::sign_in::need()],
         false => Vec::new(),
     };
