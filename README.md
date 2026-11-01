@@ -8,8 +8,10 @@ writes, and says how to start, read and resume a turn. It decides nothing and wr
 of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers version 4 of the program protocol, which every runtime Steery supports offers. Steery
-adds the drivers below the way it adds any program: from this repository's releases, each
+answers version 5 of the program protocol where the runtime offers it, else version 4, which
+every runtime Steery supports offers; it keeps the version it picked, and plans needs only
+in 5. Steery adds the drivers below the way it adds any program: from this repository's
+releases, each
 a prebuilt executable per target (`steery programs add https://github.com/steery-dev/drivers`,
 which Steery's installer runs). Everything a person sees of a driver, its label, its short
 name, its tint and its mark, is what its `initialize` says.
@@ -209,6 +211,13 @@ crate holds both drivers: a library, and two binaries, `steery-driver-omp` and
 `steery-driver-pi`, each one line that serves the library for its harness. Neither driver
 has settings.
 
+**Needs** (protocol 5; a driver that picked 4 plans none). Where the harness lists no model
+(`omp models --json` prints `{"models":[]}`, `pi --list-models` "No models available"), the
+plan asks `sign-in` with one way, `api-key`: an Anthropic API key, checked for its
+`sk-ant-api` start and given back as `ANTHROPIC_API_KEY`, which both read. omp's and pi's own
+Claude login is never offered: it signs a third-party app in to a Claude plan, which
+Anthropic's terms forbid.
+
 What each driver does:
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). They are read
@@ -296,6 +305,15 @@ cd pi-family/plugin && npm i && npm run check
 One crate, one binary, `steery-driver-claude-code`. It has no settings. Claude Code keeps
 everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
 
+**Needs** (protocol 5; a driver that picked 4 plans none). Where `claude auth status --json`
+says `"loggedIn": false` (an `ANTHROPIC_API_KEY` in its environment counts as signed in), the
+plan asks `sign-in` two ways. `api-key`: an Anthropic API key, checked for its `sk-ant-api`
+start and given back as `ANTHROPIC_API_KEY`, which Claude Code always uses in `-p` runs.
+`claude-sign-in`: the driver runs the unmodified `claude auth login` on a terminal of its own,
+answers its printed link as the step `claude-sign-in-code`, and writes the pasted code back to
+it; Claude Code keeps the sign-in on this host, and the driver keeps no token. A driver started
+again has no sign-in waiting, so a code then is `not-found`.
+
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). They are read
   from `projects/<folder>/<id>.jsonl` under the root, and from the `projects` folder of any
   transcript the harness's moments named. A conversation resumed goes on in its own file.
@@ -372,6 +390,8 @@ Codex publishes: its rollout files, `hooks.json` and `config.toml`, `codex app-s
 JSON-RPC over standard input and output), `codex app-server proxy` (the bytes of a running
 app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`, `codex exec`,
 `codex mcp list` and `codex features list`. Codex's home is `CODEX_HOME`, else `~/.codex`.
+
+Codex has no needs: under protocol 5 every `needs/give` is `not-found`.
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). Rollouts are read
   from `sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl`. A thread continued in
