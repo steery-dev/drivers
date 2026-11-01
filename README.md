@@ -308,7 +308,9 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
 **Needs** (protocol 5; a driver that picked 4 plans none). Where `claude auth status --json`
 says `"loggedIn": false` (an `ANTHROPIC_API_KEY` in its environment counts as signed in), the
 plan asks `sign-in` two ways. `api-key`: an Anthropic API key, checked for its `sk-ant-api`
-start and given back as `ANTHROPIC_API_KEY`, which Claude Code always uses in `-p` runs.
+start and given back as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
+`-p` (the reader); a `--bg` session uses it only once approved, so a turn holding it passes
+`--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, writing nothing.
 `claude-sign-in`: the driver runs the unmodified `claude auth login` on a terminal of its own,
 answers its printed link as the step `claude-sign-in-code`, and writes the pasted code back to
 it; Claude Code keeps the sign-in on this host, and the driver keeps no token. A driver started
