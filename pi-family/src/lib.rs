@@ -22,7 +22,9 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use steery_sdk::wire;
+use steery_driver_common::anthropic;
+use steery_driver_common::program::NEEDS;
+use steery_sdk::wire::{self, harness::Give};
 use steery_sdk::{Error, Program, method, refusal, result};
 
 pub use harness::Harness;
@@ -40,9 +42,10 @@ struct Driver {
     catalog: models::Catalog,
 }
 
-/// The person's home, the runtime's config folder, and the harness's conversations under
-/// its agent folder, or why there is none.
+/// The protocol the driver picked, the person's home, the runtime's config folder, and the
+/// harness's conversations under its agent folder, or why there is none.
 struct Place {
+    protocol: u32,
     home: PathBuf,
     config: PathBuf,
     store: Result<transcripts::Store, String>,
@@ -74,9 +77,10 @@ impl Driver {
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocol 4"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 and 5"))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
+            protocol,
             home: params.home.clone(),
             config: params.config.clone(),
             store: harness.root(&params.home).map(|root| {
@@ -90,7 +94,7 @@ impl Program for Driver {
             self.catalog.warm(harness, store.root());
         }
         Ok(wire::Initialized {
-            protocol,
+            protocol: self.place()?.protocol,
             program: wire::ProgramInfo {
                 id: harness.id().parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
@@ -111,15 +115,37 @@ impl Program for Driver {
         match method {
             method::SETUP_PLAN => {
                 let place = self.place()?;
-                result(
-                    setup::plan(
-                        harness,
-                        &place.home,
-                        &place.config,
-                        steery_sdk::params(params)?,
-                    )
-                    .await?,
-                )
+                let asked = steery_sdk::params(params)?;
+                // Whether the harness lists no model, asked beside the plan: only where the
+                // protocol has needs and the harness has a folder.
+                let lacking = async {
+                    match (place.protocol >= NEEDS, self.store()) {
+                        (true, Ok(store)) => {
+                            self.catalog.none(harness, store.root()).await == Some(true)
+                        }
+                        _ => false,
+                    }
+                };
+                let (planned, lacking) = tokio::join!(
+                    setup::plan(harness, &place.home, &place.config, asked),
+                    lacking,
+                );
+                let mut planned = planned?;
+                if lacking && planned.found.is_some() {
+                    planned.needs.push(setup::need(harness));
+                }
+                result(planned)
+            }
+            method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => {
+                let give: Give = steery_sdk::params(params)?;
+                if give.need != setup::NEED || give.way != anthropic::WAY {
+                    return Err(Error::refused(
+                        refusal::NOT_FOUND,
+                        format!("{} has no need {} by {} here", harness.label(), give.need, give.way),
+                    ));
+                }
+                let line = format!("{} runs Claude with your Anthropic API key", harness.label());
+                result(anthropic::give(&give.values, &line)?)
             }
             method::SESSIONS_LIST => result(self.store()?.list(steery_sdk::params(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),

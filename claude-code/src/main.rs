@@ -17,6 +17,7 @@ mod live;
 mod mcp;
 mod registry;
 mod setup;
+mod sign_in;
 mod state;
 mod transcripts;
 mod tree;
@@ -76,17 +77,20 @@ const TRANSCRIPT: &str = "One JSON record per line: `user` and `assistant` recor
                           and each names the one before it in `parentUuid`, so the last record's chain is \
                           the conversation.";
 
-/// The driver: where Claude Code keeps everything, from `initialize`, the last listing of
-/// its background sessions, and where it says how live sessions stand ([`state`]).
+/// The driver: where Claude Code is, from `initialize`, the last listing of its background
+/// sessions, the sign-ins it started that wait for their code, and where it says how live
+/// sessions stand ([`state`]).
 struct ClaudeCode {
     place: OnceLock<Place>,
     listing: drive::Listing,
+    sign_ins: sign_in::SignIns,
     notifier: Notifier,
 }
 
-/// The person's home, and Claude Code's configuration root with its conversations, or
-/// why there is none.
+/// The protocol the driver picked, the person's home, and Claude Code's configuration root
+/// with its conversations, or why there is none.
 struct Place {
+    protocol: u32,
     home: PathBuf,
     store: Result<Arc<transcripts::Store>, String>,
 }
@@ -96,8 +100,14 @@ impl ClaudeCode {
         Self {
             place: OnceLock::new(),
             listing: drive::Listing::default(),
+            sign_ins: sign_in::SignIns::default(),
             notifier,
         }
+    }
+
+    /// Whether the protocol picked has needs.
+    fn needs(&self) -> Result<bool, Error> {
+        Ok(self.place()?.protocol >= steery_driver_common::program::NEEDS)
     }
 
     fn place(&self) -> Result<&Place, Error> {
@@ -135,9 +145,10 @@ pub(crate) async fn blocking<T: Send + 'static>(
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocol 4"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 and 5"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
+            protocol,
             home: params.home.clone(),
             store,
         };
@@ -149,7 +160,7 @@ impl Program for ClaudeCode {
             state::watch(store.root(), Arc::clone(store), self.notifier.clone());
         }
         Ok(wire::Initialized {
-            protocol,
+            protocol: self.place()?.protocol,
             program: wire::ProgramInfo {
                 id: "claude-code".parse().map_err(Error::invalid)?,
                 kind: wire::Kind::Harness,
@@ -175,7 +186,10 @@ impl Program for ClaudeCode {
                     .as_ref()
                     .map_err(|why| Error::refused(refusal::REFUSED, why.clone()))?
                     .root();
-                result(setup::plan(&place.home, root, given(params)?).await?)
+                result(setup::plan(&place.home, root, given(params)?, self.needs()?).await?)
+            }
+            method::NEEDS_GIVE if self.needs()? => {
+                result(self.sign_ins.give(given(params)?).await?)
             }
             method::SESSIONS_LIST => result(self.store()?.list(given(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),

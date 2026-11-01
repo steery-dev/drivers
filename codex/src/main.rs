@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::Value;
+use steery_driver_common::program::NEEDS;
 use steery_sdk::wire::{self, harness};
 use steery_sdk::{Error, Notifier, Program, method, refusal, result};
 
@@ -75,9 +76,11 @@ terminal drew them.";
 const MINIMUM: &str = "0.155.1";
 const UPDATE: &str = "codex update";
 
-/// The driver: Codex's home and conversations, from `initialize`.
+/// The driver: the protocol it picked, and Codex's home and conversations, from
+/// `initialize`.
 struct Codex {
     notifier: Notifier,
+    protocol: OnceLock<u32>,
     place: OnceLock<Result<drive::Drive, String>>,
     home: OnceLock<PathBuf>,
 }
@@ -86,6 +89,7 @@ impl Codex {
     fn new(notifier: Notifier) -> Self {
         Self {
             notifier,
+            protocol: OnceLock::new(),
             place: OnceLock::new(),
             home: OnceLock::new(),
         }
@@ -109,7 +113,8 @@ impl Codex {
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocol 4"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 and 5"))?;
+        let protocol = *self.protocol.get_or_init(|| protocol);
         let _ = self.home.set(params.home.clone());
         let _ = self
             .place
@@ -181,6 +186,14 @@ impl Program for Codex {
             method::TERMINAL => result(self.drive()?.terminal(steery_sdk::params(params)?)?),
             method::SAY => result(self.drive()?.say(steery_sdk::params(params)?).await?),
             method::PICK => result(self.drive()?.pick(steery_sdk::params(params)?).await?),
+            // Codex lacks nothing here that only its person gives: it plans no needs.
+            method::NEEDS_GIVE if self.protocol.get().is_some_and(|picked| *picked >= NEEDS) => {
+                let give: harness::Give = steery_sdk::params(params)?;
+                Err(Error::refused(
+                    refusal::NOT_FOUND,
+                    format!("Codex has no need {} here", give.need),
+                ))
+            }
             // Codex has no way to ask a thread's own model for a recap without running a
             // turn in it.
             _ => Err(Error::Unknown),

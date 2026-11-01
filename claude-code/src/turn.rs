@@ -31,6 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use steery_driver_common::anthropic;
 use steery_sdk::wire::harness::{Act, Ended, Stream, TurnLine, TurnRead, TurnState};
 
 use crate::agents::{self, Follow, RUNNING};
@@ -295,8 +296,9 @@ async fn follow(
     let mut command = tokio::process::Command::new(&turn.binary);
     command.stdin(std::process::Stdio::null());
     command.args(turn.launching(bypass)?);
-    if let Some(heard) = &heard {
-        command.args(heard.settings()?);
+    let keyed = std::env::var_os(anthropic::VARIABLE).is_some_and(|key| !key.is_empty());
+    if let Some(settings) = settings(heard.as_ref(), keyed)? {
+        command.args(["--settings".to_owned(), settings]);
     }
     let launch = command
         .arg("--")
@@ -436,6 +438,29 @@ async fn discard(binary: &Path, job: &str) {
     }
 }
 
+/// What a background session reads its key from where the turn holds `ANTHROPIC_API_KEY`:
+/// that variable, printed by a shell. Claude Code 2.1.310 uses the variable itself only in
+/// `-p`; an interactive session, `--bg` among them, uses it only once its person approved
+/// the key's last 20 characters in `customApiKeyResponses`, and otherwise answered "Not
+/// logged in · Please run /login" (a fake key, a fresh home). With this helper in the
+/// launch's flag settings the same launch sent the key ("401 invalid x-api-key"), with no
+/// prompt, also under a supervisor started without the variable. The key stays out of
+/// every argument and file.
+const KEY_HELPER: &str = r#"printf %s "$ANTHROPIC_API_KEY""#;
+
+/// The launch's `--settings`, none where it has nothing to say: the hooks that hand the
+/// turn's end back ([`Heard`]), and [`KEY_HELPER`] where the turn is `keyed`.
+fn settings(heard: Option<&Heard>, keyed: bool) -> Result<Option<String>, String> {
+    let mut settings = serde_json::Map::new();
+    if let Some(heard) = heard {
+        settings.insert("hooks".into(), heard.hooks()?);
+    }
+    if keyed {
+        settings.insert("apiKeyHelper".into(), json!(KEY_HELPER));
+    }
+    Ok((!settings.is_empty()).then(|| Value::Object(settings).to_string()))
+}
+
 /// Where the session a turn launches hands over its own turn ends: its `Stop` and
 /// `StopFailure` documents, one per line, written by this binary's [`HEARD`] mode. Made
 /// empty before the launch, so every document in it is of a turn this launch began, and
@@ -445,8 +470,11 @@ struct Heard(PathBuf);
 
 impl Heard {
     fn new(launched: u64) -> Result<Self, String> {
+        // Two turns this process launches in one second each get a file of their own.
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "steery-claude-code-turn-{}-{launched}.jsonl",
+            "steery-claude-code-turn-{}-{launched}-{made}.jsonl",
             std::process::id()
         ));
         std::fs::OpenOptions::new()
@@ -457,9 +485,9 @@ impl Heard {
         Ok(Self(path))
     }
 
-    /// The launch's `--settings`: Claude Code runs this binary's [`HEARD`] mode on the
-    /// session's turn ends ([`ENDS`]), beside every hook its person's own settings name.
-    fn settings(&self) -> Result<[String; 2], String> {
+    /// The hooks that run this binary's [`HEARD`] mode on the session's turn ends
+    /// ([`ENDS`]), beside every hook its person's own settings name.
+    fn hooks(&self) -> Result<Value, String> {
         let binary = std::env::current_exe().map_err(|e| format!("finding this driver: {e}"))?;
         let command = format!(
             "{} {HEARD} {}",
@@ -467,11 +495,11 @@ impl Heard {
             crate::drive::quoted(text(&self.0)?)
         );
         let hook = json!([{"hooks": [{"type": "command", "command": command, "timeout": HEARD_WAITS}]}]);
-        let hooks: serde_json::Map<String, Value> = ENDS
-            .iter()
-            .map(|end| ((*end).to_owned(), hook.clone()))
-            .collect();
-        Ok(["--settings".into(), json!({ "hooks": hooks }).to_string()])
+        Ok(Value::Object(
+            ENDS.iter()
+                .map(|end| ((*end).to_owned(), hook.clone()))
+                .collect(),
+        ))
     }
 
     /// The newest turn end the session handed over since the launch, if any.
@@ -663,11 +691,12 @@ mod tests {
     #[test]
     fn a_turns_own_hooks_say_its_end_and_what_went_wrong() {
         let heard = Heard::new(now()).unwrap();
-        let [flag, settings] = heard.settings().unwrap();
-        assert_eq!(flag, "--settings");
-        let settings: Value = serde_json::from_str(&settings).unwrap();
+        let hooks = heard.hooks().unwrap();
+        let settings: Value =
+            serde_json::from_str(&settings(Some(&heard), false).unwrap().unwrap()).unwrap();
+        assert_eq!(settings, json!({ "hooks": hooks }));
         for end in ENDS {
-            let command = settings["hooks"][end][0]["hooks"][0]["command"].as_str().unwrap();
+            let command = hooks[end][0]["hooks"][0]["command"].as_str().unwrap();
             assert!(
                 command.ends_with(&format!(" {HEARD} '{}'", heard.0.display())),
                 "{command}"

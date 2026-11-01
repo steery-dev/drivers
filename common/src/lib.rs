@@ -4,8 +4,10 @@
 //! ([`follow`]), a transcript that is a tree of records, read along its path in batches
 //! ([`tree`]), a delivery's receipt in a transcript ([`receipt`]), an answer, such as
 //! a read that said nothing, given again while the files it stood on stand as they did
-//! ([`quiet`]), and the MCP servers a harness's JSON configuration names ([`mcp`]).
+//! ([`quiet`]), the MCP servers a harness's JSON configuration names ([`mcp`]), and an
+//! Anthropic API key as a way to give a harness a sign-in ([`anthropic`]).
 
+pub mod anthropic;
 pub mod follow;
 pub mod lines;
 pub mod mcp;

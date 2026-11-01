@@ -1,7 +1,8 @@
 //! `setup/plan`: what sets Claude Code up for Steery. Steery's MCP server among Claude
 //! Code's user-scope servers; Steery's skill in its skills folder; and one hook per event
 //! Steery reads ([`crate::hooks::EVENTS`]) in its `settings.json`, each added beside the
-//! person's own hooks on that event.
+//! person's own hooks on that event. Where `needs` (protocol 5) and Claude Code is not
+//! signed in, its sign-in ([`crate::sign_in::need`]).
 
 use std::path::Path;
 
@@ -10,8 +11,8 @@ use steery_driver_common::program::{release_within, version};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
-/// The plan for this machine.
-pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Error> {
+/// The plan for this machine; with its needs where the runtime's protocol has them.
+pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Result<Planned, Error> {
     let Some(binary) = crate::binary() else {
         let (install, refused) = match crate::install() {
             Ok(install) => (Some(install), None),
@@ -27,9 +28,14 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
                     .into(),
             ],
             install,
+            needs: Vec::new(),
         });
     };
     let release = named(version(&binary).await.as_deref().and_then(release_within));
+    let needs = match needs && crate::drive::signed_in().await == Some(false) {
+        true => vec![crate::sign_in::need()],
+        false => Vec::new(),
+    };
     let mut notes = Vec::new();
     if release.is_none() {
         notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
@@ -45,6 +51,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Result<Planned, Err
         entries: entries(home, root, &setup),
         notes,
         install: None,
+        needs,
     })
 }
 
