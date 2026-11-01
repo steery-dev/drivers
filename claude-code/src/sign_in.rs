@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use steery_driver_common::anthropic;
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 use tokio::process::Child;
@@ -22,27 +23,11 @@ use tokio::sync::watch;
 
 /// The need, by its id in every plan.
 const NEED: &str = "sign-in";
-/// Its ways, the driver's pick first, and the step a started sign-in asks next.
-const API_KEY: &str = "api-key";
+/// Claude Code's own sign-in, and the step it asks next once started.
 const CLAUDE_SIGN_IN: &str = "claude-sign-in";
 const CLAUDE_SIGN_IN_CODE: &str = "claude-sign-in-code";
-/// The fields their person fills.
-const KEY: &str = "key";
+/// The field that step's person fills.
 const CODE: &str = "code";
-
-/// The variable Claude Code reads an Anthropic API key from. Its docs
-/// (https://code.claude.com/docs/en/authentication.md, "Authentication precedence"): in
-/// non-interactive mode (`-p`) the key is always used when present, over a plan's sign-in;
-/// an interactive session asks once to approve it. `claude auth status --json` counts it as
-/// signed in (`"authMethod": "api_key"`, `"apiKeySource": "ANTHROPIC_API_KEY"`, Claude Code
-/// 2.1.310).
-const VARIABLE: &str = "ANTHROPIC_API_KEY";
-/// How a Claude API key starts, as https://platform.claude.com/docs/en/manage-claude/authentication
-/// says it: "Static `sk-ant-api...` secret". An Admin key (`sk-ant-admin01-`) or an OAuth
-/// token (`sk-ant-oat01-`) is none.
-const KEY_STARTS: &str = "sk-ant-api";
-/// Where a key is made, as the same page names it.
-const KEYS_PAGE: &str = "https://platform.claude.com/settings/keys";
 
 /// How long `claude auth login` has to print its link: it printed it at once (2.1.310).
 const LINK_WITHIN: Duration = Duration::from_secs(15);
@@ -58,27 +43,16 @@ pub fn need() -> Need {
         title: "Sign Claude Code in?".into(),
         line: "Claude Code is not signed in on this host, so it runs no turn here.".into(),
         ways: vec![
-            Way {
-                id: API_KEY.into(),
-                label: "Use your Anthropic API key".into(),
-                about: Some(
-                    "Billed per token to your Claude Console account, on every host. Claude Code \
-                     always uses it in non-interactive runs, over any plan it is signed in with."
-                        .into(),
-                ),
-                link: Some(NeedLink {
-                    label: "Create a key".into(),
-                    url: KEYS_PAGE.into(),
-                    fills: None,
-                }),
-                fields: vec![Field {
-                    name: KEY.into(),
-                    label: "API key".into(),
-                    about: Some(format!("Starts with {KEY_STARTS}")),
-                    secret: true,
-                }],
-                ends_at: None,
-            },
+            // Claude Code's docs (https://code.claude.com/docs/en/authentication.md,
+            // "Authentication precedence"): in non-interactive mode (`-p`) the key is always
+            // used when present, over a plan's sign-in; an interactive session asks once to
+            // approve it. `claude auth status --json` counts it as signed in (`"authMethod":
+            // "api_key"`, `"apiKeySource": "ANTHROPIC_API_KEY"`, Claude Code 2.1.310).
+            anthropic::way(
+                "Billed per token to your Claude Console account, on every host. Claude Code \
+                 always uses it in non-interactive runs, over any plan it is signed in with."
+                    .into(),
+            ),
             Way {
                 id: CLAUDE_SIGN_IN.into(),
                 label: "Sign in with your Claude plan".into(),
@@ -115,9 +89,9 @@ impl SignIns {
             return Err(gone(format!("Claude Code has no need {} here", give.need)));
         }
         match give.way.as_str() {
-            API_KEY => {
+            anthropic::WAY => {
                 self.waiting().remove(NEED);
-                key(give.values.get(KEY))
+                anthropic::give(&give.values, "Claude Code uses your Anthropic API key")
             }
             CLAUDE_SIGN_IN => self.start().await,
             CLAUDE_SIGN_IN_CODE => {
@@ -315,23 +289,6 @@ fn terminal() -> std::io::Result<(File, OwnedFd)> {
         }
     }
     Ok((File::from(ours), theirs))
-}
-
-/// `ANTHROPIC_API_KEY` for this harness, where `key` reads as an Anthropic API key.
-fn key(key: Option<&String>) -> Result<Given, Error> {
-    let key = key.map_or("", |key| key.trim());
-    if key.is_empty() {
-        return Err(refused("Paste your Anthropic API key"));
-    }
-    if !key.starts_with(KEY_STARTS) {
-        return Err(refused(format!(
-            "An Anthropic API key starts with {KEY_STARTS}"
-        )));
-    }
-    Ok(Given::Done {
-        line: "Claude Code uses your Anthropic API key".into(),
-        env: BTreeMap::from([(VARIABLE.to_owned(), key.to_owned())]),
-    })
 }
 
 /// The first link in what Claude Code printed, once it is whole: a space or a line's end

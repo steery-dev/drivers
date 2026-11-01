@@ -107,6 +107,18 @@ impl Catalog {
         Ok(named(&models))
     }
 
+    /// Whether the harness lists no model here, which is how it says no model provider is
+    /// signed in: `omp models --json` printed `{"models":[]}` and `pi --list-models` "No
+    /// models available. Use /login …" in a home with no sign-in, and each listed Anthropic's
+    /// models once `ANTHROPIC_API_KEY` was set (omp 18.12.6, pi 1.0.0). None where it gave
+    /// no list. Joins an ask in flight, such as the one the driver starts with.
+    pub async fn none(&self, harness: Harness, root: &Path) -> Option<bool> {
+        answer(self.asking(harness, root, false))
+            .await
+            .ok()
+            .map(|models| models.is_empty())
+    }
+
     fn listed(&self) -> std::sync::MutexGuard<'_, Option<Vec<Model>>> {
         self.0.listed.lock().unwrap_or_else(|e| e.into_inner())
     }
