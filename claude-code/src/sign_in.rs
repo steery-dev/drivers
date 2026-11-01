@@ -254,49 +254,68 @@ impl Login {
 }
 
 /// A new terminal: the side the driver reads and writes, and the side Claude Code is given.
-/// Wide, so a link is printed on one line; neither side is inherited by anything else the
-/// driver starts.
+/// Both are opened close-on-exec from the start, so nothing else the driver starts meanwhile
+/// inherits either and keeps the terminal open: `/dev/ptmx` and the side it names, through
+/// `std::fs`, which opens every file `O_CLOEXEC`, on macOS and Linux alike (`posix_openpt`
+/// is `open("/dev/ptmx")` on both, and macOS's takes only `O_RDWR` and `O_NOCTTY`). Wide, so
+/// a link is printed on one line.
 fn terminal() -> std::io::Result<(File, OwnedFd)> {
-    let (mut ours, mut theirs) = (-1, -1);
-    let settings: *mut libc::termios = std::ptr::null_mut();
-    let mut size = libc::winsize {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let open = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(path)
+    };
+    let ours = open(Path::new("/dev/ptmx"))?;
+    let fd = ours.as_raw_fd();
+    // SAFETY: `grantpt` and `unlockpt` on the primary side this function owns.
+    if unsafe { libc::grantpt(fd) } != 0 || unsafe { libc::unlockpt(fd) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut name = [0 as libc::c_char; 128];
+    // SAFETY: `ptsname_r` writes at most `name.len()` bytes, its closing NUL among them.
+    match unsafe { ptsname_r(fd, name.as_mut_ptr(), name.len()) } {
+        0 => {}
+        // macOS says -1 and sets `errno`; Linux answers the error number itself.
+        -1 => return Err(std::io::Error::last_os_error()),
+        error => return Err(std::io::Error::from_raw_os_error(error)),
+    }
+    // SAFETY: `ptsname_r` wrote a NUL-terminated name into `name`.
+    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    let theirs = open(Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())))?;
+    let size = libc::winsize {
         ws_row: 24,
         ws_col: 1000,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    // SAFETY: `openpty` writes one descriptor to each of `ours` and `theirs` and reads
-    // `size`; it is given no name buffer and no settings. The casts meet each platform's
-    // spelling of the same pointers (`*mut` on macOS, `*const` on Linux).
-    let opened = unsafe {
-        libc::openpty(
-            &mut ours,
-            &mut theirs,
-            std::ptr::null_mut(),
-            settings as _,
-            (&raw mut size) as _,
-        )
-    };
-    if opened != 0 {
+    // SAFETY: `TIOCSWINSZ` reads one `winsize`. The cast meets each platform's type of the
+    // request.
+    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &raw const size) } == -1 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: `openpty` opened both descriptors, and nothing else owns them.
-    let (ours, theirs) = unsafe { (OwnedFd::from_raw_fd(ours), OwnedFd::from_raw_fd(theirs)) };
-    for side in [&ours, &theirs] {
-        // SAFETY: `F_SETFD` on a descriptor this function owns.
-        if unsafe { libc::fcntl(side.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-    }
-    Ok((File::from(ours), theirs))
+    Ok((ours, OwnedFd::from(theirs)))
 }
 
-/// The first link in what Claude Code printed, once it is whole: a space or a line's end
-/// follows it.
+// The libc crate names no `ptsname_r` on macOS, which has it since 10.13.4 (ptsname(3)).
+#[cfg(target_vendor = "apple")]
+unsafe extern "C" {
+    fn ptsname_r(fd: libc::c_int, buffer: *mut libc::c_char, length: libc::size_t) -> libc::c_int;
+}
+#[cfg(not(target_vendor = "apple"))]
+use libc::ptsname_r;
+
+/// The first link in what Claude Code printed, once it is whole: it ends at the first
+/// character no URL holds (RFC 3986), and something follows it.
 fn link(said: &[u8]) -> Option<String> {
     let text = plain(said);
     let rest = &text[text.find("https://")?..];
-    let end = rest.find(char::is_whitespace)?;
+    let end = rest.find(|c: char| {
+        !(c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c))
+    })?;
     Some(rest[..end].to_owned())
 }
 
@@ -329,13 +348,15 @@ fn plain(said: &[u8]) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\x1b' => match chars.next() {
-                // A control sequence ends at its final byte.
+                // A control sequence ends at its final byte. It reads as a space: a cursor
+                // move or an erase stands between what is printed before and after it.
                 Some('[') => {
                     for c in chars.by_ref() {
                         if ('\x40'..='\x7e').contains(&c) {
                             break;
                         }
                     }
+                    shown.push(' ');
                 }
                 // An operating-system command ends at a bell or at `ESC \`.
                 Some(']') => {
