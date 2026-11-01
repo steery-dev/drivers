@@ -470,8 +470,11 @@ struct Heard(PathBuf);
 
 impl Heard {
     fn new(launched: u64) -> Result<Self, String> {
+        // Two turns this process launches in one second each get a file of their own.
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "steery-claude-code-turn-{}-{launched}.jsonl",
+            "steery-claude-code-turn-{}-{launched}-{made}.jsonl",
             std::process::id()
         ));
         std::fs::OpenOptions::new()

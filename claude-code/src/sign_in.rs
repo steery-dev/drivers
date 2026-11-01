@@ -138,8 +138,8 @@ impl SignIns {
             })));
         };
         let id = login.id;
-        let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default();
-        let ends_at = now + KEPT.as_secs();
+        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
+        let ends_at = now.saturating_add(u64::try_from(KEPT.as_millis()).unwrap_or(u64::MAX));
         self.waiting().insert(NEED.into(), login);
         let kept = self.clone();
         tokio::spawn(async move {
