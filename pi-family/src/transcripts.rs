@@ -58,6 +58,7 @@ pub struct Store {
     quiet: Quiet,
     titles: Titles,
     starts: Starts,
+    jobs: events::Conversations,
     listings: Listings,
 }
 
@@ -81,6 +82,7 @@ impl Store {
             quiet: Quiet::default(),
             titles: Titles::default(),
             starts: Starts::default(),
+            jobs: events::Conversations::default(),
             listings: Listings::default(),
         }
     }
@@ -330,6 +332,7 @@ impl Store {
             cwd: head.cwd,
             servers: crate::calls::servers(&self.root),
             fork,
+            jobs: self.jobs.jobs(&file),
             file,
         };
         Ok((lead, reading))

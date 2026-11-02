@@ -15,7 +15,10 @@
 //! take minutes: a cause with no compaction yet and what follows it are read again later,
 //! and a message before the compaction drops it.
 
+use std::collections::HashMap;
+use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
@@ -36,6 +39,13 @@ const COMPACTION: &str = "steery-compaction";
 /// is the turn's end: longer than omp waits between its own retries.
 pub const SETTLE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How many background jobs of one conversation are remembered with their starting call,
+/// in each of two generations: the oldest are let go past them.
+const JOBS: usize = 512;
+/// How many conversations' jobs are remembered at once: past it they are all let go, and a
+/// wait on a job whose start was let go names no call.
+const CONVERSATIONS: usize = 256;
+
 /// What reading one transcript needs besides its records.
 pub struct Reading {
     pub harness: Harness,
@@ -50,6 +60,57 @@ pub struct Reading {
     /// The conversation this one was forked from, and when the fork began: the records
     /// stamped before are the parent's, copied.
     pub fork: Option<(String, u64)>,
+    /// The calls that started this conversation's background jobs, kept from one read to
+    /// the next: a wait comes in a later read than the job it waits on.
+    pub jobs: Jobs,
+}
+
+/// The call that started each background job of a conversation, by the job's id.
+#[derive(Clone, Default)]
+pub struct Jobs(Arc<Mutex<Generations>>);
+
+#[derive(Default)]
+struct Generations {
+    young: HashMap<String, String>,
+    old: HashMap<String, String>,
+}
+
+impl Jobs {
+    fn started(&self, job: &str, call: &str) {
+        let mut kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.young.len() >= JOBS && !kept.young.contains_key(job) {
+            kept.old = mem::take(&mut kept.young);
+        }
+        kept.young.insert(job.to_owned(), call.to_owned());
+    }
+
+    fn starter(&self, job: &str) -> Option<String> {
+        let kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        kept.young.get(job).or_else(|| kept.old.get(job)).cloned()
+    }
+}
+
+/// The [`Jobs`] of each transcript read.
+#[derive(Default)]
+pub struct Conversations(Mutex<HashMap<PathBuf, Jobs>>);
+
+impl Conversations {
+    pub fn jobs(&self, file: &Path) -> Jobs {
+        let mut kept = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if kept.len() >= CONVERSATIONS && !kept.contains_key(file) {
+            kept.clear();
+        }
+        kept.entry(file.to_owned()).or_default().clone()
+    }
+}
+
+/// What a protocol older than `WAITED` is told of a call's end: not what it waited on.
+pub fn unwaited(events: &mut [Event]) {
+    for event in events {
+        if let Event::CallEnded { waited, .. } = event {
+            waited.clear();
+        }
+    }
 }
 
 /// One whole record on the conversation's path, and where it starts: `None` where it is
@@ -431,13 +492,16 @@ impl State<'_> {
         }
         let lines: Vec<&str> = said.lines().collect();
         let tail = lines[lines.len().saturating_sub(8)..].join("\n");
+        let waited = self.waited(message.get("details"));
         self.out.push(Event::CallEnded {
             at,
             id: call.to_owned(),
             ok: message.get("isError").and_then(Value::as_bool) != Some(true),
             chars: said.chars().count() as u64,
             tail: (!tail.trim().is_empty()).then_some(tail),
+            waited,
         });
+        self.started(call, text(message, "toolName"), message.get("details"));
         if !said.trim().is_empty() {
             self.words(at, id, Voice::Tool, said, Some(call.to_owned()), Vec::new());
         }
@@ -458,6 +522,68 @@ impl State<'_> {
                         state: Some(Execution::Running),
                         error: None,
                     });
+                }
+            }
+        }
+    }
+
+    /// The calls that started the background jobs a result lists (`details.jobs`, as omp's
+    /// `wait` answers; `id`, or `jobId` where a job is delivered on its own), each once, in
+    /// the order listed. A job whose start was not read is no call to name.
+    fn waited(&self, details: Option<&Value>) -> Vec<String> {
+        let mut calls: Vec<String> = Vec::new();
+        let listed = details
+            .and_then(|details| details.get("jobs"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for job in listed {
+            let Some(job) = text(job, "id").or_else(|| text(job, "jobId")) else {
+                continue;
+            };
+            if let Some(call) = self.reading.jobs.starter(job)
+                && !calls.contains(&call)
+            {
+                calls.push(call);
+            }
+        }
+        calls
+    }
+
+    /// The background jobs a result says it started, by the call: omp's `details.async`
+    /// (`{jobId}`, or `true` with every sub-agent of a `task` in `details.progress`), and an
+    /// `eval` that left a running job its cell printed, named by `id`.
+    fn started(&self, call: &str, tool: Option<&str>, details: Option<&Value>) {
+        let Some(details) = details else { return };
+        let job = |id: &str| self.reading.jobs.started(id, call);
+        if let Some(background) = details
+            .get("async")
+            .filter(|background| background.is_object() || background.as_bool() == Some(true))
+        {
+            if let Some(id) = text(background, "jobId") {
+                job(id);
+            }
+            let agents = details.get("progress").and_then(Value::as_array);
+            for id in agents
+                .into_iter()
+                .flatten()
+                .filter_map(|agent| text(agent, "id"))
+            {
+                job(id);
+            }
+        }
+        if tool == Some("eval") {
+            let cells = details.get("cells").and_then(Value::as_array);
+            let views = cells
+                .into_iter()
+                .flatten()
+                .filter_map(|cell| cell.get("views").and_then(Value::as_array))
+                .flatten();
+            for value in views.filter_map(|view| view.pointer("/view/value")) {
+                if let Some(id) = text(value, "id")
+                    && value.get("running").and_then(Value::as_bool) == Some(true)
+                {
+                    job(id);
                 }
             }
         }
@@ -1133,6 +1259,102 @@ mod tests {
         assert_eq!(
             compactions(&forked.events),
             [("n", &overflow, Some(210_000), Some(40_000))]
+        );
+    }
+
+    /// A `wait` names the calls that started the background jobs it lists, each once, in
+    /// the order listed, though it comes in a later read than the jobs' start; a job whose
+    /// start was never read names none.
+    #[test]
+    fn a_wait_names_the_calls_that_started_its_jobs() {
+        let record = |id: &str, parent: &str, message: Value| {
+            json!({"type": "message", "id": id, "parentId": parent,
+                "timestamp": "2026-10-01T13:21:00Z", "message": message})
+            .to_string()
+        };
+        let call = |id: &str, name: &str| json!({"type": "toolCall", "id": id, "name": name, "arguments": {}});
+        let result = |call: &str, name: &str, details: Value| {
+            json!({"role": "toolResult", "toolCallId": call, "toolName": name,
+                "content": [{"type": "text", "text": "Backgrounded"}], "details": details})
+        };
+        let home = Home::new("waited");
+        let file = home.write(
+            FILED,
+            &[
+                SESSION.to_owned(),
+                ASKED.to_owned(),
+                record(
+                    "b",
+                    "a",
+                    json!({"role": "assistant", "stopReason": "toolUse",
+                    "content": [call("k1", "bash"), call("k2", "task")]}),
+                ),
+                record(
+                    "c",
+                    "b",
+                    result(
+                        "k1",
+                        "bash",
+                        json!({"async": {"state": "running", "jobId": "bg_1", "type": "bash"}}),
+                    ),
+                ),
+                record(
+                    "d",
+                    "c",
+                    result(
+                        "k2",
+                        "task",
+                        json!({
+                    "async": {"state": "running", "jobId": "Alpha", "type": "task"},
+                    "progress": [{"id": "Alpha"}, {"id": "Beta"}]}),
+                    ),
+                ),
+            ],
+        );
+        let store = home.store(Harness::Omp, None);
+        let first = read(&store, "f1", None, None);
+
+        let jobs = |ids: &[&str]| -> Vec<Value> {
+            ids.iter()
+                .map(|id| json!({"id": id, "type": "bash", "status": "running"}))
+                .collect()
+        };
+        home.append(
+            &file,
+            &[
+                record(
+                    "e",
+                    "d",
+                    json!({"role": "assistant", "stopReason": "toolUse",
+                    "content": [call("k3", "wait")]}),
+                ),
+                record(
+                    "f",
+                    "e",
+                    result(
+                        "k3",
+                        "wait",
+                        json!({"op": "wait",
+                    "jobs": jobs(&["bg_1", "Beta", "bg_9", "Alpha", "bg_1"])}),
+                    ),
+                ),
+            ],
+        );
+        let on = read(&store, "f1", None, Some(&first.cursor));
+        let waited = |events: &[Event], call: &str| {
+            events.iter().find_map(|event| match event {
+                Event::CallEnded { id, waited, .. } if id == call => Some(waited.clone()),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            waited(&on.events, "k3"),
+            Some(vec!["k1".to_owned(), "k2".to_owned()])
+        );
+        assert_eq!(
+            waited(&first.events, "k2"),
+            Some(Vec::new()),
+            "a call that started jobs waited on none"
         );
     }
 }
