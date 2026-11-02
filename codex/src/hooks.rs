@@ -28,8 +28,10 @@ pub const QUICK: u32 = 5;
 /// The most Codex waits on a `SessionEnd` or `Interrupt` hook.
 pub const ENDING: u32 = 3;
 /// How long Codex waits on a moment a person may answer from Steery: the runtime answers
-/// within it, by enough that what Codex reads is always the runtime's answer.
-pub const ASKING: u32 = 2100;
+/// within it, by enough that what Codex reads is always the runtime's answer. About 24
+/// days, within a 32-bit count of milliseconds: the person's card stays open exactly while
+/// Codex waits on the hook, and one handed back is refused in a Steery-driven turn.
+pub const ASKING: u32 = (i32::MAX / 1000) as u32;
 
 /// Every moment of Codex's Steery reads, its kind, and what it can say there.
 const EVENTS: [(&str, HookKind, &[Says]); 8] = [
