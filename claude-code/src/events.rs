@@ -18,8 +18,9 @@
 //! user…]`, or at the API error Claude Code writes once it gave up retrying
 //! (`isApiErrorMessage`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
@@ -44,6 +45,51 @@ pub struct Reading {
     /// Where the conversation is a fork: its parent, and the uuid of its own first record,
     /// before which every record is a copy of the parent's.
     pub fork: Option<(String, String)>,
+    /// What earlier reads of this transcript learned of the work its calls left running.
+    pub starts: Starts,
+}
+
+/// How many background works, and how many waiting calls, a transcript's [`Starts`] keeps:
+/// the oldest is forgotten first, and a call that waits on one forgotten names none.
+const STARTS: usize = 256;
+
+/// The work calls started in the background and the calls that wait on it, which a read
+/// leaves for the next: a call's result may be read many records, and reads, after the call
+/// that started what it waits on. Kept for one transcript, bounded by [`STARTS`].
+#[derive(Clone, Default)]
+pub struct Starts(Arc<Mutex<Ledger>>);
+
+#[derive(Default)]
+struct Ledger {
+    /// The call that started each work Claude Code named (a shell, a monitor, a sub-agent),
+    /// by that name.
+    started: Bounded,
+    /// The call each waiting call waited on, by the waiting call.
+    waits: Bounded,
+}
+
+/// A map that forgets its oldest entry once it holds more than [`STARTS`].
+#[derive(Default)]
+struct Bounded {
+    by: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl Bounded {
+    fn put(&mut self, key: &str, value: &str) {
+        if self.by.insert(key.to_owned(), value.to_owned()).is_none() {
+            self.order.push_back(key.to_owned());
+            if self.order.len() > STARTS
+                && let Some(oldest) = self.order.pop_front()
+            {
+                self.by.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&str> {
+        self.by.get(key).map(String::as_str)
+    }
 }
 
 /// One whole record of a transcript, and where it starts: `None` where it is no JSON.
@@ -448,6 +494,12 @@ impl State<'_> {
                 continue;
             };
             let input = block.get("input").cloned().unwrap_or(Value::Null);
+            if let Some(work) = waits_on(name, &input) {
+                let mut ledger = lock(&self.reading.starts);
+                if let Some(starter) = ledger.started.get(work).map(str::to_owned) {
+                    ledger.waits.put(call, &starter);
+                }
+            }
             let mut began = calls::call(call, name, input);
             began.response = response.clone();
             self.out.push(Event::CallBegan { at, call: began });
@@ -490,14 +542,22 @@ impl State<'_> {
         let failed = flag(block, "is_error");
         let lines: Vec<&str> = said.lines().collect();
         let tail = lines[lines.len().saturating_sub(8)..].join("\n");
+        let result = record.get("toolUseResult");
+        let waited = {
+            let mut ledger = lock(&self.reading.starts);
+            if let Some(work) = left_running(result, &said) {
+                ledger.started.put(&work, call);
+            }
+            ledger.waits.get(call).map(str::to_owned).into_iter().collect()
+        };
         self.out.push(Event::CallEnded {
             at,
             id: call.to_owned(),
             ok: !failed,
             chars: said.chars().count() as u64,
             tail: (!tail.trim().is_empty()).then_some(tail),
+            waited,
         });
-        let result = record.get("toolUseResult");
         let answered = if failed {
             Some(if interrupted(&said) {
                 (Execution::Interrupted, None)
@@ -692,6 +752,58 @@ impl State<'_> {
 
 /// The tools that start a sub-agent: `Task`, renamed `Agent` in later releases.
 const AGENTS: [&str; 2] = ["Task", "Agent"];
+
+/// The tools that read, wait on or stop work a call left running, and the input that names
+/// it: `TaskOutput` and `TaskStop` (`task_id`) for a shell, a monitor or a sub-agent, and
+/// `BashOutput` (`bash_id`), `KillShell` and `KillBash` (`shell_id`) of releases before
+/// them.
+const WAITS: [(&str, &str); 5] = [
+    ("TaskOutput", "task_id"),
+    ("TaskStop", "task_id"),
+    ("BashOutput", "bash_id"),
+    ("KillShell", "shell_id"),
+    ("KillBash", "shell_id"),
+];
+
+/// The work a call of `name` with `input` waits on, as Claude Code names it.
+fn waits_on<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
+    let (_, field) = WAITS.iter().find(|(tool, _)| *tool == name)?;
+    text(input, field).filter(|work| !work.is_empty())
+}
+
+/// What a call's result names of the work the call left running, which later calls name
+/// to read or wait on it: a shell's `backgroundTaskId` (`Bash` with `run_in_background`, or
+/// one Claude Code moved to the background itself), a monitor's `taskId` (told from a task
+/// list's by its `persistent`), a sub-agent's `agentId` where `async_launched`. Releases
+/// that wrote no such field say it in the result's first words, `Command running in
+/// background with ID: <id>.`
+fn left_running(result: Option<&Value>, said: &str) -> Option<String> {
+    let named = result.and_then(|result| {
+        text(result, "backgroundTaskId")
+            .or_else(|| {
+                result
+                    .get("persistent")
+                    .and_then(|_| text(result, "taskId"))
+            })
+            .or_else(|| {
+                (text(result, "status") == Some("async_launched"))
+                    .then(|| text(result, "agentId"))
+                    .flatten()
+            })
+    });
+    named
+        .or_else(|| {
+            said.strip_prefix("Command running in background with ID: ")?
+                .split(|c: char| c == '.' || c.is_whitespace())
+                .next()
+        })
+        .filter(|work| !work.is_empty())
+        .map(str::to_owned)
+}
+
+fn lock(starts: &Starts) -> std::sync::MutexGuard<'_, Ledger> {
+    starts.0.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// The `stop_reason`s of a response that ends its turn: any but a call.
 pub(crate) const ENDS: [&str; 4] = ["end_turn", "stop_sequence", "max_tokens", "refusal"];
@@ -1047,6 +1159,7 @@ mod tests {
             agents: PathBuf::from("/nowhere/c/subagents"),
             window: Window::default(),
             fork: None,
+            starts: Starts::default(),
         }
     }
 
@@ -1084,6 +1197,53 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A call that reads, waits on or stops work an earlier call left running names that
+    /// call, by the id Claude Code gave the work, though an earlier read saw the start; a
+    /// task list's id and an id no call here started name none.
+    #[test]
+    fn a_call_that_waits_on_background_work_names_its_starter() {
+        let reading = reading(false);
+        let ended = |lines: &[Value]| -> Vec<(String, Vec<String>)> {
+            read(&reading, &records(lines), Turn::Closed, End::Still)
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::CallEnded { id, waited, .. } => Some((id, waited)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let call = |uuid: &str, id: &str, name: &str, input: Value| {
+            json!({"uuid":uuid,"type":"assistant","message":{"id":format!("m-{uuid}"),"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
+        };
+        let answer = |uuid: &str, id: &str, said: &str, result: Value| {
+            json!({"uuid":uuid,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":said}]},"toolUseResult":result})
+        };
+        let started = ended(&[
+            call("a1", "t1", "Bash", json!({"command":"deploy/ship.sh","run_in_background":true})),
+            answer("a2", "t1", "Command running in background with ID: bk7. Output is being written to: /tmp/bk7.output", json!({"stdout":"","backgroundTaskId":"bk7"})),
+            call("a3", "t2", "TaskUpdate", json!({"taskId":"1","status":"in_progress"})),
+            answer("a4", "t2", "Updated task #1 status", json!({"success":true,"taskId":"1"})),
+        ]);
+        assert_eq!(started, [("t1".to_owned(), vec![]), ("t2".to_owned(), vec![])]);
+        let waiting = ended(&[
+            call("b1", "t3", "TaskOutput", json!({"task_id":"bk7","block":true,"timeout":600000})),
+            answer("b2", "t3", "done", json!({"retrieval_status":"success"})),
+            call("b3", "t4", "TaskOutput", json!({"task_id":"1","block":false})),
+            answer("b4", "t4", "no such task", json!({})),
+            call("b5", "t5", "TaskStop", json!({"task_id":"b-nothing"})),
+            answer("b6", "t5", "no such task", json!({})),
+        ]);
+        assert_eq!(
+            waiting,
+            [
+                ("t3".to_owned(), vec!["t1".to_owned()]),
+                ("t4".to_owned(), vec![]),
+                ("t5".to_owned(), vec![]),
+            ]
+        );
     }
 
     /// A sub-agent's records inlined into its lead's file, and the harness talking to
@@ -1517,6 +1677,7 @@ mod tests {
             agents,
             window: Window::default(),
             fork: None,
+            starts: Starts::default(),
         };
         let read = read(
             &reading,
@@ -1607,6 +1768,7 @@ mod tests {
                 agents,
                 window: Window::default(),
                 fork: None,
+                starts: Starts::default(),
             },
             &records(&[
                 json!({"uuid":"u1","type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"Read the build log in the background"}}),

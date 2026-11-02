@@ -145,7 +145,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 and 5"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4, 5 and 6"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             protocol,
@@ -193,7 +193,18 @@ impl Program for ClaudeCode {
             }
             method::SESSIONS_LIST => result(self.store()?.list(given(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),
-            method::SESSIONS_READ => result(self.store()?.read(given(params)?)?),
+            method::SESSIONS_READ => {
+                let mut read = self.store()?.read(given(params)?)?;
+                // A runtime on a protocol older than `waited` rejects the field.
+                if self.place()?.protocol < steery_driver_common::program::WAITED {
+                    for event in &mut read.events {
+                        if let steery_sdk::wire::harness::Event::CallEnded { waited, .. } = event {
+                            waited.clear();
+                        }
+                    }
+                }
+                result(read)
+            }
             method::SESSIONS_FOLD => {
                 let _: harness::Fold = given(params)?;
                 Err(Error::refused(
