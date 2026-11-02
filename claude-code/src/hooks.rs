@@ -26,8 +26,13 @@ const LEAD: &str = "STEERY_LEAD";
 /// note, and a harness held up behind Steery is the one thing it must never cost a person.
 const SAYS_WAITS: u32 = 5;
 /// How long Claude Code gives a hook that may put the call to a person, who answers from
-/// a phone; the runtime answers within `waits - 90`.
-const ASKS_WAITS: u32 = 2100;
+/// a phone; the runtime answers within `waits - 90`. As long as Claude Code's timer holds
+/// (a 32-bit count of milliseconds, about 24 days): the person's card stays open exactly
+/// while Claude Code waits on the hook, and a session Steery runs in the background has
+/// no terminal for a prompt handed back. At 2,100 s a Bash permission's card went unread
+/// after 33 minutes, Steery withdrew it, and Claude Code waited on its own prompt for good
+/// (2026-11-02).
+const ASKS_WAITS: u32 = (i32::MAX / 1000) as u32;
 
 /// One of Claude Code's hook events Steery is hooked on.
 pub(crate) struct Event {
