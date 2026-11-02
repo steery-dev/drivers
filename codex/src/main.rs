@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use steery_driver_common::program::NEEDS;
+use steery_driver_common::program::{NEEDS, WAITED};
 use steery_sdk::wire::{self, harness};
 use steery_sdk::{Error, Notifier, Program, method, refusal, result};
 
@@ -113,7 +113,7 @@ impl Codex {
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 and 5"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4, 5 and 6"))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         let _ = self.home.set(params.home.clone());
         let _ = self
@@ -152,7 +152,14 @@ impl Program for Codex {
             method::SESSIONS_LOCATE => {
                 result(self.drive()?.store.locate(steery_sdk::params(params)?)?)
             }
-            method::SESSIONS_READ => result(self.drive()?.store.read(steery_sdk::params(params)?)?),
+            method::SESSIONS_READ => {
+                let mut read = self.drive()?.store.read(steery_sdk::params(params)?)?;
+                // A runtime older than `waited` rejects a field it does not know.
+                if self.protocol.get().is_none_or(|picked| *picked < WAITED) {
+                    events::without_waited(&mut read.events);
+                }
+                result(read)
+            }
             method::SESSIONS_FOLD => {
                 let _: harness::Fold = steery_sdk::params(params)?;
                 Err(Error::refused(

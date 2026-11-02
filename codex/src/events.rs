@@ -22,6 +22,9 @@ use crate::{calls, words};
 /// The longest failure line said.
 const LINE: usize = 600;
 
+/// The most background sessions, and calls naming one, a read keeps.
+const SESSIONS: usize = 64;
+
 /// What a read carries from one record to the next, and from one read to the next in its
 /// cursor: what the conversation runs on, the turn running and a failure it has not got
 /// past, and the calls that start, wait on or close sub-agents.
@@ -53,6 +56,14 @@ pub struct State {
     /// to another, a harness's envelope).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     opened: String,
+    /// Background sessions of unified exec, `(session id, the call that started it)`,
+    /// oldest first and at most [`SESSIONS`]: a result that says `Process running with
+    /// session ID 9055` left one, and later calls name it as `session_id`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sessions: Vec<(String, String)>,
+    /// Calls begun naming a background session, until answered: `(call, starter)`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    waiting: Vec<(String, String)>,
 }
 
 /// What a rollback that does not say how much went is refused with: reading on would
@@ -371,6 +382,12 @@ impl State {
                     .cloned()
                     .unwrap_or(Value::Null);
                 let call = calls::call(call_id, &tool, input);
+                if let Some(session) = addressed(&call.input)
+                    && let Some((_, starter)) = self.sessions.iter().find(|(s, _)| *s == session)
+                {
+                    let starter = starter.clone();
+                    keep(&mut self.waiting, call_id.to_owned(), starter);
+                }
                 if matches!(
                     call.tool.as_str(),
                     "spawn_agent" | "wait_agent" | "close_agent"
@@ -391,12 +408,29 @@ impl State {
                 if let Some((tool, target)) = self.agents.remove(call_id) {
                     self.agents_said(&tool, target, call_id, &output, at, out);
                 }
+                let waited: Vec<String> = self
+                    .waiting
+                    .iter()
+                    .position(|(call, _)| call == call_id)
+                    .map(|at| self.waiting.remove(at).1)
+                    .into_iter()
+                    .collect();
+                match background_session(&output) {
+                    Some(session) if waited.is_empty() => {
+                        self.sessions.retain(|(s, _)| *s != session);
+                        keep(&mut self.sessions, session, call_id.to_owned());
+                    }
+                    // Still running: the session stays its starter's.
+                    Some(_) => {}
+                    None => self.sessions.retain(|(_, starter)| !waited.contains(starter)),
+                }
                 out.push(Event::CallEnded {
                     at,
                     id: call_id.to_owned(),
                     ok: succeeded(payload.get("output"), &output),
                     chars: output.chars().count() as u64,
                     tail: tail(&output),
+                    waited,
                 });
                 if !output.trim().is_empty() {
                     out.push(Event::Words {
@@ -425,6 +459,7 @@ impl State {
                     ok: text(payload, "status") != Some("failed"),
                     chars: 0,
                     tail: None,
+                    waited: Vec::new(),
                 });
             }
             _ => {}
@@ -741,6 +776,42 @@ fn succeeded(output: Option<&Value>, text: &str) -> bool {
     true
 }
 
+/// The background session a result says it left running: `Process running with session
+/// ID 9055`, among its last lines.
+fn background_session(output: &str) -> Option<String> {
+    output.lines().rev().take(8).find_map(|line| {
+        let id = line.trim().strip_prefix("Process running with session ID ")?;
+        let id = id.trim();
+        (!id.is_empty()).then(|| id.to_owned())
+    })
+}
+
+/// The session a call names: `session_id` in its input, a number or text.
+fn addressed(input: &Value) -> Option<String> {
+    match input.as_object()?.get("session_id")? {
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// `value` under `key` at the end of `list`, the oldest dropped past [`SESSIONS`].
+fn keep(list: &mut Vec<(String, String)>, key: String, value: String) {
+    if list.len() >= SESSIONS {
+        list.remove(0);
+    }
+    list.push((key, value));
+}
+
+/// Events as a protocol older than `waited` reads them: no call waited on any.
+pub fn without_waited(events: &mut [Event]) {
+    for event in events {
+        if let Event::CallEnded { waited, .. } = event {
+            waited.clear();
+        }
+    }
+}
+
 /// The last 8 lines of a result.
 pub fn tail(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.lines().collect();
@@ -922,6 +993,40 @@ mod tests {
             })
             .collect();
         assert_eq!(ended, [TurnState::Finished, TurnState::Interrupted]);
+    }
+
+    /// A command that returns while it runs says `Process running with session ID …`; the
+    /// `write_stdin` calls that name that `session_id` waited on it, until it exits.
+    #[test]
+    fn a_poll_of_a_background_session_waited_on_the_call_that_started_it() {
+        let call = |id: &str, name: &str, arguments: &str| {
+            json!({"timestamp":"2026-10-09T09:40:02Z","type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":arguments}})
+        };
+        let output = |id: &str, text: &str| {
+            json!({"timestamp":"2026-10-09T09:40:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":text}})
+        };
+        let events = read(&[
+            call("c1", "exec_command", r#"{"cmd":"deploy/ship.sh"}"#),
+            output("c1", "Wall time: 1.0 seconds\nProcess running with session ID 9055\nOutput:\nbuilding"),
+            call("c2", "write_stdin", r#"{"session_id":9055,"chars":"","yield_time_ms":30000}"#),
+            output("c2", "Wall time: 30.0 seconds\nProcess running with session ID 9055\nOutput:\nstill"),
+            call("c3", "write_stdin", r#"{"session_id":9055,"chars":""}"#),
+            output("c3", "Wall time: 5.0 seconds\nProcess exited with code 0\nOutput:\ndone"),
+            call("c4", "write_stdin", r#"{"session_id":9055,"chars":""}"#),
+            output("c4", "write_stdin failed: Unknown process id 9055"),
+        ]);
+        let waited: Vec<(&str, &[String])> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::CallEnded { id, waited, .. } => Some((id.as_str(), waited.as_slice())),
+                _ => None,
+            })
+            .collect();
+        let starter = ["c1".to_owned()];
+        assert_eq!(
+            waited,
+            [("c1", &[][..]), ("c2", &starter[..]), ("c3", &starter[..]), ("c4", &[][..])]
+        );
     }
 
     /// Words are the person's, the agent's and its reasoning; Codex's own fragments are
