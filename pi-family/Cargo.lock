@@ -239,7 +239,7 @@ dependencies = [
 [[package]]
 name = "steery-sdk"
 version = "6.0.0"
-source = "git+https://github.com/steery-dev/sdk?branch=call-ended-waited#6d6b970305dd5562781b478e50c26e18f151027d"
+source = "git+https://github.com/steery-dev/sdk?tag=v6.0.0#4c53ed4e8a3305c0466f0459768765d61116cace"
 dependencies = [
  "libc",
  "serde",
