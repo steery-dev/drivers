@@ -275,6 +275,7 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
                 ok,
                 chars: output.chars().count() as u64,
                 tail: events::tail(&output),
+                waited: Vec::new(),
             });
             words(Voice::Tool, output, Some(id.to_owned()), out);
         }

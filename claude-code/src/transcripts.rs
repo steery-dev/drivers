@@ -27,7 +27,7 @@ use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Ses
 use steery_sdk::{Error, refusal};
 
 use crate::context::{Now, Tails};
-use crate::events::{self, Reading, Turn, agent_file, agent_id, millis, one_line, text};
+use crate::events::{self, Reading, Starts, Turn, agent_file, agent_id, millis, one_line, text};
 use crate::tree::Records;
 
 /// The longest record read for what a conversation's head says. A line is a whole message
@@ -64,6 +64,8 @@ pub struct Store {
     filing: Mutex<BTreeMap<String, Vec<PathBuf>>>,
     heads: Mutex<HashMap<PathBuf, Kept<Head>>>,
     agents: Mutex<HashMap<PathBuf, Kept<Agent>>>,
+    /// The work each transcript's calls left running, for the reads that follow.
+    starts: Mutex<HashMap<PathBuf, Starts>>,
     origins: Mutex<HashMap<PathBuf, Kept<Option<Origin>>>>,
     trees: Trees<Records>,
     tails: Tails,
@@ -118,6 +120,7 @@ impl Store {
             filing: Mutex::new(BTreeMap::new()),
             heads: Mutex::new(HashMap::new()),
             agents: Mutex::new(HashMap::new()),
+            starts: Mutex::new(HashMap::new()),
             origins: Mutex::new(HashMap::new()),
             trees: Trees::default(),
             quiet: Quiet::default(),
@@ -183,6 +186,7 @@ impl Store {
         let listed: HashSet<&PathBuf> = filed.listed.iter().collect();
         lock(&self.listings).retain(|folder, _| listed.contains(folder));
         lock(&self.agents).retain(|file, _| regular(file));
+        lock(&self.starts).retain(|file, _| regular(file));
         lock(&self.origins).retain(|file, _| walked.contains(file));
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
@@ -268,6 +272,7 @@ impl Store {
                 own,
                 agents,
                 window: self.tails.window(),
+                starts: lock(&self.starts).entry(file.clone()).or_default().clone(),
                 fork,
             },
             stamp,

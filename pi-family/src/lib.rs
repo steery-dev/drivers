@@ -23,7 +23,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 use steery_driver_common::anthropic;
-use steery_driver_common::program::NEEDS;
+use steery_driver_common::program::{NEEDS, WAITED};
 use steery_sdk::wire::{self, harness::Give};
 use steery_sdk::{Error, Program, method, refusal, result};
 
@@ -77,7 +77,7 @@ impl Driver {
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 and 5"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4, 5 and 6"))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
             protocol,
@@ -149,8 +149,21 @@ impl Program for Driver {
             }
             method::SESSIONS_LIST => result(self.store()?.list(steery_sdk::params(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
-            method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
-            method::SESSIONS_FOLD => result(self.store()?.fold(steery_sdk::params(params)?)?),
+            method::SESSIONS_READ => {
+                let mut read = self.store()?.read(steery_sdk::params(params)?)?;
+                // A runtime on an older protocol rejects a field it does not know.
+                if self.place()?.protocol < WAITED {
+                    events::unwaited(&mut read.events);
+                }
+                result(read)
+            }
+            method::SESSIONS_FOLD => {
+                let mut fold = self.store()?.fold(steery_sdk::params(params)?)?;
+                if self.place()?.protocol < WAITED {
+                    events::unwaited(&mut fold.events);
+                }
+                result(fold)
+            }
             method::HOOK_READ => result(hooks::read(self.store()?, steery_sdk::params(params)?)?),
             method::MCP_LIST => result(mcp::list(
                 harness,

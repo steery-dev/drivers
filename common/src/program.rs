@@ -21,16 +21,21 @@ pub fn executable(path: PathBuf) -> Option<PathBuf> {
         .then_some(path)
 }
 
-/// The program protocols the drivers speak, newest first: 5 is 4 with needs. Every runtime
-/// Steery supports offers 4 (it came in runtime 7.0.130; the oldest supported is later), so
-/// no driver answers an older one.
-pub const PROTOCOLS: [u32; 2] = [5, 4];
+/// The program protocols the drivers speak, newest first: 5 is 4 with needs, 6 is 5 with
+/// `call_ended`'s `waited`. Every runtime Steery supports offers 4 (it came in runtime
+/// 7.0.130; the oldest supported is later), so no driver answers an older one.
+pub const PROTOCOLS: [u32; 3] = [6, 5, 4];
 
 /// The first protocol with needs: `setup/plan`'s `needs` and `needs/give`.
 pub const NEEDS: u32 = 5;
 
+/// The first protocol whose `call_ended` says `waited`: the earlier calls whose work a call
+/// waited on.
+pub const WAITED: u32 = 6;
+
 /// The newest of [`PROTOCOLS`] the runtime `offered`; none where it offered neither. A
-/// driver keeps it, and answers needs only where it is [`NEEDS`] or newer.
+/// driver keeps it, answers needs only where it is [`NEEDS`] or newer, and says `waited`
+/// only where it is [`WAITED`] or newer.
 pub fn protocol(offered: &[u32]) -> Option<u32> {
     PROTOCOLS.into_iter().find(|version| offered.contains(version))
 }
