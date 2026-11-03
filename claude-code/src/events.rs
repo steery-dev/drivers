@@ -475,16 +475,10 @@ impl State<'_> {
             self.pending = None;
         }
         if !thought.is_empty() {
-            self.words(
-                format!("{id}:thought"),
-                Voice::Thought,
-                thought,
-                None,
-                Vec::new(),
-            );
+            self.said_of(format!("{id}:thought"), response.clone(), Voice::Thought, thought);
         }
         if !said.is_empty() {
-            self.words(id.clone(), Voice::Agent, said, None, Vec::new());
+            self.said_of(id.clone(), response.clone(), Voice::Agent, said);
         }
         for block in content
             .iter()
@@ -744,8 +738,23 @@ impl State<'_> {
             id,
             voice,
             text,
+            message: None,
             call,
             clips,
+        });
+    }
+
+    /// A response's words of one voice, named for the response they are of: Claude Code
+    /// writes each block of one in a record of its own.
+    fn said_of(&mut self, id: String, response: Option<String>, voice: Voice, text: String) {
+        self.out.push(Event::Words {
+            at: self.at,
+            id,
+            voice,
+            text,
+            message: response,
+            call: None,
+            clips: Vec::new(),
         });
     }
 }
@@ -1321,6 +1330,7 @@ mod tests {
             id: "p".into(),
             voice: Voice::Person,
             text: "this one".into(),
+            message: None,
             call: None,
             clips: vec![Clip::Bytes {
                 data: "iVBORw0KGgo=".into(),

@@ -501,17 +501,10 @@ impl State<'_> {
         let mark = self.out.len();
         let forked = self.forked;
         if !thought.is_empty() {
-            self.words(
-                at,
-                format!("{id}:thought"),
-                Voice::Thought,
-                thought,
-                None,
-                Vec::new(),
-            );
+            self.said_of(at, format!("{id}:thought"), &id, Voice::Thought, thought);
         }
         if !said.is_empty() {
-            self.words(at, id.clone(), Voice::Agent, said, None, Vec::new());
+            self.said_of(at, id.clone(), &id, Voice::Agent, said);
         }
         for block in calls {
             let (Some(call), Some(name)) = (text(block, "id"), text(block, "name")) else {
@@ -788,8 +781,22 @@ impl State<'_> {
             id,
             voice,
             text,
+            message: None,
             call,
             clips,
+        });
+    }
+
+    /// An assistant message's words of one voice, named for the entry they are of.
+    fn said_of(&mut self, at: u64, id: String, message: &str, voice: Voice, text: String) {
+        self.out.push(Event::Words {
+            at,
+            id,
+            voice,
+            text,
+            message: Some(message.to_owned()),
+            call: None,
+            clips: Vec::new(),
         });
     }
 

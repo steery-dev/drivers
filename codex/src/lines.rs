@@ -228,6 +228,7 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
                 id: call.as_ref().map_or_else(|| id.to_owned(), |call| format!("{call}:out")),
                 voice,
                 text: said,
+                message: None,
                 call,
                 clips: Vec::new(),
             });
