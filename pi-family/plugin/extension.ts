@@ -279,7 +279,7 @@ const LIVE_EVERY_MS = 16;
 /** The most bytes of one `live` frame: longer text goes on in the next. */
 const LIVE_FRAME_MAX = 64 << 10;
 
-/** How many ended messages the door remembers: to drop their late updates, and to name their entries. */
+/** How many ended messages the door remembers, to drop the pieces omp queued for them after their end. */
 const LIVE_ENDED_KEPT = 16;
 
 /** The door's word for each way omp's model stops a message. */
@@ -2080,10 +2080,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
 
   /** The harness may have appended entries: those not yet sent go on the next turn of the loop. */
   const noteEntries = () => {
-    if ((!stream && !takesLive) || entriesTimer) return;
+    if (!stream || entriesTimer) return;
     entriesTimer = setTimeout(() => {
       entriesTimer = undefined;
-      nameEnded();
       void sendEntries();
     }, 0);
     entriesTimer.unref?.();
@@ -2205,9 +2204,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   /** The runtime welcomed this door with `live`: it takes the agent's messages as they are written. */
   let takesLive = false;
   /**
-   * The assistant message being written: `message` its `timestamp`, which is omp's own
-   * identity of it until the entry that records it has an id; its newest form; and of
-   * each voice the text this door has sent, and its length in Unicode scalar values.
+   * The assistant message being written: `message` its `timestamp`, omp's own identity of
+   * it and the reply's from its first piece on; its newest form; and of each voice the text
+   * this door has sent, and its length in Unicode scalar values.
    */
   let speaking:
     | {
@@ -2224,8 +2223,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     | undefined;
   let liveTimer: NodeJS.Timeout | undefined;
   let liveAt = 0;
-  /** Messages that ended, oldest first, at most [`LIVE_ENDED_KEPT`]: whether their entry was named. */
-  const liveEnded = new Map<string, { first_at: number; at: number; stop: string; named: boolean }>();
+  /** Messages that ended, oldest first, at most [`LIVE_ENDED_KEPT`]: their late pieces are dropped. */
+  const liveEnded = new Set<string>();
 
   /** The message `id` is the one being written now; one that was before goes out first, whole. */
   const speak = (id: string, now: number): NonNullable<typeof speaking> => {
@@ -2326,7 +2325,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteLive();
   };
 
-  /** An assistant message ended: the rest of it and its end go now, and its entry is named once omp appends it. */
+  /** An assistant message ended: its final text, then its end, go now. */
   const liveEnd = (message: { timestamp?: unknown; stopReason?: unknown }) => {
     if (!takesLive || typeof message.timestamp !== "number") return;
     const id = String(message.timestamp);
@@ -2336,46 +2335,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     one.latest = message;
     one.at = now;
     one.stop = (typeof message.stopReason === "string" ? LIVE_STOPS[message.stopReason] : undefined) ?? "stop";
-    liveEnded.set(id, { first_at: one.first_at, at: now, stop: one.stop, named: false });
-    for (const old of liveEnded.keys()) {
+    liveEnded.add(id);
+    for (const old of liveEnded) {
       if (liveEnded.size <= LIVE_ENDED_KEPT) break;
       liveEnded.delete(old);
     }
     flushLive();
-  };
-
-  /**
-   * Name the entries of ended messages: omp appends a message's entry, and gives it its id,
-   * only after its `message_end` handlers ran. Read from the newest entry back to the
-   * oldest message still unnamed.
-   */
-  const nameEnded = () => {
-    const ctx = live;
-    if (!takesLive || !ctx) return;
-    let oldest = Infinity;
-    for (const [id, one] of liveEnded) if (!one.named) oldest = Math.min(oldest, Number(id));
-    if (oldest === Infinity) return;
-    let entries: unknown[] | undefined;
-    try {
-      entries = ctx.sessionManager.getEntries?.();
-    } catch {
-      return;
-    }
-    if (!entries) return;
-    for (let at = entries.length - 1; at >= 0; at--) {
-      const entry = entries[at];
-      const said = entry && typeof entry === "object" && "message" in entry ? entry.message : undefined;
-      if (!said || typeof said !== "object" || !("role" in said) || said.role !== "assistant") continue;
-      if (!("timestamp" in said) || typeof said.timestamp !== "number") continue;
-      if (said.timestamp < oldest) break;
-      const message = String(said.timestamp);
-      const one = liveEnded.get(message);
-      const named = entryId(entry);
-      if (!one || one.named || !named) continue;
-      if (send({ t: "live", message, at: one.at, first_at: one.first_at, end: { entry: named, stop: one.stop } })) {
-        one.named = true;
-      }
-    }
   };
 
   /**
