@@ -1628,8 +1628,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (says.includes(say)) says.splice(says.indexOf(say), 1);
     settleSay(say, { refused: word, error });
   };
-  /** The says a force is aborting a turn for now: their words wait on that abort, never let go meanwhile ([`strand`]). */
-  const forcing = new Set<Say>();
+  /**
+   * The says a force is aborting a turn for now, with what it answers: their words wait on
+   * that abort, never let go meanwhile ([`strand`]), and a second force of one waits on the
+   * first, never aborting the turn that is taking them.
+   */
+  const forcing = new Map<Say, Promise<Said>>();
   /**
    * The says whose words began the stretch of the turn running now: none where its person
    * started it, or put words of their own into it. The one turn a `stop` may stop is the
@@ -1990,6 +1994,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (stateTimer || !welcomed) return;
     stateTimer = setTimeout(sendState, Math.max(0, stateAt + STATE_EVERY_MS - Date.now()));
     stateTimer.unref?.();
+  };
+  /**
+   * A call began or ended: the state goes now, unthrottled. The runtime forces a held steer
+   * in once `calls` reads empty, so a call's end is read as it happens.
+   */
+  const sendStateNow = () => {
+    hold(live);
+    noteEntries();
+    clearTimeout(stateTimer);
+    sendState();
   };
 
   /** The harness may have appended entries: those not yet sent go on the next turn of the loop. */
@@ -2742,8 +2756,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     const running = () => turning || ctx.isIdle?.() === false;
     if (one.taken_at !== undefined || !running()) return { ok: { stopped: false, running: background(ctx) } };
-    forcing.add(one);
-    ctx.abort();
+    let forced = forcing.get(one);
+    if (!forced) {
+      forced = abortFor(ctx, one, session, running).finally(() => forcing.delete(one));
+      forcing.set(one, forced);
+    }
+    return forced;
+  };
+  /** [`force`]'s abort of the turn running, for `one`'s words. */
+  const abortFor = async (ctx: Context, one: Say, session: string | undefined, running: () => boolean): Promise<Said> => {
+    ctx.abort?.();
     const deadline = Date.now() + STOPPED_WITHIN_MS;
     const settled = () => one.taken_at !== undefined || (!running() && idle(ctx) === true);
     while (inSession(session) && !settled() && Date.now() < deadline) {
@@ -2751,7 +2773,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       setTimeout(resolve, 50);
       await promise;
     }
-    forcing.delete(one);
     if (!inSession(session)) return { refused: "no-answer", error: "the session moved while its turn was stopping" };
     if (one.taken_at === undefined && idle(ctx) === true && !one.again && says.includes(one)) {
       one.again = true;
@@ -3273,7 +3294,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const parent = str(event.parentToolCallId);
     if (!parent) calls.set(id, { id, tool, since: Date.now(), children: [] });
     else outer(parent)?.children.push({ id, tool });
-    noteState();
+    sendStateNow();
   });
   // omp's `wait` reports the background jobs it waits on every 500 ms: those still running
   // stand on its call, and leave with it at its end. pi has no `wait`.
@@ -3300,7 +3321,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       const call = outer(parent);
       if (call) call.children = call.children.filter((child) => child.id !== id);
     }
-    noteState();
+    sendStateNow();
   });
   // A dialog of the harness's own waits on its person: a local dialog, never a request.
   pi.on("ui_prompt_start", (event, ctx) => {
