@@ -11,7 +11,8 @@
 // copy says what the conversation is doing as it changes (`state`, a LiveState) and the
 // harness's moments as they happen (`moment`, the hook document the driver's `hook/read`
 // reads), and, where the runtime asks, the session's entries as the harness appends them
-// (`entries`, which the driver's `sessions/fold` reads); at each turn the person starts
+// (`entries`, which the driver's `sessions/fold` reads) and the agent's messages as the
+// model writes them (`live`); at each turn the person starts
 // the runtime answers the one paragraph Steery has for its agent (`say`), and at a turn's
 // end (`settle`) the words that keep it going. In a
 // conversation Steery started, the runtime asks the copy over the same door to hand words
@@ -48,6 +49,59 @@ const RECORDS_MAX = 8 << 20;
 function entryId(entry: unknown): string | undefined {
   if (!entry || typeof entry !== "object" || !("id" in entry)) return undefined;
   return typeof entry.id === "string" && entry.id ? entry.id : undefined;
+}
+
+/**
+ * One voice's whole text of an assistant message: its non-blank `kind` blocks' `field`
+ * joined with `"\n"`, as the driver's fold joins them (`events.rs` `answer`), so the live
+ * text and the recorded words agree.
+ */
+function voiced(blocks: readonly unknown[], kind: string, field: string): string {
+  const said: string[] = [];
+  for (const block of blocks) {
+    if (!block || typeof block !== "object") continue;
+    const one = block as Record<string, unknown>;
+    const text = one[field];
+    if (one.type === kind && typeof text === "string" && text.trim()) said.push(text);
+  }
+  return said.join("\n");
+}
+
+function highSurrogate(unit: number): boolean {
+  return unit >= 0xd800 && unit <= 0xdbff;
+}
+
+/** The length of `text` in Unicode scalar values, as the door counts `from`. */
+function scalars(text: string): number {
+  let count = 0;
+  for (let at = 0; at < text.length; at++) {
+    if (highSurrogate(text.charCodeAt(at)) && at + 1 < text.length) at++;
+    count++;
+  }
+  return count;
+}
+
+/** How many leading UTF-16 units `a` and `b` share, never ending inside a character. */
+function shared(a: string, b: string): number {
+  const most = Math.min(a.length, b.length);
+  let at = 0;
+  while (at < most && a.charCodeAt(at) === b.charCodeAt(at)) at++;
+  if (at > 0 && highSurrogate(b.charCodeAt(at - 1))) at--;
+  return at;
+}
+
+/** The longest start of `text` whose JSON takes at most `room` bytes, never ending inside a character. */
+function fitted(text: string, room: number): string {
+  const size = Buffer.byteLength(JSON.stringify(text));
+  if (size <= room) return text;
+  let end = Math.floor((text.length * room) / size);
+  while (end > 0) {
+    if (highSurrogate(text.charCodeAt(end - 1))) end--;
+    const cut = text.slice(0, end);
+    if (Buffer.byteLength(JSON.stringify(cut)) <= room) return cut;
+    end = Math.floor(end * 0.9);
+  }
+  return "";
 }
 
 /** The runtime's door. */
@@ -218,6 +272,24 @@ const LET_GO = 1000;
 
 /** At most one `state` per this many milliseconds; changes in between go in the next. */
 const STATE_EVERY_MS = 100;
+
+/** At most one `live` frame of a message per this many milliseconds (PROTOCOL.md §4.4). */
+const LIVE_EVERY_MS = 16;
+
+/** The most bytes of one `live` frame: longer text goes on in the next. */
+const LIVE_FRAME_MAX = 64 << 10;
+
+/** How many ended messages the door remembers: to drop their late updates, and to name their entries. */
+const LIVE_ENDED_KEPT = 16;
+
+/** The door's word for each way omp's model stops a message. */
+const LIVE_STOPS: Record<string, string> = {
+  stop: "stop",
+  length: "length",
+  toolUse: "tool_use",
+  aborted: "aborted",
+  error: "error",
+};
 
 /**
  * How many ended calls the door's `state` names, newest kept: pi writes the results of a
@@ -2008,9 +2080,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
 
   /** The harness may have appended entries: those not yet sent go on the next turn of the loop. */
   const noteEntries = () => {
-    if (!stream || entriesTimer) return;
+    if ((!stream && !takesLive) || entriesTimer) return;
     entriesTimer = setTimeout(() => {
       entriesTimer = undefined;
+      nameEnded();
       void sendEntries();
     }, 0);
     entriesTimer.unref?.();
@@ -2129,6 +2202,182 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
   };
 
+  /** The runtime welcomed this door with `live`: it takes the agent's messages as they are written. */
+  let takesLive = false;
+  /**
+   * The assistant message being written: `message` its `timestamp`, which is omp's own
+   * identity of it until the entry that records it has an id; its newest form; and of
+   * each voice the text this door has sent, and its length in Unicode scalar values.
+   */
+  let speaking:
+    | {
+        message: string;
+        first_at: number;
+        at: number;
+        latest: unknown;
+        /** How it stopped, once it ended: the end goes once all its text went. */
+        stop?: string;
+        forming?: string;
+        agent: { text: string; count: number };
+        thought: { text: string; count: number };
+      }
+    | undefined;
+  let liveTimer: NodeJS.Timeout | undefined;
+  let liveAt = 0;
+  /** Messages that ended, oldest first, at most [`LIVE_ENDED_KEPT`]: whether their entry was named. */
+  const liveEnded = new Map<string, { first_at: number; at: number; stop: string; named: boolean }>();
+
+  /** The message `id` is the one being written now; one that was before goes out first, whole. */
+  const speak = (id: string, now: number): NonNullable<typeof speaking> => {
+    const was = speaking;
+    if (was?.message === id) return was;
+    while (was && speaking === was && flushLive());
+    speaking = { message: id, first_at: now, at: now, latest: undefined, agent: { text: "", count: 0 }, thought: { text: "", count: 0 } };
+    return speaking;
+  };
+
+  /** The message changed: its newest form goes within [`LIVE_EVERY_MS`]. */
+  const noteLive = () => {
+    if (liveTimer) return;
+    liveTimer = setTimeout(flushLive, Math.max(0, liveAt + LIVE_EVERY_MS - Date.now()));
+    liveTimer.unref?.();
+  };
+
+  /**
+   * Send what of the message being written changed since the last frame: each voice's text
+   * from where it first differs from what was sent, and its end once all its text went.
+   * Returns whether text was left for the next frame.
+   */
+  const flushLive = (): boolean => {
+    clearTimeout(liveTimer);
+    liveTimer = undefined;
+    const one = speaking;
+    if (!one || !takesLive) return false;
+    const latest = one.latest;
+    const content = latest && typeof latest === "object" && "content" in latest ? latest.content : undefined;
+    const blocks: readonly unknown[] = Array.isArray(content) ? content : [];
+    const last: unknown = blocks[blocks.length - 1];
+    const forming =
+      one.stop === undefined &&
+      last &&
+      typeof last === "object" &&
+      "type" in last &&
+      last.type === "toolCall" &&
+      "name" in last &&
+      typeof last.name === "string"
+        ? last.name
+        : undefined;
+    // What the frame's other fields take, kept back from its parts' text.
+    let room = LIVE_FRAME_MAX - 1024;
+    let left = false;
+    const parts: { voice: string; from: number; text: string }[] = [];
+    for (const [voice, kind, field] of [
+      ["thought", "thinking", "thinking"],
+      ["agent", "text", "text"],
+    ] as const) {
+      const sent = one[voice];
+      const now = voiced(blocks, kind, field);
+      if (now === sent.text) continue;
+      const same = shared(sent.text, now);
+      const from = same === sent.text.length ? sent.count : scalars(now.slice(0, same));
+      const rest = now.slice(same);
+      const text = fitted(rest, room);
+      if (text.length < rest.length) left = true;
+      if (!text && rest) continue;
+      room -= Buffer.byteLength(JSON.stringify(text));
+      parts.push({ voice, from, text });
+      one[voice] = { text: now.slice(0, same) + text, count: from + scalars(text) };
+    }
+    const end = one.stop !== undefined && !left ? { stop: one.stop } : undefined;
+    if (parts.length === 0 && forming === one.forming && !end) return left;
+    one.forming = forming;
+    const sent = send({
+      t: "live",
+      message: one.message,
+      at: one.at,
+      first_at: one.first_at,
+      ...(parts.length > 0 ? { parts } : {}),
+      ...(forming ? { forming } : {}),
+      ...(end ? { end } : {}),
+    });
+    if (!sent) {
+      // No door took it: the next one's runtime starts the message from nothing.
+      speaking = undefined;
+      return false;
+    }
+    liveAt = Date.now();
+    if (end) speaking = undefined;
+    else if (left) noteLive();
+    return left;
+  };
+
+  /** omp wrote more of an assistant message. Runs for every piece, so it only keeps the newest form. */
+  const wrote = (message: unknown) => {
+    if (!takesLive || !message || typeof message !== "object") return;
+    if (!("role" in message) || message.role !== "assistant") return;
+    if (!("timestamp" in message) || typeof message.timestamp !== "number") return;
+    const id = String(message.timestamp);
+    // omp hands extensions a message's end before the pieces it queued for them.
+    if (liveEnded.has(id)) return;
+    const now = Date.now();
+    const one = speak(id, now);
+    one.latest = message;
+    one.at = now;
+    noteLive();
+  };
+
+  /** An assistant message ended: the rest of it and its end go now, and its entry is named once omp appends it. */
+  const liveEnd = (message: { timestamp?: unknown; stopReason?: unknown }) => {
+    if (!takesLive || typeof message.timestamp !== "number") return;
+    const id = String(message.timestamp);
+    if (liveEnded.has(id)) return;
+    const now = Date.now();
+    const one = speak(id, now);
+    one.latest = message;
+    one.at = now;
+    one.stop = (typeof message.stopReason === "string" ? LIVE_STOPS[message.stopReason] : undefined) ?? "stop";
+    liveEnded.set(id, { first_at: one.first_at, at: now, stop: one.stop, named: false });
+    for (const old of liveEnded.keys()) {
+      if (liveEnded.size <= LIVE_ENDED_KEPT) break;
+      liveEnded.delete(old);
+    }
+    flushLive();
+  };
+
+  /**
+   * Name the entries of ended messages: omp appends a message's entry, and gives it its id,
+   * only after its `message_end` handlers ran. Read from the newest entry back to the
+   * oldest message still unnamed.
+   */
+  const nameEnded = () => {
+    const ctx = live;
+    if (!takesLive || !ctx) return;
+    let oldest = Infinity;
+    for (const [id, one] of liveEnded) if (!one.named) oldest = Math.min(oldest, Number(id));
+    if (oldest === Infinity) return;
+    let entries: unknown[] | undefined;
+    try {
+      entries = ctx.sessionManager.getEntries?.();
+    } catch {
+      return;
+    }
+    if (!entries) return;
+    for (let at = entries.length - 1; at >= 0; at--) {
+      const entry = entries[at];
+      const said = entry && typeof entry === "object" && "message" in entry ? entry.message : undefined;
+      if (!said || typeof said !== "object" || !("role" in said) || said.role !== "assistant") continue;
+      if (!("timestamp" in said) || typeof said.timestamp !== "number") continue;
+      if (said.timestamp < oldest) break;
+      const message = String(said.timestamp);
+      const one = liveEnded.get(message);
+      const named = entryId(entry);
+      if (!one || one.named || !named) continue;
+      if (send({ t: "live", message, at: one.at, first_at: one.first_at, end: { entry: named, stop: one.stop } })) {
+        one.named = true;
+      }
+    }
+  };
+
   /**
    * pi: the headers that name the conversation on every call to Steery's tools: its own,
    * or for a sub-agent its lead's with its own id beside it. A sub-agent whose lead
@@ -2180,10 +2429,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   /**
    * The runtime accepted this copy: what was kept goes, then what the conversation is
    * doing, again, then, where the runtime takes them (`entries`), the entries after the
-   * last one it holds.
+   * last one it holds; and, where it takes them (`live`), the agent's messages as they are
+   * written from now on.
    */
-  const welcome = (entries: unknown) => {
+  const welcome = (entries: unknown, relays: unknown) => {
     welcomed = true;
+    takesLive = relays === true;
     backoff = REDIAL_MIN_MS;
     for (const one of moments().queue.splice(0)) post(one);
     stateSent = "";
@@ -2213,6 +2464,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     stream = undefined;
     clearTimeout(entriesTimer);
     entriesTimer = undefined;
+    takesLive = false;
+    speaking = undefined;
+    clearTimeout(liveTimer);
+    liveTimer = undefined;
     const unanswered = [...inflight.values()];
     inflight.clear();
     moments().queue.unshift(...unanswered);
@@ -2229,7 +2484,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const said = frame as Frame;
     switch (said.t) {
       case "welcome":
-        if (said.door === DOOR_VERSION && !welcomed) welcome(said.entries);
+        if (said.door === DOOR_VERSION && !welcomed) welcome(said.entries, said.live);
         return;
       case "answer": {
         if (typeof said.id !== "string" || !said.ok || typeof said.ok !== "object") return;
@@ -3260,6 +3515,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     causeWritten = undefined;
     const answer = event.message as { role?: unknown; stopReason?: unknown; errorMessage?: unknown } | null | undefined;
     if (answer && typeof answer === "object" && answer.role === "assistant") {
+      liveEnd(answer);
       if (answer.stopReason === "error") failure = typeof answer.errorMessage === "string" ? answer.errorMessage : "";
       else if (answer.stopReason !== "aborted") failure = undefined;
       stopped = {
@@ -3270,6 +3526,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteState();
     return undefined;
   });
+  // The assistant message as omp writes it, piece by piece (`live` frames).
+  pi.on("message_update", (event) => wrote(event.message));
   // Every other moment the state's fields may change at says them again.
   const changed = (_event: Event, ctx: Context) => {
     live = ctx;
