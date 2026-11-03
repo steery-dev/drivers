@@ -11,20 +11,27 @@
 //! error, and the mode exits 1.
 //!
 //! Where the listing leaves a question — whether a stop it shows is this turn's, and what
-//! went wrong — a `new` or a `fork` session's own `Stop` and `StopFailure` hooks answer it:
-//! the launch gives that one session two more hooks (`--settings`), which run this binary's
-//! `heard` mode and hand their documents to the follower ([`Heard`]). A `continue` gets none:
-//! Claude Code 2.1.304 resumes a session launched with `--settings` as a new session, so
-//! the words would go to a conversation nobody asked for. A row whose process started after
-//! the launch is this turn's without them, and an error no `StopFailure` named is read from
-//! the transcript's end.
+//! went wrong — the session's own `Stop` and `StopFailure` hooks answer it: the launch
+//! gives that one session two more hooks (`--settings`), which run this binary's `heard`
+//! mode and hand their documents to the follower ([`Heard`]). A row whose process started
+//! after the launch is this turn's without them, and an error no `StopFailure` named is
+//! read from the transcript's end.
 //!
-//! A `continue` never starts beside a session that is in the conversation: Claude Code
-//! would start a copy. One already there is refused before anything starts, and a copy
-//! Claude Code started anyway, in the moment between that look and the start, is stopped
-//! and removed at once, and the turn refused the same way. Claude refuses a background
-//! session in a folder the person has not trusted in Claude, as it would at their own
-//! terminal.
+//! Steery's own variables (`STEERY_STARTED`) reach the session through the same
+//! `--settings`, as its `env`, and never through the launch's environment: Claude Code's
+//! supervisor keeps the environment of the launch that started it for every session after
+//! ([`follow`]).
+//!
+//! A `continue` of a conversation Claude Code keeps a background job for wakes that job
+//! with `--bg --resume <id>` and nothing else ([`Kept`]): Claude Code 2.1.317 wakes it with
+//! the options it saved and starts a copy for any flag beside it, so the job goes on with
+//! the settings, hooks and variables its first launch gave it, and a pick it would not run
+//! is refused first. A `continue` never starts beside a session that is in the
+//! conversation: Claude Code would start a copy. One already there is refused before
+//! anything starts, and a copy Claude Code started anyway, for any reason it has for one
+//! ([`agents::COPIED`]), is stopped and removed at once, and the turn refused in Claude
+//! Code's own words. Claude refuses a background session in a folder the person has not
+//! trusted in Claude, as it would at their own terminal.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -80,6 +87,10 @@ pub const HEARD: &str = "heard";
 
 /// The hooks of the session's own turn end ([`Heard`]).
 const ENDS: [&str; 2] = ["Stop", "StopFailure"];
+
+/// What the name of each of Steery's own variables begins with: the ones the runtime gives a
+/// turn's process, which only the session it starts carries on ([`follow`]).
+const STEERY: &str = "STEERY_";
 
 /// A turn, as `start` plans it and the turn mode reads it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,9 +167,15 @@ impl Turn {
     /// `setMode` to `bypassPermissions`, takes effect: Claude Code ignores that update in a
     /// session launched without it (https://code.claude.com/docs/en/hooks, "Permission
     /// update entries"). Before that acceptance Claude Code refuses to start a background
-    /// session that names the flag at all.
-    fn launching(&self, bypass: bool) -> Result<Vec<String>, String> {
+    /// session that names the flag at all. A `continue` of a session Claude Code keeps a
+    /// background job for (`kept`, [`Kept`]) is `--bg --resume <id>` alone: Claude Code
+    /// wakes it with the options the job saved, and starts a copy for any flag passed.
+    fn launching(&self, bypass: bool, kept: bool) -> Result<Vec<String>, String> {
         let mut args: Vec<String> = vec!["--bg".into()];
+        if let (Act::Continue, Some(id), true) = (self.act, self.id.as_deref(), kept) {
+            args.extend(["--resume".into(), id.into()]);
+            return Ok(args);
+        }
         if bypass {
             args.push("--allow-dangerously-skip-permissions".into());
         }
@@ -230,8 +247,11 @@ fn bypass_accepted(home: &Path, root: &Path, place: &Path) -> bool {
 /// The turn mode: run the turn its arguments say, the words on standard input. Exits 0
 /// once the turn settled, 1 with Claude Code's words on standard error where it did not.
 /// A runtime stops a turn by signalling its process group, so a SIGTERM, a SIGINT or a
-/// SIGHUP ends the follow there, which drops everything it made ([`Heard`]): the session it
-/// started goes on as Claude Code's own and writes nowhere of the follower's.
+/// SIGHUP ends the follow there, which drops everything it made ([`Heard`]), and ends the
+/// session the launch started through Claude Code's own `claude stop`, which keeps its
+/// conversation ([`halt`]): that session runs in a process of Claude Code's supervisor,
+/// outside the group and carrying nothing of the turn's, so no signal of the runtime's
+/// reaches it.
 pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     let ran = (|| {
         let turn = Turn::parse(args)?;
@@ -252,12 +272,16 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
                 let mut int = hear(SignalKind::interrupt())?;
                 let mut hup = hear(SignalKind::hangup())?;
                 let mut out = std::io::stdout();
-                tokio::select! {
-                    followed = follow(&turn, &root, bypass, &words, &mut out) => followed,
-                    _ = term.recv() => Err("stopped by SIGTERM".to_owned()),
-                    _ = int.recv() => Err("stopped by SIGINT".to_owned()),
-                    _ = hup.recv() => Err("stopped by SIGHUP".to_owned()),
-                }
+                let job = std::cell::OnceCell::new();
+                let signalled = tokio::select! {
+                    followed = follow(&turn, &root, bypass, &words, &job, &mut out) => {
+                        return followed;
+                    }
+                    _ = term.recv() => "SIGTERM",
+                    _ = int.recv() => "SIGINT",
+                    _ = hup.recv() => "SIGHUP",
+                };
+                Err(halt(&turn.binary, job.get(), signalled).await)
             })
     })();
     match ran {
@@ -271,37 +295,60 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
 
 /// [`run`], the words in hand: start the session, then follow it to where its turn
 /// stopped, writing each change to `out`. `bypass`: whether the launch may make bypass
-/// mode available ([`Turn::launching`]).
+/// mode available ([`Turn::launching`]). `job` is given the background session's job once
+/// the launch names it, for [`halt`].
 async fn follow(
     turn: &Turn,
     root: &Path,
     bypass: bool,
     words: &str,
+    job: &std::cell::OnceCell<String>,
     out: &mut impl Write,
 ) -> Result<(), String> {
     let registry = crate::registry::dir(root);
-    if turn.act == Act::Continue
-        && let Some(id) = turn.id.as_deref()
-        && running_now(&turn.binary, &registry, id).await?
-    {
-        return Err(format!("session {id} {}", RUNNING[0]));
+    let kept = match (turn.act, turn.id.as_deref()) {
+        (Act::Continue, Some(id)) => Kept::of(&turn.binary, root, &registry, id).await?,
+        _ => None,
+    };
+    if let Some(kept) = &kept {
+        kept.takes(turn)?;
     }
     let launched = now();
-    let heard = match turn.act {
-        Act::Continue => None,
-        _ => Some(Heard::new(launched)?),
+    // A woken job keeps the hooks its first launch gave it, which find no file to write
+    // to; every other launch gives its session its own.
+    let heard = match &kept {
+        Some(_) => None,
+        None => Some(Heard::new(launched)?),
     };
-    // The session writes the conversation: it keeps the `STEERY_STARTED` the runtime gave
-    // this turn, never a helper's.
+    // Steery's own variables (`STEERY_STARTED`, PROTOCOL.md §3.3) reach the session this
+    // launch starts through its own settings, never through the launch's environment:
+    // Claude Code runs every background session in a process of its supervisor's, which
+    // passes on none of a launch's variables and keeps the environment of whichever launch
+    // started it. Passed down, the first turn's `STEERY_STARTED` named every session after
+    // it (2.1.317: a session started at 11:38 carried the `turn@` of 11:30), so their agents'
+    // `steery` calls were filed under that turn's session and its stop stopped them all.
+    // The settings' `env` outranks the supervisor's (2.1.317). A session Claude Code keeps
+    // a background job for is given nothing ([`Kept`]): it goes on with the settings its
+    // own launch gave it, which Claude Code gives it again whenever it wakes it.
+    let steery: serde_json::Map<String, Value> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .filter(|(name, _)| name.starts_with(STEERY))
+        .map(|(name, value)| (name, Value::String(value)))
+        .collect();
     let mut command = tokio::process::Command::new(&turn.binary);
+    for name in steery.keys() {
+        command.env_remove(name);
+    }
     command.stdin(std::process::Stdio::null());
-    command.args(turn.launching(bypass)?);
+    command.args(turn.launching(bypass, kept.is_some())?);
     // The key is read through the helper only where Claude Code has no sign-in of its own:
     // a helper outranks a plan's sign-in, and a person signed in with their plan who also
     // exports a key they never approved keeps their plan, as Claude Code itself would.
     let keyed = std::env::var_os(anthropic::VARIABLE).is_some_and(|key| !key.is_empty())
         && crate::drive::signed_in(false).await == Some(false);
-    if let Some(settings) = settings(heard.as_ref(), keyed)? {
+    if kept.is_none()
+        && let Some(settings) = settings(heard.as_ref(), Some(&steery), keyed)?
+    {
         command.args(["--settings".to_owned(), settings]);
     }
     let launch = command
@@ -317,20 +364,23 @@ async fn follow(
         String::from_utf8_lossy(&launch.stdout),
         String::from_utf8_lossy(&launch.stderr)
     );
-    if turn.act == Act::Continue && RUNNING.iter().any(|running| said.contains(running)) {
+    if turn.act == Act::Continue && agents::copied(&said) {
         if let Some(copy) = agents::backgrounded(&said) {
             discard(&turn.binary, &copy).await;
         }
+        let note = said.lines().find(|line| agents::copied(line)).unwrap_or_default();
         return Err(format!(
-            "session {} {}: the copy Claude Code started beside it was stopped and removed",
-            turn.id.as_deref().unwrap_or_default(),
-            RUNNING[1]
+            "{}: the copy Claude Code started instead of going on in session {} was stopped \
+             and removed",
+            note.trim(),
+            turn.id.as_deref().unwrap_or_default()
         ));
     }
     let short = match (launch.status.success(), agents::backgrounded(&said)) {
         (true, Some(short)) => short,
         _ => return Err(said.trim().to_owned()),
     };
+    let _ = job.set(short.clone());
     let listed_by = tokio::time::Instant::now() + LISTED_WITHIN;
     let mut last: Option<Value> = None;
     let mut follow = Follow::default();
@@ -414,17 +464,119 @@ fn now() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
-/// Whether a process is in the conversation now: the registry names a live one, or
-/// `claude agents` lists a session in it with a process behind it. A session stopped
-/// keeps its row with no process, and holds nothing.
-async fn running_now(binary: &Path, registry: &Path, id: &str) -> Result<bool, String> {
-    if crate::registry::live(registry, id).is_some() {
-        return Ok(true);
+/// The background job Claude Code keeps for the conversation a `continue` goes on in:
+/// `jobs/<the first 8 of its id>/state.json` under its configuration root, naming that
+/// conversation, with the flags it wakes it with (`respawnFlags`) and the provider's
+/// variables it saved (`providerEnv`). Claude Code wakes such a job with the options it
+/// saved, and starts a copy for any flag passed beside `--resume` (2.1.317, `own-options`),
+/// so the continue passes none ([`Turn::launching`]), and a pick the job would not run is
+/// refused before anything starts ([`Kept::takes`]).
+struct Kept {
+    job: String,
+    model: Option<String>,
+    effort: Option<String>,
+    provider: serde_json::Map<String, Value>,
+}
+
+impl Kept {
+    /// The job kept for conversation `id`, none where Claude Code keeps none for it. A
+    /// process in the conversation now holds it, and is refused: the registry names a live
+    /// one, or `claude agents` lists a session in it with a process behind it (one stopped
+    /// keeps its row with no process, and holds nothing), and Claude Code would start a
+    /// copy beside it.
+    async fn of(
+        binary: &Path,
+        root: &Path,
+        registry: &Path,
+        id: &str,
+    ) -> Result<Option<Self>, String> {
+        let running = crate::registry::live(registry, id).is_some()
+            || agents::agents(binary).await?.iter().any(|entry| {
+                entry.get("sessionId").and_then(Value::as_str) == Some(id)
+                    && entry.get("pid").and_then(Value::as_u64).is_some()
+            });
+        if running {
+            return Err(format!("session {id} {}", RUNNING[0]));
+        }
+        let job = id.get(..8).unwrap_or(id);
+        let Some(state) = std::fs::read(root.join("jobs").join(job).join("state.json"))
+            .ok()
+            .and_then(|text| serde_json::from_slice::<Value>(&text).ok())
+            .filter(|state| state.get("sessionId").and_then(Value::as_str) == Some(id))
+        else {
+            return Ok(None);
+        };
+        let flags: Vec<&str> = state
+            .get("respawnFlags")
+            .and_then(Value::as_array)
+            .map(|flags| flags.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let after = |flag: &str| {
+            let at = flags.iter().position(|given| *given == flag)?;
+            flags.get(at + 1).map(|value| (*value).to_owned())
+        };
+        Ok(Some(Self {
+            job: job.to_owned(),
+            model: after("--model"),
+            effort: after("--effort"),
+            provider: state
+                .get("providerEnv")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
+        }))
     }
-    Ok(agents::agents(binary).await?.iter().any(|entry| {
-        entry.get("sessionId").and_then(Value::as_str) == Some(id)
-            && entry.get("pid").and_then(Value::as_u64).is_some()
-    }))
+
+    /// Whether the job runs the turn's pick anyway: the model its flags name, else its
+    /// provider's `ANTHROPIC_MODEL`, and the effort its flags name. Any other pick is
+    /// refused in Claude Code's own words for it ([`agents::OWN_OPTIONS`]), which read as
+    /// `selection-unsupported`: woken, the job would run its own, and a fork takes another.
+    fn takes(&self, turn: &Turn) -> Result<(), String> {
+        let runs = self
+            .model
+            .as_deref()
+            .or_else(|| self.provider.get("ANTHROPIC_MODEL").and_then(Value::as_str));
+        if let Some(picked) = turn.model.as_deref()
+            && runs.is_none_or(|runs| self.resolved(runs) != self.resolved(picked))
+        {
+            return Err(format!(
+                "background session {} {}: it runs {}, not {picked}",
+                self.job,
+                agents::OWN_OPTIONS,
+                runs.unwrap_or("Claude Code's default model")
+            ));
+        }
+        if let Some(picked) = turn.thinking.as_deref()
+            && turn
+                .model
+                .as_deref()
+                .or(runs)
+                .is_none_or(|model| !efforts(model).is_empty())
+            && self.effort.as_deref() != Some(picked)
+        {
+            return Err(format!(
+                "background session {} {}: it runs at {}, not {picked}",
+                self.job,
+                agents::OWN_OPTIONS,
+                self.effort.as_deref().unwrap_or("Claude Code's default effort")
+            ));
+        }
+        Ok(())
+    }
+
+    /// A model as the job's provider runs it: a family's alias (`opus`, `sonnet`, `haiku`)
+    /// as its `ANTHROPIC_DEFAULT_<FAMILY>_MODEL` names it, where the provider names one.
+    fn resolved<'a>(&'a self, model: &'a str) -> &'a str {
+        ["opus", "sonnet", "haiku"]
+            .contains(&model)
+            .then(|| {
+                self.provider
+                    .get(&format!("ANTHROPIC_DEFAULT_{}_MODEL", model.to_uppercase()))
+                    .and_then(Value::as_str)
+            })
+            .flatten()
+            .unwrap_or(model)
+    }
 }
 
 /// Stop and remove a background session nobody asked for: `claude stop`, then `claude
@@ -442,6 +594,31 @@ async fn discard(binary: &Path, job: &str) {
     }
 }
 
+/// How long `claude stop` has as a turn is stopped: inside the 3 s the runtime gives every
+/// graceful stop before it signals what is left of the turn (PROTOCOL.md §4.2, `stop`).
+const HALT_WITHIN: Duration = Duration::from_secs(2);
+
+/// The turn stopped by `signal`: the background session the launch started, where it named
+/// one (`job`), is ended through `claude stop`, which keeps its conversation, so the turn
+/// stops with the follower that stood for it. The line says what came of it.
+async fn halt(binary: &Path, job: Option<&String>, signal: &str) -> String {
+    let Some(job) = job else {
+        return format!("stopped by {signal} before the launch named its background session");
+    };
+    match agents::said(binary, &["stop", job], HALT_WITHIN).await {
+        Ok(out) if out.status.success() => {
+            format!("stopped by {signal}; `claude stop {job}` ended its background session")
+        }
+        Ok(out) => format!(
+            "stopped by {signal}; `claude stop {job}` did not end its background session: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(error) => format!(
+            "stopped by {signal}; `claude stop {job}` did not end its background session: {error}"
+        ),
+    }
+}
+
 /// What a background session reads its key from where the turn holds `ANTHROPIC_API_KEY`
 /// and Claude Code has no sign-in of its own: that variable, printed by a shell. Claude
 /// Code 2.1.310 uses the variable itself only in `-p`; an interactive session, `--bg`
@@ -454,11 +631,19 @@ async fn discard(binary: &Path, job: &str) {
 const KEY_HELPER: &str = r#"printf %s "$ANTHROPIC_API_KEY""#;
 
 /// The launch's `--settings`, none where it has nothing to say: the hooks that hand the
-/// turn's end back ([`Heard`]), and [`KEY_HELPER`] where the turn is `keyed`.
-fn settings(heard: Option<&Heard>, keyed: bool) -> Result<Option<String>, String> {
+/// turn's end back ([`Heard`]), Steery's variables the session's processes carry (`env`,
+/// [`STEERY`]), and [`KEY_HELPER`] where the turn is `keyed`.
+fn settings(
+    heard: Option<&Heard>,
+    env: Option<&serde_json::Map<String, Value>>,
+    keyed: bool,
+) -> Result<Option<String>, String> {
     let mut settings = serde_json::Map::new();
     if let Some(heard) = heard {
         settings.insert("hooks".into(), heard.hooks()?);
+    }
+    if let Some(env) = env.filter(|env| !env.is_empty()) {
+        settings.insert("env".into(), Value::Object(env.clone()));
     }
     if keyed {
         settings.insert("apiKeyHelper".into(), json!(KEY_HELPER));
@@ -651,7 +836,7 @@ mod tests {
         );
         assert_eq!(Turn::parse(args.into_iter()).unwrap(), picked);
         assert_eq!(
-            picked.launching(true).unwrap(),
+            picked.launching(true, false).unwrap(),
             [
                 "--bg",
                 "--allow-dangerously-skip-permissions",
@@ -665,8 +850,16 @@ mod tests {
                 "max"
             ]
         );
+        // A conversation Claude Code keeps a background job for is woken with its own
+        // saved options: any flag beside `--resume` would start a copy.
         assert_eq!(
-            turn(Act::Fork, Some("s-1"), true).launching(false).unwrap(),
+            picked.launching(true, true).unwrap(),
+            ["--bg", "--resume", "s-1"]
+        );
+        assert_eq!(
+            turn(Act::Fork, Some("s-1"), true)
+                .launching(false, true)
+                .unwrap(),
             ["--bg", "--resume", "s-1", "--fork-session", "-w"]
         );
         let new = Turn {
@@ -674,10 +867,14 @@ mod tests {
             ..turn(Act::New, None, false)
         };
         assert_eq!(
-            new.launching(false).unwrap(),
+            new.launching(false, false).unwrap(),
             ["--bg", "--add-dir", "/a/2026/09", "--add-dir", "/a/2026/10"]
         );
-        assert!(turn(Act::Continue, None, false).launching(false).is_err());
+        assert!(
+            turn(Act::Continue, None, false)
+                .launching(false, false)
+                .is_err()
+        );
         // Haiku 4.5 takes no effort: the level picked is not passed.
         let haiku = Turn {
             model: Some("claude-haiku-4-5-20251001".into()),
@@ -685,7 +882,7 @@ mod tests {
             ..turn(Act::New, None, false)
         };
         assert_eq!(
-            haiku.launching(false).unwrap(),
+            haiku.launching(false, false).unwrap(),
             ["--bg", "--model", "claude-haiku-4-5-20251001"]
         );
     }
@@ -697,9 +894,19 @@ mod tests {
     fn a_turns_own_hooks_say_its_end_and_what_went_wrong() {
         let heard = Heard::new(now()).unwrap();
         let hooks = heard.hooks().unwrap();
-        let settings: Value =
-            serde_json::from_str(&settings(Some(&heard), false).unwrap().unwrap()).unwrap();
-        assert_eq!(settings, json!({ "hooks": hooks }));
+        let plain: Value =
+            serde_json::from_str(&settings(Some(&heard), None, false).unwrap().unwrap()).unwrap();
+        assert_eq!(plain, json!({ "hooks": hooks }));
+        // Steery's variables go to the one session the launch starts, in its own settings.
+        let given = json!({"STEERY_STARTED": "7:turn@t-1"});
+        let carried: Value = serde_json::from_str(
+            &settings(Some(&heard), given.as_object(), false)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(carried, json!({ "hooks": hooks, "env": given }));
+        assert_eq!(settings(None, Some(&serde_json::Map::new()), false).unwrap(), None);
         for end in ENDS {
             let command = hooks[end][0]["hooks"][0]["command"].as_str().unwrap();
             assert!(
@@ -767,7 +974,9 @@ mod tests {
 
     /// A `continue` into a conversation a background session holds never starts a turn
     /// beside it: refused before anything starts. And where Claude Code started a copy
-    /// anyway, the copy is stopped and removed and the turn refused the same way.
+    /// anyway, the copy is stopped and removed and the turn refused the same way. A
+    /// conversation whose background job Claude Code keeps, stopped, is woken with
+    /// nothing beside `--resume`, and a pick the job would not run is refused first.
     #[tokio::test]
     async fn a_continue_never_starts_beside_a_live_session_and_discards_a_copy() {
         let dir = Scratch::new("beside");
@@ -788,7 +997,7 @@ mod tests {
             ..turn(Act::Continue, Some(session), false)
         };
         let mut out = Vec::new();
-        let error = follow(&continued, dir.path(), false, "go", &mut out)
+        let error = follow(&continued, dir.path(), false, "go", &Default::default(), &mut out)
             .await
             .expect_err("a live session holds it");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
@@ -801,7 +1010,7 @@ mod tests {
             "note: session {session} is already running in the background, so this started a copy as 186b32ef.\nbackgrounded · 186b32ef"
         );
         crate::tests::stand_in(&binary, &script("[]", &copy));
-        let error = follow(&continued, dir.path(), false, "go", &mut out)
+        let error = follow(&continued, dir.path(), false, "go", &Default::default(), &mut out)
             .await
             .expect_err("a copy is no continue");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
@@ -811,6 +1020,53 @@ mod tests {
             "the copy is stopped and removed"
         );
         assert!(out.is_empty());
+
+        let job = dir.path().join("jobs/0199a1b2");
+        std::fs::create_dir_all(&job).unwrap();
+        std::fs::write(
+            job.join("state.json"),
+            json!({
+                "sessionId": session,
+                "respawnFlags": ["--settings", "{\"env\":{}}", "--model", "haiku", "--effort", "high"],
+                "providerEnv": {"ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-5-5"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let woken = format!(
+            r#"[{{"id":"0199a1b2","kind":"background","sessionId":"{session}","state":"done","startedAt":{}}}]"#,
+            u64::MAX / 2
+        );
+        crate::tests::stand_in(&binary, &script(&woken, "backgrounded · 0199a1b2"));
+        let launches = || std::fs::read_to_string(dir.path().join("launched")).unwrap();
+        let before = launches();
+        for (model, thinking) in [("sonnet", "high"), ("claude-haiku-5-5", "max")] {
+            let other = Turn {
+                model: Some(model.into()),
+                thinking: Some(thinking.into()),
+                ..continued.clone()
+            };
+            let error = follow(&other, dir.path(), false, "go", &Default::default(), &mut out)
+                .await
+                .expect_err("the job runs its own options");
+            assert_eq!(agents::refusal_of(&error), "selection-unsupported", "{error}");
+        }
+        assert_eq!(launches(), before, "nothing started for another pick");
+        let same = Turn {
+            model: Some("claude-haiku-5-5".into()),
+            thinking: Some("high".into()),
+            ..continued.clone()
+        };
+        follow(&same, dir.path(), false, "go", &Default::default(), &mut out)
+            .await
+            .expect("the kept job is woken and followed");
+        assert_eq!(
+            launches().lines().last(),
+            Some(format!("--bg --resume {session} -- go").as_str())
+        );
+        let last: Value =
+            serde_json::from_str(String::from_utf8(out).unwrap().lines().last().unwrap()).unwrap();
+        assert_eq!(last["settled"]["state"], "done", "{last}");
     }
 
     /// Claude Code replacing itself mid-turn leaves no `claude` to list its sessions for a
@@ -851,7 +1107,7 @@ mod tests {
             ..turn(Act::New, None, false)
         };
         let mut out = Vec::new();
-        follow(&new, dir.path(), false, "go", &mut out)
+        follow(&new, dir.path(), false, "go", &Default::default(), &mut out)
             .await
             .expect("the turn is followed to its end");
         restore.await.unwrap();

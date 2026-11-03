@@ -355,10 +355,21 @@ again has no sign-in waiting, so a code then is `not-found`.
     `-w`, `--model`, `--effort`). The plan runs this driver's own binary in its turn mode
     (`steery-driver-claude-code turn …`), which starts the session and follows it through
     `claude agents` to where its turn stopped; `turn/read` reads those lines and Claude
-    Code's own refusals (`untrusted`, `not-found`, `harness-busy`). The launch gives that
-    session its own `Stop` and `StopFailure` hooks (`--settings`), which run the binary's
-    `heard` mode into a file the follower reads: whether a stop the listing shows is this
-    turn's, and Claude Code's words for an API error. No transcript is read.
+    Code's own refusals (`untrusted`, `not-found`, `harness-busy`, `selection-unsupported`).
+    The launch gives that session its own `Stop` and `StopFailure` hooks (`--settings`),
+    which run the binary's `heard` mode into a file the follower reads: whether a stop the
+    listing shows is this turn's, and Claude Code's words for an API error. No transcript
+    is read. Steery's own variables (`STEERY_STARTED`) reach the session in the same
+    settings, as `env`, and never through the launch's environment: Claude Code's
+    supervisor keeps the environment of the launch that started it for every session after
+    it. A continue of a conversation whose background job Claude Code keeps
+    (`jobs/<id>/state.json`) wakes that job with `claude --bg --resume <id>` and no other
+    flag, since any flag beside it starts a copy: the job goes on with the settings its
+    first launch gave it, and a model or effort it would not run is refused first
+    (`selection-unsupported`). A copy Claude Code starts anyway is stopped and removed, and
+    the turn refused in its words. A turn the runtime stops (a signal to the turn mode)
+    ends its session through `claude stop`, which keeps the conversation: no signal of the
+    runtime's reaches a process of the supervisor's.
   - `receipt/mark`, `receipt/find`: the person's input carrying the delivery marker, in
     the transcript past a mark.
   - `models`: Claude Code's documented aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
