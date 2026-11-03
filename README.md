@@ -83,7 +83,7 @@ reason: showing it to a person needs one in the SDK (`signed_in_why?: string` be
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.2.0" }`, and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v6.0.0" }`, and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
@@ -263,9 +263,12 @@ What each driver does:
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
-The live methods (`say`, `pick`, `stop`, `recap`, `compact`) are the plugin door's (PROTOCOL.md
-§4.4), which the runtime speaks itself, so the drivers have none. The runtime uses them
-only on conversations Steery started.
+The live methods (`say`, `pick`, `stop`, `force`, `recap`, `compact`) are the plugin door's
+(PROTOCOL.md §4.4), which the runtime speaks itself, so the drivers have none. A `say` is
+answered once the harness holds the words, dated `queued_at`, and asked again, once it
+took them into its turn (`taken_at`): omp and pi take a steer only between tool calls.
+`force` aborts the turn running so the held words go in next, in the same process: omp
+drains words left queued at an abort into a turn of their own.
 
 ### Layout: a template for a harness Steery does not ship
 

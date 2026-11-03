@@ -66,10 +66,18 @@ const REGISTERS = Object.keys(MCP).length > 0;
 const SAYS_KEPT = 32;
 
 /**
- * How long words put in through the door may take to be taken by the harness before the
- * door says they were not: under the ten seconds the runtime waits for its answer.
+ * How long words put in through the door may take to be held by the harness — queued
+ * into its running turn, or a turn starting with them — before the door says they were
+ * not: under the ten seconds the runtime waits for its answer. Once held, they are waited
+ * on for as long as the harness takes to take them in.
  */
-const HEARD_WITHIN_MS = 8000;
+const HELD_WITHIN_MS = 8000;
+
+/**
+ * How long words handed to start a turn are held as the harness's before it takes them: a
+ * first turn waits for its MCP servers to connect.
+ */
+const STARTING_WITHIN_MS = 60_000;
 
 /**
  * How long a stop waits for the conversation to go idle before it says a turn still runs:
@@ -471,8 +479,8 @@ type Api = {
 /**
  * What a copy answers an ask of the runtime's (§4.4): `ok` with what the op says, or
  * `refused` with one of the op's refusal words — `no-answer` (words handed to the harness
- * and not yet seen written into the conversation, so on their way in; a turn still running after a stop),
- * `refused` (the harness threw, or the copy takes no such ask), `model-missing`,
+ * and not yet seen held, so on their way in; a turn still running after a stop or a force),
+ * `refused` (the harness threw, let held words go unseen, or the copy takes no such ask), `model-missing`,
  * `selection-unsupported` (a harness call this copy lacks), `harness-busy`, `other-turn`
  * when a stop names a say whose turn is not the one running, or `ending` when the
  * conversation stopped here, or this copy moved to another, before anything was handed
@@ -1066,9 +1074,25 @@ function spoken(message: unknown): string | undefined {
 /**
  * Steery's own words put in through the door, kept by the say's id until they go into the
  * transcript: the throw whose words they are, where an aim's, and the ids of the later
- * says of that throw answered from these words rather than handed again (`also`).
+ * says of that throw answered from these words rather than handed again (`also`). Dated
+ * by this process's clock as the harness held them (`queued_at`) and took them into its
+ * turn (`taken_at`); `running` where they were queued into a running turn, `again` once a
+ * force handed them a second time.
  */
-type Say = { id: string; throw?: string; also: string[]; words: string; mode: "steer" | "queue"; seen: boolean };
+type Say = {
+  id: string;
+  throw?: string;
+  also: string[];
+  words: string;
+  mode: "steer" | "queue";
+  seen: boolean;
+  queued_at?: number;
+  taken_at?: number;
+  running?: boolean;
+  again?: boolean;
+  /** When they were handed to start a turn, which the harness has not taken yet. */
+  starting?: number;
+};
 
 /** A call the conversation's agent is inside, with the calls made from inside it that are still running: LiveState's. */
 type Call = {
@@ -1212,7 +1236,12 @@ function isSay(one: unknown): one is Say {
     say.also.every((one) => typeof one === "string") &&
     typeof say.words === "string" &&
     (say.mode === "steer" || say.mode === "queue") &&
-    typeof say.seen === "boolean"
+    typeof say.seen === "boolean" &&
+    (say.queued_at === undefined || typeof say.queued_at === "number") &&
+    (say.taken_at === undefined || typeof say.taken_at === "number") &&
+    (say.running === undefined || typeof say.running === "boolean") &&
+    (say.again === undefined || typeof say.again === "boolean") &&
+    (say.starting === undefined || typeof say.starting === "number")
   );
 }
 
@@ -1460,13 +1489,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const self = {};
 
   /**
-   * Words handed over through the door, until the harness is seen taking them: the throw
-   * whose words they are, where an aim's, and the answer they will be said with.
+   * Words handed over through the door, until the harness is seen holding them: the throw
+   * whose words they are, where an aim's, the say they went in under once handed, and the
+   * answer they will be said with.
    */
   const pending: {
     words: string;
     throw: string | undefined;
     handed: boolean;
+    say?: Say;
     said: Promise<Said>;
     answer(said: Said): void;
   }[] = [];
@@ -1480,7 +1511,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
   // pi refuses any words while it compacts — before its `input` event, and through this
   // API silently — so words handed over then would be lost: they wait until it is done,
-  // and are refused `harness-busy` if it is not done in time ([`HEARD_WITHIN_MS`]). Words
+  // and are refused `harness-busy` if it is not done in time ([`HELD_WITHIN_MS`]). Words
   // wait the same while Steery's own compaction runs in either harness ([`compact`]).
   let compacting: PromiseWithResolvers<void> | undefined;
   const compacted = () => {
@@ -1527,18 +1558,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let causeWritten: string | undefined;
 
   /**
-   * The harness wrote these words into the conversation as the person's message: the ones
-   * handed over are in. The only proof a say is answered `ok` on ([`deliver`]); a say
-   * already answered `no-answer` is remembered `ok` from now ([`addressed`]).
+   * The harness wrote these words into the conversation as the person's message: the say
+   * being written is taken, if nothing took it sooner ([`took`]).
    */
   const taken = (text: unknown) => {
     if (typeof text !== "string") return;
-    const words = text.trim();
-    for (const one of pending.filter((one) => one.handed && one.words === words)) one.answer({ ok: {} });
-    if (writing?.words === words && sessionId !== undefined) {
-      const answered = answeredIn(sessionId);
-      for (const id of idsOf(writing)) if (answered.has(id)) answered.set(id, Promise.resolve({ ok: {} }));
-    }
+    if (writing && writing.words === text.trim()) took(writing);
     writing = undefined;
   };
   /** The say whose words the harness is writing now, from `message_start` to `message_end`. */
@@ -1550,6 +1575,61 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * goes into the transcript): what tells a turn Steery started from one its person did.
    */
   const says: Say[] = kept.says;
+  /** A say's answer: when the harness held its words, and took them, as far as it has. */
+  const saidOf = (say: Say): Said => ({
+    ok: {
+      ...(say.queued_at !== undefined ? { queued_at: say.queued_at } : {}),
+      ...(say.taken_at !== undefined ? { taken_at: say.taken_at } : {}),
+    },
+  });
+  /** Says asked again while the harness holds their words, by say id: answered once taken, or let go. */
+  const takes = new Map<string, ((said: Said) => void)[]>();
+  /**
+   * Say what became of `say`'s words to everything waiting on them: its first ask, its asks
+   * again, and the answer remembered for its ids ([`addressed`]). A refusal is forgotten
+   * there, so the next ask of the say acts afresh.
+   */
+  const settleSay = (say: Say, said: Said) => {
+    for (const one of pending.filter((one) => one.say === say)) one.answer(said);
+    const answered = sessionId === undefined ? undefined : answeredIn(sessionId);
+    for (const id of idsOf(say)) {
+      if (answered?.has(id)) {
+        if ("refused" in said) answered.delete(id);
+        else answered.set(id, Promise.resolve(said));
+      }
+      for (const waiter of takes.get(id) ?? []) waiter(said);
+      takes.delete(id);
+    }
+  };
+  /** The harness holds `say`'s words now: queued into its turn, or a turn starting with them. */
+  const queued = (say: Say) => {
+    if (say.queued_at !== undefined) return;
+    say.queued_at = Date.now();
+    for (const one of pending.filter((one) => one.say === say)) one.answer(saidOf(say));
+  };
+  /**
+   * The harness took `say`'s words into its turn now: a batch it took as the turn's input
+   * held them (`before_agent_start`), or their message was written (`message_start`,
+   * `message_end`). The first is their time.
+   */
+  const took = (say: Say) => {
+    if (say.taken_at !== undefined) return;
+    say.taken_at = Date.now();
+    say.queued_at ??= say.taken_at;
+    settleSay(say, saidOf(say));
+  };
+  /**
+   * The harness let `say`'s words go without taking them: nothing of them is in. `word`
+   * says why: `not-taken` where its turn ended and its queue let them go, which the runtime
+   * hands again once; `model-missing` where it threw before it took them, which goes back to
+   * the person.
+   */
+  const lost = (say: Say, word: "not-taken" | "model-missing", error: string) => {
+    if (says.includes(say)) says.splice(says.indexOf(say), 1);
+    settleSay(say, { refused: word, error });
+  };
+  /** The says a force is aborting a turn for now: their words wait on that abort, never let go meanwhile ([`strand`]). */
+  const forcing = new Set<Say>();
   /**
    * The says whose words began the stretch of the turn running now: none where its person
    * started it, or put words of their own into it. The one turn a `stop` may stop is the
@@ -1584,7 +1664,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const heard = ({ mine, theirs }: { mine: Say[]; theirs: boolean }) => {
     const began = opening;
     opening = false;
-    for (const one of mine) one.seen = true;
+    for (const one of mine) {
+      one.seen = true;
+      took(one);
+    }
     if (theirs) ours = new Set();
     else if (began || mine.some((one) => one.mode === "queue")) ours = new Set(mine.flatMap(idsOf));
     else if (ours.size > 0) for (const id of mine.flatMap(idsOf)) ours.add(id);
@@ -1627,10 +1710,17 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
 
   /**
    * Whether the conversation can take words with no turn running and none waiting to go
-   * in; unknown from a harness without the two questions.
+   * in; unknown from a harness without the two questions. Words handed to start a turn wait
+   * in the harness until it takes them — omp's first turn in a process waits for its MCP
+   * servers — and it reads idle meanwhile: not idle while it holds them, for at most
+   * [`STARTING_WITHIN_MS`].
    */
   const idle = (ctx: Context): boolean | undefined => {
     if (turning || retrying) return false;
+    const now = Date.now();
+    if (says.some((say) => say.starting !== undefined && say.taken_at === undefined && now - say.starting < STARTING_WITHIN_MS)) {
+      return false;
+    }
     const running = ctx.isIdle?.();
     const queued = ctx.hasPendingMessages?.();
     if (running === undefined || queued === undefined) return undefined;
@@ -1819,11 +1909,23 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return typeof say === "string" && say.trim() ? say : undefined;
   };
 
+  /**
+   * Words queued into a running turn that the harness let go unseen: no turn runs, nothing
+   * waits to go in, and nothing took them ([`lost`]).
+   */
+  const strand = (ctx: Context) => {
+    if (idle(ctx) !== true || starting || compacting) return;
+    for (const say of says.filter((say) => say.running && !forcing.has(say) && say.queued_at !== undefined && say.taken_at === undefined)) {
+      lost(say, "not-taken", "its turn ended and its queue let the words go");
+    }
+  };
+
   /** Send what the conversation is doing, where it changed since it was last sent. */
   const sendState = () => {
     stateTimer = undefined;
     const ctx = live;
     if (!welcomed || !ctx) return;
+    strand(ctx);
     let state: string;
     try {
       state = JSON.stringify(stateNow(ctx));
@@ -2225,16 +2327,18 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * Hand the person's words to the harness, and say whether it took them: `steer` into
-   * the turn running now, `queue` once it has ended; idle, either starts a turn.
+   * Hand the person's words to the harness, and say once it holds them: `steer` into the
+   * turn running now, `queue` once it has ended; idle, either starts a turn.
    *
    * Neither harness says so through `sendUserMessage`: pi's returns nothing and reports a
    * refusal to its own error handlers, omp's settles only once a turn the words started
-   * has run to its end. So the words are in only once the harness writes them into the
-   * conversation as the person's message (`message_end`, [`taken`]); being queued, taken
-   * off a queue (omp's `before_agent_start`) or passed through pi's `input` proves
-   * nothing, since what lies after can still drop them. Kept by `id` until they go in
-   * ([`says`]), so the turn they start is known as Steery's.
+   * has run to its end. So the door watches: words steered into a running turn are held
+   * once its queue holds them (`hasPendingMessages`), answered then with when
+   * ([`DoorSaid`]'s `queued_at`), and with when the harness took them into its turn
+   * (`taken_at`, [`took`]) where it did so first; words that start a turn are answered once
+   * it takes them, both stamps in the one answer. Kept by `id` until
+   * they go in ([`says`]), so the turn they start is known as Steery's; the same say asked
+   * again is answered once they are taken, or let go ([`addressed`], [`strand`]).
    *
    * Idle, both harnesses ask for a model and its credentials before they start a turn, and
    * drop the words where either is missing: pi out of sight, omp by throwing before it
@@ -2242,10 +2346,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * would drop are refused `model-missing` with nothing handed over; omp throwing anyway
    * before it took them is refused the same.
    *
-   * Handed and not written within [`HEARD_WITHIN_MS`] — steered words wait for every tool
-   * call running to end — they are `no-answer`: on their way in, still tracked. A one-shot
-   * run's words still waiting as the run ends never will go in, and are `ending`, so the
-   * runtime puts them in afresh ([`refuseWaiting`]).
+   * Not held within [`HELD_WITHIN_MS`] they are `no-answer` where handed (on their way in,
+   * still tracked) and `harness-busy` where not. A one-shot run's words still waiting as the
+   * run ends never will go in, and are `ending`, so the runtime puts them in afresh
+   * ([`refuseWaiting`]).
    *
    * One throw's words go into a conversation once. A say of a `thrown` throw whose words
    * this door already handed and that are still on their way in — handed and not yet
@@ -2266,7 +2370,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   ): Promise<Said> => {
     // Words of this throw already handed and not yet in: this say waits on them, and is
     // answered as they are, with nothing handed again.
-    let handedBefore: string | undefined;
+    let before: Say | undefined;
     if (thrown !== undefined) {
       // Still being handed: answered as those are. Only words refused with nothing handed
       // over are handed afresh; ones that went in, may yet, or never can are not.
@@ -2283,7 +2387,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       else if (waiting) {
         if (!waiting.also.includes(id) && waiting.id !== id) waiting.also.push(id);
         if (idsOf(waiting).some((one) => ours.has(one))) ours.add(id);
-        handedBefore = waiting.words;
+        before = waiting;
       }
     }
     const { promise, resolve } = Promise.withResolvers<Said>();
@@ -2291,10 +2395,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // to, or heard in, the conversation they were asked for.
     const session = sessionId;
     const here = () => inSession(session);
-    const one = {
-      words: handedBefore ?? words.trim(),
+    const one: (typeof pending)[number] = {
+      words: before?.words ?? words.trim(),
       throw: thrown,
-      handed: handedBefore !== undefined,
+      handed: before !== undefined,
+      ...(before ? { say: before } : {}),
       said: promise,
       answer(said: Said) {
         const at = pending.indexOf(one);
@@ -2304,13 +2409,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         resolve(said);
       },
     };
-    // Not handed in time: a turn being prepared never started, and nothing went in.
+    // Not held in time: a turn being prepared never started, and nothing went in.
     const timer = setTimeout(
       () => one.answer(one.handed ? { refused: "no-answer" } : { refused: "harness-busy" }),
-      HEARD_WITHIN_MS,
+      HELD_WITHIN_MS,
     );
     pending.push(one);
-    if (handedBefore !== undefined) return promise;
+    if (before) {
+      if (before.queued_at !== undefined) one.answer(saidOf(before));
+      return promise;
+    }
     const send = async () => {
       if (!pending.includes(one)) return;
       if (!here()) {
@@ -2350,6 +2458,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       one.handed = true;
       const say: Say = { id, also: [], words: one.words, mode, seen: false };
       if (thrown !== undefined) say.throw = thrown;
+      one.say = say;
       says.push(say);
       if (says.length > SAYS_KEPT) says.shift();
       try {
@@ -2363,11 +2472,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
           // omp's call settles once the turn its words started ends. Idle, it throws before
           // it takes them where it finds no model or credentials after all: nothing went in.
           sent.catch((error: unknown) => {
-            if (!pending.includes(one)) return;
+            if (say.taken_at !== undefined) return;
             if (running) {
-              one.answer({ refused: "no-answer", error: String(error) });
+              if (pending.includes(one)) one.answer({ refused: "no-answer", error: String(error) });
               return;
             }
+            if (!pending.includes(one)) return lost(say, "model-missing", String(error));
             if (says.includes(say)) says.splice(says.indexOf(say), 1);
             one.answer({ refused: "model-missing", error: String(error) });
           });
@@ -2378,6 +2488,22 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         one.answer({ refused: "refused", error: String(error) });
         return;
       }
+      // Idle, the words start a turn: answered as it takes them, dated as handed and taken
+      // ([`took`]), one answer.
+      if (!running) {
+        say.starting = Date.now();
+        say.queued_at ??= say.starting;
+        return;
+      }
+      // A steer into a running turn is held once the harness's queue holds it, a moment
+      // after the call (omp queues it after an await); taken sooner, it was held too.
+      say.running = true;
+      const look = () => {
+        if (say.queued_at !== undefined || !says.includes(say)) return;
+        if (ctx.hasPendingMessages?.() !== false) queued(say);
+        else setTimeout(look, 10);
+      };
+      look();
     };
     void (async () => {
       while (starting || compacting) await (starting ?? compacting)?.promise;
@@ -2597,6 +2723,59 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
+   * Force the words of `say`, held and not yet taken, in now (a Force steer): abort the
+   * turn running, whoever's it is, so the harness takes them as its next input — omp
+   * drains words left queued at an abort into a turn of their own. Never parks: it is no
+   * pause. Where the harness let them go with the abort — idle, nothing waiting, nothing
+   * took them — they are handed again, once a say ([`Say`]'s `again`). Answered once they
+   * are taken or nothing runs, within [`STOPPED_WITHIN_MS`].
+   */
+  const force = async (ctx: Context, say: unknown): Promise<Said> => {
+    const session = sessionId;
+    if (typeof say !== "string" || !say) return { refused: "refused", error: "a force names the say whose words it forces in" };
+    if (!ctx.abort) return { refused: "selection-unsupported", error: `this ${HARNESS} cannot abort` };
+    const one = says.find((one) => idsOf(one).includes(say));
+    if (!one) {
+      return session !== undefined && answeredIn(session).has(say)
+        ? { ok: { stopped: false, running: background(ctx) } }
+        : { refused: "refused", error: "no words of that say wait here" };
+    }
+    const running = () => turning || ctx.isIdle?.() === false;
+    if (one.taken_at !== undefined || !running()) return { ok: { stopped: false, running: background(ctx) } };
+    forcing.add(one);
+    ctx.abort();
+    const deadline = Date.now() + STOPPED_WITHIN_MS;
+    const settled = () => one.taken_at !== undefined || (!running() && idle(ctx) === true);
+    while (inSession(session) && !settled() && Date.now() < deadline) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 50);
+      await promise;
+    }
+    forcing.delete(one);
+    if (!inSession(session)) return { refused: "no-answer", error: "the session moved while its turn was stopping" };
+    if (one.taken_at === undefined && idle(ctx) === true && !one.again && says.includes(one)) {
+      one.again = true;
+      one.running = false;
+      one.starting = Date.now();
+      try {
+        const sent = pi.sendUserMessage(one.words);
+        if (sent instanceof Promise) {
+          sent.catch((error: unknown) => {
+            if (one.taken_at === undefined) lost(one, "model-missing", String(error));
+          });
+        }
+      } catch (error) {
+        lost(one, "model-missing", String(error));
+      }
+    }
+    noteState();
+    // Neither taken, handed again, nor stopped: the turn aborted runs on.
+    return one.taken_at === undefined && !one.again && running()
+      ? { refused: "no-answer", error: "a turn still runs" }
+      : { ok: { stopped: true, running: background(ctx) } };
+  };
+
+  /**
    * Forget everything before a cut in favour of Steery's `summary`, through the harness's own
    * compaction with no model run: its `session_before_compact` hook answers this ask alone,
    * known by its marker ([`ownCompaction`]). Only while the conversation is quiet: either
@@ -2704,6 +2883,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         return pick(ctx, request.model, request.thinking);
       case "stop":
         return stop(ctx, request.say);
+      case "force":
+        return force(ctx, request.say);
       case "recap":
         return recap(ctx);
       case "compact":
@@ -2717,9 +2898,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * Asks by id: one sent again is answered from the first, and what it did is never done
    * twice, for the last [`REMEMBERED`]. One refused other than `no-answer` did nothing —
    * refused before anything reached the harness — and is forgotten once answered, so the
-   * same id asked again later acts afresh. A say answered `no-answer` is answered `ok` once
-   * its words are written ([`message_start`]); asked again while they are still unwritten
-   * and nothing holds them — no turn, nothing queued — they went nowhere, and are handed afresh.
+   * same id asked again later acts afresh. A say whose words the harness holds and has not
+   * taken is answered, asked again, once it takes them ([`took`]) or lets them go
+   * ([`lost`]), however long that is. A say answered `no-answer` is answered once its
+   * words are held; asked again while they are still unwritten and nothing holds them — no
+   * turn, nothing queued — they went nowhere, and are handed afresh.
    */
   const addressed = (id: string, request: Frame): Promise<Said> => {
     const ctx = live;
@@ -2742,7 +2925,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return first.then((one) => {
       const now = answered.get(id);
       if (now !== undefined && now !== first) return now;
-      if (!("refused" in one) || one.refused !== "no-answer" || now === undefined) return one;
+      // Words the harness holds — queued, or a turn starting with them, which reads idle
+      // while omp prepares it — are answered once taken or let go, never handed again.
+      const held = says.find((say) => idsOf(say).includes(id) && say.queued_at !== undefined && say.taken_at === undefined);
+      if (held && ("ok" in one || one.refused === "no-answer")) {
+        const { promise, resolve } = Promise.withResolvers<Said>();
+        takes.set(id, [...(takes.get(id) ?? []), resolve]);
+        return promise;
+      }
+      if ("ok" in one || one.refused !== "no-answer" || now === undefined) return one;
       const unwritten = says.filter((one) => idsOf(one).includes(id));
       if (unwritten.length === 0 || !live || !inSession(session) || idle(live) !== true || compacting) return one;
       for (const gone of unwritten) says.splice(says.indexOf(gone), 1);
@@ -2751,14 +2942,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * Answer the words handed over and not yet seen taken. They may still be in — the
-   * harness's queue is its own — so they are never said to be refused: said `no-answer`,
-   * they are neither put in again nor counted lost. At the end of a one-shot run (`ran`)
-   * they cannot be: its process ends with its queue, so they are `ending`, nothing went in,
-   * and the runtime puts them in afresh ([`deliver`]).
+   * Answer the words handed over and not yet seen taken, and the asks waiting on their
+   * take. They may still be in — the harness's queue is its own — so they are never said to
+   * be refused: said `no-answer`, they are neither put in again nor counted lost. At the end
+   * of a one-shot run (`ran`) they cannot be: its process ends with its queue, so they are
+   * `ending`, nothing went in, and the runtime puts them in afresh ([`deliver`]).
    */
   const refuseWaiting = (ran = false) => {
     for (const one of [...pending]) one.answer({ refused: one.handed && !ran ? "no-answer" : "ending" });
+    for (const waiters of takes.values()) for (const waiter of waiters) waiter({ refused: ran ? "ending" : "no-answer" });
+    takes.clear();
   };
 
   /** Stop taking words, answer the ones waiting, and let those answers go out on the door. */
@@ -2959,7 +3152,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // text is read as nothing much at all.
   pi.on("before_agent_start", async (event, ctx) => {
     live = ctx;
-    // omp taking a batch off its queue is no proof the words are in: only `message_end` is.
+    // Steery's words the batch holds are taken now ([`heard`], [`took`]).
     // Whose the stretch is now. omp going on with the reminder its stop hook asked for
     // carries on whoever's turn that was.
     const input = typeof event.prompt === "string" ? event.prompt.trim() : "";
