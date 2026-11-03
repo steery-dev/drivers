@@ -74,6 +74,13 @@ const SAYS_KEPT = 32;
 const HELD_WITHIN_MS = 8000;
 
 /**
+ * How long a steer held through a tool call is left to the harness once the last call
+ * ends before the door forces it in ([`atOnce`]): the harness takes held words right after
+ * a call's result, before its next model call.
+ */
+const HELD_AFTER_CALL_MS = 250;
+
+/**
  * How long words handed to start a turn are held as the harness's before it takes them: a
  * first turn waits for its MCP servers to connect.
  */
@@ -1628,8 +1635,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (says.includes(say)) says.splice(says.indexOf(say), 1);
     settleSay(say, { refused: word, error });
   };
-  /** The says a force is aborting a turn for now: their words wait on that abort, never let go meanwhile ([`strand`]). */
-  const forcing = new Set<Say>();
+  /**
+   * The says a force is aborting a turn for now, with what it answers: their words wait on
+   * that abort, never let go meanwhile ([`strand`]), and a second force of one waits on the
+   * first, never aborting the turn that is taking them.
+   */
+  const forcing = new Map<Say, Promise<Said>>();
   /**
    * The says whose words began the stretch of the turn running now: none where its person
    * started it, or put words of their own into it. The one turn a `stop` may stop is the
@@ -2340,6 +2351,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * they go in ([`says`]), so the turn they start is known as Steery's; the same say asked
    * again is answered once they are taken, or let go ([`addressed`], [`strand`]).
    *
+   * Words steered into a running turn and held go in at once while the agent generates:
+   * the door forces them ([`atOnce`], [`force`]) as they are held with no tool call
+   * running, or [`HELD_AFTER_CALL_MS`] after the last call ends with them still held.
+   * During a tool call they wait for the runtime's graceful window or the person's Force
+   * steer. Their answer stays as above: the runtime reads them in by their take.
+   *
    * Idle, both harnesses ask for a model and its credentials before they start a turn, and
    * drop the words where either is missing: pi out of sight, omp by throwing before it
    * takes them. So the door asks first, the way they ask ([`unstartable`]), and words they
@@ -2500,8 +2517,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       say.running = true;
       const look = () => {
         if (say.queued_at !== undefined || !says.includes(say)) return;
-        if (ctx.hasPendingMessages?.() !== false) queued(say);
-        else setTimeout(look, 10);
+        if (ctx.hasPendingMessages?.() !== false) {
+          queued(say);
+          atOnce(ctx, say);
+        } else setTimeout(look, 10);
       };
       look();
     };
@@ -2728,7 +2747,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * drains words left queued at an abort into a turn of their own. Never parks: it is no
    * pause. Where the harness let them go with the abort — idle, nothing waiting, nothing
    * took them — they are handed again, once a say ([`Say`]'s `again`). Answered once they
-   * are taken or nothing runs, within [`STOPPED_WITHIN_MS`].
+   * are taken or nothing runs, within [`STOPPED_WITHIN_MS`]. The door forces a person's
+   * steer itself while the agent generates ([`atOnce`]); during a tool call its words wait
+   * for the runtime's graceful window or the person's Force steer.
    */
   const force = async (ctx: Context, say: unknown): Promise<Said> => {
     const session = sessionId;
@@ -2742,8 +2763,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     const running = () => turning || ctx.isIdle?.() === false;
     if (one.taken_at !== undefined || !running()) return { ok: { stopped: false, running: background(ctx) } };
-    forcing.add(one);
-    ctx.abort();
+    let forced = forcing.get(one);
+    if (!forced) {
+      forced = abortFor(ctx, one, session, running).finally(() => forcing.delete(one));
+      forcing.set(one, forced);
+    }
+    return forced;
+  };
+  /** [`force`]'s abort of the turn running, for `one`'s words. */
+  const abortFor = async (ctx: Context, one: Say, session: string | undefined, running: () => boolean): Promise<Said> => {
+    ctx.abort?.();
     const deadline = Date.now() + STOPPED_WITHIN_MS;
     const settled = () => one.taken_at !== undefined || (!running() && idle(ctx) === true);
     while (inSession(session) && !settled() && Date.now() < deadline) {
@@ -2751,7 +2780,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       setTimeout(resolve, 50);
       await promise;
     }
-    forcing.delete(one);
     if (!inSession(session)) return { refused: "no-answer", error: "the session moved while its turn was stopping" };
     if (one.taken_at === undefined && idle(ctx) === true && !one.again && says.includes(one)) {
       one.again = true;
@@ -2773,6 +2801,17 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return one.taken_at === undefined && !one.again && running()
       ? { refused: "no-answer", error: "a turn still runs" }
       : { ok: { stopped: true, running: background(ctx) } };
+  };
+
+  /**
+   * A person's steer held in a running turn goes in at once while no call runs: the
+   * generation it waits on is no input of theirs ([`force`]). Only words the runtime would
+   * force: a steer handed into a running turn, never a `queue` nor words said `idle`.
+   */
+  const atOnce = (ctx: Context, say: Say) => {
+    if (calls.size > 0 || compacting || forcing.has(say) || say.again || !says.includes(say)) return;
+    if (say.mode !== "steer" || !say.running || say.queued_at === undefined || say.taken_at !== undefined) return;
+    void force(ctx, say.id).catch(() => undefined);
   };
 
   /**
@@ -3295,6 +3334,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       if (calls.delete(id)) {
         ended.push({ id, at: Date.now() });
         ended.splice(0, ended.length - ENDED_KEPT);
+        if (calls.size === 0) {
+          setTimeout(() => {
+            for (const say of [...says]) atOnce(ctx, say);
+          }, HELD_AFTER_CALL_MS);
+        }
       }
     } else {
       const call = outer(parent);
