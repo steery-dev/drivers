@@ -34,6 +34,23 @@ pub const RUNNING: [&str; 2] = [
     "is already running in the background",
 ];
 
+/// How Claude Code says that a `--bg --resume` started a copy of the conversation as a
+/// session of its own rather than going on in it (2.1.317, every reason it has for one:
+/// the session runs, is open in another process, its id or saved state is taken or
+/// unreadable, the flags passed, a restricted shell). A copy is never a `continue`.
+pub const COPIED: [&str; 2] = ["started a copy", "started a restricted copy"];
+
+/// What Claude Code says when a `--bg --resume` named flags for a session it keeps a
+/// background job for: the job keeps the options it saved, and the flags started a copy
+/// (2.1.317, `own-options`). This driver says the same words when it refuses a pick
+/// first, so both read as `selection-unsupported` ([`refusal_of`]).
+pub const OWN_OPTIONS: &str = "keeps its own saved options";
+
+/// Whether Claude Code's words for a launch say it started a copy ([`COPIED`]).
+pub fn copied(said: &str) -> bool {
+    COPIED.iter().any(|copy| said.contains(copy))
+}
+
 /// `claude <args>`, which writes no conversation, within `within`: its output, at most
 /// [`MOST`] of each stream.
 pub async fn said(binary: &Path, args: &[&str], within: Duration) -> Result<Output, String> {
@@ -150,9 +167,12 @@ pub fn refusal_of(said: &str) -> &'static str {
         refusal::NOT_FOUND
     } else if said.contains("not trusted") {
         refusal::UNTRUSTED
+    } else if said.contains(OWN_OPTIONS) {
+        refusal::SELECTION_UNSUPPORTED
     } else if RUNNING.iter().any(|running| said.contains(running))
         || said.contains("already")
         || said.contains("in use")
+        || said.contains("is open in another Claude Code process")
     {
         refusal::HARNESS_BUSY
     } else {
@@ -397,9 +417,23 @@ mod tests {
                 "session 153824d7 {}: the copy was stopped and removed",
                 RUNNING[1]
             ),
+            "Session 0199a1b2 is already running — `claude attach 0199a1b2` to join it",
         ] {
             assert_eq!(refusal_of(said), refusal::HARNESS_BUSY, "{said}");
         }
+    }
+
+    /// A kept background job woken with flags beside `--resume` starts a copy, as Claude
+    /// Code says; the pick it would not run is `selection-unsupported`, whoever says it.
+    #[test]
+    fn a_kept_job_keeps_its_own_options() {
+        let said = "note: background session 0199a1b2 keeps its own saved options, so the \
+                    flags you passed started a copy as 7c1e2f3a. Without flags, the same \
+                    command continues 0199a1b2 itself.\nbackgrounded · 7c1e2f3a";
+        assert!(copied(said));
+        assert_eq!(backgrounded(said).as_deref(), Some("7c1e2f3a"));
+        assert_eq!(refusal_of(said), refusal::SELECTION_UNSUPPORTED);
+        assert!(!copied("backgrounded · 0199a1b2"));
     }
 
     #[test]
