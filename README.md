@@ -83,7 +83,7 @@ reason: showing it to a person needs one in the SDK (`signed_in_why?: string` be
 
 The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
 Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v4.2.0" }`, and pins its
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v6.0.0" }`, and pins its
 toolchain in `rust-toolchain.toml`:
 
 ```sh
