@@ -263,9 +263,12 @@ What each driver does:
   - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
-The live methods (`say`, `pick`, `stop`, `recap`, `compact`) are the plugin door's (PROTOCOL.md
-§4.4), which the runtime speaks itself, so the drivers have none. The runtime uses them
-only on conversations Steery started.
+The live methods (`say`, `pick`, `stop`, `force`, `recap`, `compact`) are the plugin door's
+(PROTOCOL.md §4.4), which the runtime speaks itself, so the drivers have none. A `say` is
+answered once the harness holds the words, dated `queued_at`, and asked again, once it
+took them into its turn (`taken_at`): omp and pi take a steer only between tool calls.
+`force` aborts the turn running so the held words go in next, in the same process: omp
+drains words left queued at an abort into a turn of their own.
 
 ### Layout: a template for a harness Steery does not ship
 
