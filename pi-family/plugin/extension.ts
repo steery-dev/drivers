@@ -74,13 +74,6 @@ const SAYS_KEPT = 32;
 const HELD_WITHIN_MS = 8000;
 
 /**
- * How long a steer held through a tool call is left to the harness once the last call
- * ends before the door forces it in ([`atOnce`]): the harness takes held words right after
- * a call's result, before its next model call.
- */
-const HELD_AFTER_CALL_MS = 250;
-
-/**
  * How long words handed to start a turn are held as the harness's before it takes them: a
  * first turn waits for its MCP servers to connect.
  */
@@ -2002,6 +1995,16 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     stateTimer = setTimeout(sendState, Math.max(0, stateAt + STATE_EVERY_MS - Date.now()));
     stateTimer.unref?.();
   };
+  /**
+   * A call began or ended: the state goes now, unthrottled. The runtime forces a held steer
+   * in once `calls` reads empty, so a call's end is read as it happens.
+   */
+  const sendStateNow = () => {
+    hold(live);
+    noteEntries();
+    clearTimeout(stateTimer);
+    sendState();
+  };
 
   /** The harness may have appended entries: those not yet sent go on the next turn of the loop. */
   const noteEntries = () => {
@@ -2351,12 +2354,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * they go in ([`says`]), so the turn they start is known as Steery's; the same say asked
    * again is answered once they are taken, or let go ([`addressed`], [`strand`]).
    *
-   * Words steered into a running turn and held go in at once while the agent generates:
-   * the door forces them ([`atOnce`], [`force`]) as they are held with no tool call
-   * running, or [`HELD_AFTER_CALL_MS`] after the last call ends with them still held.
-   * During a tool call they wait for the runtime's graceful window or the person's Force
-   * steer. Their answer stays as above: the runtime reads them in by their take.
-   *
    * Idle, both harnesses ask for a model and its credentials before they start a turn, and
    * drop the words where either is missing: pi out of sight, omp by throwing before it
    * takes them. So the door asks first, the way they ask ([`unstartable`]), and words they
@@ -2517,10 +2514,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       say.running = true;
       const look = () => {
         if (say.queued_at !== undefined || !says.includes(say)) return;
-        if (ctx.hasPendingMessages?.() !== false) {
-          queued(say);
-          atOnce(ctx, say);
-        } else setTimeout(look, 10);
+        if (ctx.hasPendingMessages?.() !== false) queued(say);
+        else setTimeout(look, 10);
       };
       look();
     };
@@ -2747,9 +2742,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * drains words left queued at an abort into a turn of their own. Never parks: it is no
    * pause. Where the harness let them go with the abort — idle, nothing waiting, nothing
    * took them — they are handed again, once a say ([`Say`]'s `again`). Answered once they
-   * are taken or nothing runs, within [`STOPPED_WITHIN_MS`]. The door forces a person's
-   * steer itself while the agent generates ([`atOnce`]); during a tool call its words wait
-   * for the runtime's graceful window or the person's Force steer.
+   * are taken or nothing runs, within [`STOPPED_WITHIN_MS`].
    */
   const force = async (ctx: Context, say: unknown): Promise<Said> => {
     const session = sessionId;
@@ -2801,17 +2794,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return one.taken_at === undefined && !one.again && running()
       ? { refused: "no-answer", error: "a turn still runs" }
       : { ok: { stopped: true, running: background(ctx) } };
-  };
-
-  /**
-   * A person's steer held in a running turn goes in at once while no call runs: the
-   * generation it waits on is no input of theirs ([`force`]). Only words the runtime would
-   * force: a steer handed into a running turn, never a `queue` nor words said `idle`.
-   */
-  const atOnce = (ctx: Context, say: Say) => {
-    if (calls.size > 0 || compacting || forcing.has(say) || say.again || !says.includes(say)) return;
-    if (say.mode !== "steer" || !say.running || say.queued_at === undefined || say.taken_at !== undefined) return;
-    void force(ctx, say.id).catch(() => undefined);
   };
 
   /**
@@ -3312,7 +3294,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const parent = str(event.parentToolCallId);
     if (!parent) calls.set(id, { id, tool, since: Date.now(), children: [] });
     else outer(parent)?.children.push({ id, tool });
-    noteState();
+    sendStateNow();
   });
   // omp's `wait` reports the background jobs it waits on every 500 ms: those still running
   // stand on its call, and leave with it at its end. pi has no `wait`.
@@ -3334,17 +3316,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       if (calls.delete(id)) {
         ended.push({ id, at: Date.now() });
         ended.splice(0, ended.length - ENDED_KEPT);
-        if (calls.size === 0) {
-          setTimeout(() => {
-            for (const say of [...says]) atOnce(ctx, say);
-          }, HELD_AFTER_CALL_MS);
-        }
       }
     } else {
       const call = outer(parent);
       if (call) call.children = call.children.filter((child) => child.id !== id);
     }
-    noteState();
+    sendStateNow();
   });
   // A dialog of the harness's own waits on its person: a local dialog, never a request.
   pi.on("ui_prompt_start", (event, ctx) => {
