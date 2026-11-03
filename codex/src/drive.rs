@@ -911,16 +911,22 @@ pub fn turn_line(read: TurnRead) -> TurnLine {
                 return TurnLine::default();
             };
             let (events, title) = crate::lines::said(&read.turn, &line);
+            let named = line
+                .pointer("/result/thread/id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            // The thread is named (its `thread/start` or `thread/resume` answer) before
+            // `turn/start` hands it the words: until their `userMessage` shows, not taken.
+            let took = read.delivery.as_deref().and_then(|delivery| {
+                if took(&line, delivery) {
+                    Some(true)
+                } else {
+                    named.is_some().then_some(false)
+                }
+            });
             TurnLine {
-                named: line
-                    .pointer("/result/thread/id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-                took: read
-                    .delivery
-                    .as_deref()
-                    .filter(|delivery| took(&line, delivery))
-                    .map(|_| true),
+                named,
+                took,
                 ended: ended(&line),
                 refused: class_of(&line).map(str::to_owned),
                 events,
@@ -1244,17 +1250,18 @@ mod tests {
         })
     }
 
-    /// A turn's lines: the response that opened the thread names it, the person input
-    /// carrying the marker is the words taken, `turn/completed` ends it, and a refusal on
-    /// standard error says which.
+    /// A turn's lines: the response that opened the thread names it, words not yet taken,
+    /// the person input carrying the marker is the words taken, `turn/completed` ends it,
+    /// and a refusal on standard error says which.
     #[test]
     fn a_turn_s_lines_say_what_happened() {
-        let opened = line(
-            Stream::Stdout,
-            r#"{"id":1,"result":{"thread":{"id":"01a1"}}}"#,
-            None,
-        );
+        let opening = r#"{"id":1,"result":{"thread":{"id":"01a1"}}}"#;
+        let opened = line(Stream::Stdout, opening, None);
         assert_eq!(opened.named.as_deref(), Some("01a1"));
+        assert_eq!(opened.took, None, "no delivery, nothing of took");
+        let opened = line(Stream::Stdout, opening, Some("d1"));
+        assert_eq!(opened.named.as_deref(), Some("01a1"));
+        assert_eq!(opened.took, Some(false), "named before the words are taken");
         let item = r#"{"method":"item/started","params":{"item":{"type":"userMessage","content":[{"type":"text","text":"go steery-delivery:d1"}]}}}"#;
         assert_eq!(line(Stream::Stdout, item, Some("d1")).took, Some(true));
         assert_eq!(line(Stream::Stdout, item, Some("d")).took, None);
