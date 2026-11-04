@@ -41,8 +41,9 @@ const LIST_WITHIN: Duration = Duration::from_secs(15);
 /// Codex's rule that runs `steery` outside its sandbox, without asking.
 const RULE: &str = "prefix_rule(pattern=[\"steery\"], decision=\"allow\", justification=\"Steery's CLI signs with this machine's Keychain key, which Codex's sandbox cannot reach\")\n";
 
-/// The plan for this machine.
-pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
+/// The plan for this machine; where `needs` (protocol 5) and `codex login status` says Codex
+/// is not logged in, its sign-in ([`crate::sign_in::need`]).
+pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Error> {
     let root = match crate::home::root(home) {
         Ok(root) => root,
         Err(why) => {
@@ -125,7 +126,9 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
         }]}),
         carries: vec![Part::Hooks],
     }));
-    match trust(&binary, &root, &setup.hook).await {
+    let lacks = async { needs && crate::drive::signed_in(&binary, &root).await == Some(false) };
+    let (trusted, lacks) = tokio::join!(trust(&binary, &root, &setup.hook), lacks);
+    match trusted {
         Ok(carried) => entries.extend(carried.into_iter().map(|(key, hash)| Entry {
             path: config.clone(),
             format: Format::Toml,
@@ -153,7 +156,7 @@ pub async fn plan(home: &Path, setup: Setup) -> Result<Planned, Error> {
         entries,
         notes,
         install: None,
-        needs: Vec::new(),
+        needs: if lacks { vec![crate::sign_in::need()] } else { Vec::new() },
     })
 }
 

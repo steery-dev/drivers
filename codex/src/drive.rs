@@ -859,7 +859,7 @@ impl Drive {
 /// logged); or `config.toml` names a `model_provider` of its own, whose key Codex takes from
 /// its environment, which `login status` never counts, so its `Not logged in` says nothing
 /// of that provider. Run in Codex's home, as `models` is.
-async fn signed_in(codex: &Path, root: &Path) -> Option<bool> {
+pub(crate) async fn signed_in(codex: &Path, root: &Path) -> Option<bool> {
     let mut command = steery_driver_common::program::helper(codex);
     command.args(["login", "status"]).env("CODEX_HOME", root);
     let answer = match steery_driver_common::program::ask(command).await {
