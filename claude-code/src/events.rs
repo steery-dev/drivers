@@ -760,7 +760,7 @@ impl State<'_> {
 }
 
 /// The tools that start a sub-agent: `Task`, renamed `Agent` in later releases.
-const AGENTS: [&str; 2] = ["Task", "Agent"];
+pub(crate) const AGENTS: [&str; 2] = ["Task", "Agent"];
 
 /// The tools that read, wait on or stop work a call left running, and the input that names
 /// it: `TaskOutput` and `TaskStop` (`task_id`) for a shell, a monitor or a sub-agent, and
@@ -775,7 +775,7 @@ const WAITS: [(&str, &str); 5] = [
 ];
 
 /// The work a call of `name` with `input` waits on, as Claude Code names it.
-fn waits_on<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
+pub(crate) fn waits_on<'a>(name: &str, input: &'a Value) -> Option<&'a str> {
     let (_, field) = WAITS.iter().find(|(tool, _)| *tool == name)?;
     text(input, field).filter(|work| !work.is_empty())
 }
@@ -809,6 +809,30 @@ fn left_running(result: Option<&Value>, said: &str) -> Option<String> {
         .filter(|work| !work.is_empty())
         .map(str::to_owned)
 }
+
+/// The work a call's result (`block`, in `record`) left running in the background, as
+/// [`left_running`] reads it; none where the call failed.
+pub(crate) fn job_started(record: &Value, block: &Value) -> Option<String> {
+    if flag(block, "is_error") {
+        return None;
+    }
+    let said = without_reminders(&flatten(block.get("content")));
+    left_running(record.get("toolUseResult"), said.trim())
+}
+
+/// The work a `<task-notification>` Claude Code files ([`notification`]) says is over and
+/// told to its agent: one whose `status` is `completed`, `failed`, `killed` or `stopped`.
+/// A check-in on a command still running carries no status, and ends nothing.
+pub(crate) fn job_told(record: &Value) -> Option<&str> {
+    let (_, notice) = notification(record)?.split_once("<task-notification>")?;
+    tagged(notice, "status")
+        .filter(|status| ["completed", "failed", "killed", "stopped"].contains(status))?;
+    tagged(notice, "task-id").filter(|work| !work.is_empty())
+}
+
+/// The tools that stop work a call left running. Claude Code files no notice of work
+/// stopped this way: its stop marks the work told.
+pub(crate) const STOPS: [&str; 3] = ["TaskStop", "KillShell", "KillBash"];
 
 fn lock(starts: &Starts) -> std::sync::MutexGuard<'_, Ledger> {
     starts.0.lock().unwrap_or_else(PoisonError::into_inner)

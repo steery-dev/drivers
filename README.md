@@ -369,10 +369,13 @@ again has no sign-in waiting, so a code then is `not-found`.
     Code's own refusals (`untrusted`, `not-found`, `harness-busy`, `selection-unsupported`).
     The launch gives that session its own `Stop` and `StopFailure` hooks (`--settings`),
     which run the binary's `heard` mode into a file the follower reads: whether a stop the
-    listing shows is this turn's, and Claude Code's words for an API error. No transcript
-    is read. Steery's own variables (`STEERY_STARTED`) reach the session in the same
-    settings, as `env`, and never through the launch's environment: Claude Code's
-    supervisor keeps the environment of the launch that started it for every session after
+    listing shows is this turn's, and Claude Code's words for an API error. Each line the
+    turn mode writes says whether the session's transcript, past where it ended before the
+    launch, holds the person's input carrying the words' delivery marker yet; `turn/read`
+    gives that as `took` (none for words carrying no marker). Steery's own variables
+    (`STEERY_STARTED`) reach the session in the same settings, as `env`, and never through
+    the launch's environment: Claude Code's supervisor keeps the environment of the launch
+    that started it for every session after
     it. A continue of a conversation whose background job Claude Code keeps
     (`jobs/<id>/state.json`) wakes that job with `claude --bg --resume <id>` and no other
     flag, since any flag beside it starts a copy: the job goes on with the settings its
@@ -402,8 +405,19 @@ again has no sign-in waiting, so a code then is `not-found`.
   the transcript ended as its words went in; the transcript then names the turn that took
   them (a `user` record that begins it, or a queued prompt a running turn reads between its
   calls), and `session/changed` names the say in that turn's `says`, and in `settled` once
-  it ended. The session keeps its own model, so `pick` is unsupported, and there is no
-  `recap`.
+  it ended. The transcript, read on as it grows, also says: `retrying` while a running
+  turn waits out the `retryInMs` of its newest `api_error` record that no answer followed,
+  with `retry` its `retryAttempt`, `maxRetries` plus one and the error's `formatted` words
+  (the next try's time has no field in `LiveRetry`); `jobs`, the shells, monitors and
+  sub-agents the main thread's calls left running (`backgroundTaskId`, a persistent
+  `taskId`, an `async_launched` `agentId`) until a `<task-notification>` with a final
+  `status` tells their end, or a `TaskStop`/`KillShell` call stops them; and a `permission
+  prompt` dialog's title, `Allow <tool>: <command or path>?`, from the newest main-thread
+  call with no result, unless that is a sub-agent's. Work started before the newest answer
+  a newly started driver reads back to is not counted. Nothing Claude Code writes shows a
+  compaction while it runs (its `compact_boundary` comes once it is done), so
+  `compacting` stays false. The session keeps its own model, so `pick` is unsupported,
+  and there is no `recap`.
 
 ```sh
 cd claude-code && cargo build
