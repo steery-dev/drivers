@@ -500,18 +500,14 @@ impl State<'_> {
         }
         let mark = self.out.len();
         let forked = self.forked;
+        // The message's own `timestamp` is its key from its first live piece on (the
+        // plugin's `live` frames): the entry id comes only once it is recorded.
+        let key = message.get("timestamp").and_then(Value::as_u64).map(|stamp| stamp.to_string());
         if !thought.is_empty() {
-            self.words(
-                at,
-                format!("{id}:thought"),
-                Voice::Thought,
-                thought,
-                None,
-                Vec::new(),
-            );
+            self.said_of(at, format!("{id}:thought"), key.clone(), Voice::Thought, thought);
         }
         if !said.is_empty() {
-            self.words(at, id.clone(), Voice::Agent, said, None, Vec::new());
+            self.said_of(at, id.clone(), key, Voice::Agent, said);
         }
         for block in calls {
             let (Some(call), Some(name)) = (text(block, "id"), text(block, "name")) else {
@@ -788,8 +784,22 @@ impl State<'_> {
             id,
             voice,
             text,
+            message: None,
             call,
             clips,
+        });
+    }
+
+    /// An assistant message's words of one voice, named for the message they are of.
+    fn said_of(&mut self, at: u64, id: String, message: Option<String>, voice: Voice, text: String) {
+        self.out.push(Event::Words {
+            at,
+            id,
+            voice,
+            text,
+            message,
+            call: None,
+            clips: Vec::new(),
         });
     }
 

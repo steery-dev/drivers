@@ -110,6 +110,7 @@ impl State {
                         id: id(place, payload, 0),
                         voice: Voice::Summary,
                         text: summary.to_owned(),
+                        message: None,
                         call: None,
                         clips: Vec::new(),
                     });
@@ -314,6 +315,7 @@ impl State {
                             id: id(place, payload, 0),
                             voice: Voice::Person,
                             text: said,
+                            message: None,
                             call: None,
                             clips,
                         });
@@ -337,6 +339,7 @@ impl State {
                         id: id(place, payload, 0),
                         voice: Voice::Agent,
                         text: said.join("\n\n"),
+                        message: None,
                         call: None,
                         clips: Vec::new(),
                     });
@@ -360,6 +363,7 @@ impl State {
                         id: id(place, payload, 0),
                         voice: Voice::Thought,
                         text: thought.join("\n\n"),
+                        message: None,
                         call: None,
                         clips: Vec::new(),
                     });
@@ -438,6 +442,7 @@ impl State {
                         id: format!("{call_id}:out"),
                         voice: Voice::Tool,
                         text: output,
+                        message: None,
                         call: Some(call_id.to_owned()),
                         clips: Vec::new(),
                     });
