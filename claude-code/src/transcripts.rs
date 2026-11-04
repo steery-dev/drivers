@@ -46,9 +46,16 @@ const AGENT_OPENING: usize = 48;
 const ENTRYPOINT_TAIL: u64 = 256 << 10;
 /// What Claude Code calls itself where a program started it rather than a person.
 const HEADLESS: &str = "sdk-cli";
-/// How a record naming the conversation opens: Claude Code appends one whenever its person
-/// names it, and the last one stands.
-const CUSTOM_TITLE: &[u8] = br#"{"type":"custom-title""#;
+/// The records that name a conversation, how each opens and the field holding its name,
+/// in the order Claude Code reads them for the name it shows: the session's name (renamed,
+/// or chosen for it as it began), the title its person gave it, then the title Claude Code
+/// wrote for it. Claude Code appends one whenever the name changes; the last of each kind
+/// stands, and the first kind a transcript holds names it.
+const NAMES: [(&[u8], &str); 3] = [
+    (br#"{"type":"agent-name""#, "agentName"),
+    (br#"{"type":"custom-title""#, "customTitle"),
+    (br#"{"type":"ai-title""#, "aiTitle"),
+];
 
 /// Claude Code's conversations here: its configuration root, the other `projects` folders
 /// its moments named, each folder's listing, kept while the folder stands as it did, what
@@ -356,7 +363,7 @@ impl Store {
         Session {
             external_id: id.to_owned(),
             cwd: head.cwd.clone(),
-            title: head.title.clone().or_else(|| head.asked.clone()),
+            title: head.title().or_else(|| head.asked.clone()),
             created_at: head.created_at,
             updated_at: facts.updated_at,
             transcripts: vec![file.to_owned()],
@@ -755,8 +762,8 @@ struct Head {
     created_at: Option<u64>,
     /// The first `entrypoint` among the opening records.
     entrypoint: Option<String>,
-    /// The name its person last gave it (`custom-title`).
-    title: Option<String>,
+    /// The names its records gave it, in [`NAMES`]' order: the last of each kind.
+    names: [Option<String>; NAMES.len()],
     /// What its person asked first, as one short line: its name where they gave none.
     asked: Option<String>,
     /// The uuid of its first record in the main thread among the opening records: a
@@ -769,9 +776,9 @@ struct Head {
 }
 
 impl Head {
-    /// Read on from `through` to the last whole record before `length`. A `custom-title`
-    /// is looked for in every record; every other record is parsed only until the head
-    /// knows how the conversation began and what was asked first.
+    /// Read on from `through` to the last whole record before `length`. A record naming
+    /// the conversation ([`NAMES`]) is looked for in every record; every other record is
+    /// parsed only until the head knows how the conversation began and what was asked first.
     fn read(&mut self, open: &mut File, length: u64) -> std::io::Result<()> {
         open.seek(SeekFrom::Start(self.through))?;
         let total = length - self.through;
@@ -788,12 +795,12 @@ impl Head {
             if !matches!(kind, Line::Whole) {
                 continue;
             }
-            if line.starts_with(CUSTOM_TITLE) {
+            if let Some(which) = NAMES.iter().position(|(opens, _)| line.starts_with(opens)) {
                 if let Some(named) = serde_json::from_slice::<Value>(&line)
                     .ok()
-                    .and_then(|record| text(&record, "customTitle").and_then(clean))
+                    .and_then(|record| text(&record, NAMES[which].1).and_then(clean))
                 {
-                    self.title = Some(named);
+                    self.names[which] = Some(named);
                 }
                 continue;
             }
@@ -836,6 +843,12 @@ impl Head {
             }
         }
     }
+
+    /// The name Claude Code shows for the conversation: the first kind of [`NAMES`] it
+    /// was given.
+    fn title(&self) -> Option<String> {
+        self.names.iter().find_map(Clone::clone)
+    }
 }
 
 /// Whether a program started the conversation and no person carried it on: the newest
@@ -866,20 +879,33 @@ fn headless(open: &mut File, length: u64, head: &Head) -> std::io::Result<bool> 
 }
 
 /// What a person asked for, as one short line: the first line of their words that is
-/// not markup, cut at a word, short enough to read on a phone.
+/// not markup, cut at a word, short enough to read on a phone. A block of markup someone
+/// put before their words (Steery's `<steery kind="context">`, a command's tags) is
+/// skipped whole, through the line that closes it.
 fn asked(said: &str) -> Option<String> {
     const MOST: usize = 72;
-    let first = said
-        .lines()
-        .map(str::trim)
-        .find(|line| {
-            line.len() > 2
-                && !line.starts_with('<')
-                && !line.starts_with('#')
-                && !line.starts_with("```")
-        })?
-        .trim_start_matches(['-', '*', '>', ' '])
-        .trim();
+    let lines: Vec<&str> = said.lines().map(str::trim).collect();
+    let mut at = 0;
+    let first = loop {
+        let line = *lines.get(at)?;
+        at += 1;
+        if line.starts_with('<') {
+            if let Some(name) = element(line) {
+                let close = format!("</{name}>");
+                if !line.contains(&close)
+                    && let Some(through) = lines[at..].iter().position(|line| line.contains(&close))
+                {
+                    at += through + 1;
+                }
+            }
+            continue;
+        }
+        if line.len() > 2 && !line.starts_with('#') && !line.starts_with("```") {
+            break line;
+        }
+    }
+    .trim_start_matches(['-', '*', '>', ' '])
+    .trim();
     let mut line = String::new();
     for word in first.split_whitespace() {
         if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > MOST {
@@ -892,6 +918,17 @@ fn asked(said: &str) -> Option<String> {
         line.push_str(word);
     }
     clean(&line)
+}
+
+/// The name of the element a line of markup opens: `steery` for `<steery kind="context">`;
+/// none for a closing tag, a comment, or one that closes where it opens (`<br/>`).
+fn element(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('<')?;
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':')))
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    (name.starts_with(|c: char| c.is_ascii_alphabetic()) && !line.ends_with("/>")).then_some(name)
 }
 
 /// A title as a person reads it: trimmed, one short line, and none where Claude Code wrote
@@ -1243,7 +1280,8 @@ mod tests {
     }
 
     /// A conversation nobody named is named by what its person asked first, never by the
-    /// call's result in front of it; a name somebody gave it outranks that (the runtime's
+    /// call's result in front of it nor the block Steery put before their words; a name
+    /// Claude Code shows outranks that, in Claude Code's order (the runtime's
     /// `a_claude_code_conversation_is_named_by_what_its_person_asked_first`).
     #[test]
     fn a_conversation_is_named_by_what_its_person_asked_first() {
@@ -1288,6 +1326,36 @@ mod tests {
                 .title
                 .as_deref(),
             Some("renamed")
+        );
+        // Steered: Steery's context goes in before the person's words, and is no name.
+        let steered = json!({"type":"user","cwd":"/private/tmp","message":{"role":"user","content":"<steery kind=\"context\">\nCritical: your person never sees this session's transcript.\nThese words start work.\n</steery>\nmake the build pass on main"}});
+        let file = project.join("cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl");
+        write(&file, &[steered]);
+        let title = |more: &str| {
+            let mut grown = std::fs::read_to_string(&file).unwrap();
+            grown.push_str(more);
+            std::fs::write(&file, grown).unwrap();
+            named("cccccccc-cccc-4ccc-8ccc-cccccccccccc").title
+        };
+        assert_eq!(title("").as_deref(), Some("make the build pass on main"));
+        assert_eq!(
+            title("{\"type\":\"ai-title\",\"aiTitle\":\"Main build fix\"}\n").as_deref(),
+            Some("Main build fix"),
+            "the title Claude Code wrote for it outranks the opening sentence"
+        );
+        assert_eq!(
+            title(concat!(
+                "{\"type\":\"custom-title\",\"customTitle\":\"build\"}\n",
+                "{\"type\":\"ai-title\",\"aiTitle\":\"Main build fix, again\"}\n"
+            ))
+            .as_deref(),
+            Some("build"),
+            "a title its person gave outranks Claude Code's, whichever came last"
+        );
+        assert_eq!(
+            title("{\"type\":\"agent-name\",\"agentName\":\"build-fixer\"}\n").as_deref(),
+            Some("build-fixer"),
+            "the session's name outranks every title, as Claude Code shows it"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
