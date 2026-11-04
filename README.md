@@ -409,14 +409,18 @@ again has no sign-in waiting, so a code then is `not-found`.
   turn waits out the `retryInMs` of its newest `api_error` record that no answer followed,
   with `retry` its `retryAttempt`, `maxRetries` plus one and the error's `formatted` words
   (the next try's time has no field in `LiveRetry`); `jobs`, the shells, monitors and
-  sub-agents the main thread's calls left running (`backgroundTaskId`, a persistent
-  `taskId`, an `async_launched` `agentId`) until a `<task-notification>` with a final
-  `status` tells their end, or a `TaskStop`/`KillShell` call stops them; and a `permission
-  prompt` dialog's title, `Allow <tool>: <command or path>?`, from the newest main-thread
-  call with no result, unless that is a sub-agent's. Work started before the newest answer
-  a newly started driver reads back to is not counted. Nothing Claude Code writes shows a
-  compaction while it runs (its `compact_boundary` comes once it is done), so
-  `compacting` stays false. The session keeps its own model, so `pick` is unsupported,
+  sub-agents the main thread's calls left running (`backgroundTaskId`, a monitor's
+  `taskId`, an `async_launched` `agentId`) since the process holding the session took it
+  (its registry entry's `startedAt`: work ends with the process that ran it, telling
+  nothing), until a `<task-notification>` tells their end, by a final `status` or a
+  monitor's `event` saying it expired, timed out or was stopped, filed as a queued command
+  in a running turn or as the words of a turn of its own, or a `TaskStop`/`KillShell`
+  call stops them; and a `permission prompt` dialog's title, `Allow <tool>: <command or
+  path>?`, from the newest answer's first call with no result (Claude Code asks about an
+  answer's calls in its order), unless that is a sub-agent's. Work started before the
+  newest answer a newly started driver reads back to is not counted. Nothing Claude Code
+  writes shows a compaction while it runs (its `compact_boundary` comes once it is done),
+  so `compacting` stays false. The session keeps its own model, so `pick` is unsupported,
   and there is no `recap`.
 
 ```sh

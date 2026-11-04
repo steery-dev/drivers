@@ -10,12 +10,12 @@
 //! ones whose words went in by its end ([`crate::says`]), and a turn that took any is
 //! said settled once it is over. The transcript also says when a running turn waits to try
 //! a failed request again (`retrying`, until the wait its `api_error` record names is
-//! over), how much background work its calls left running or ended untold (`jobs`), and
-//! which call a permission prompt asks about: the newest with no result. Nothing of
-//! Claude Code's says what its person is typing, what is queued, or that it compacts while
-//! it does (its `compact_boundary` is written once it is done), so those stay unsaid. A
-//! session whose process is gone is said once more, with nothing running and its turn
-//! settled.
+//! over), how much background work its calls left running that the process holding the
+//! session runs and no notice told over yet (`jobs`), and which call a permission prompt
+//! asks about: the newest answer's first with no result. Nothing of Claude Code's says
+//! what its person is typing, what is queued, or that it compacts while it does (its
+//! `compact_boundary` is written once it is done), so those stay unsaid. A session whose
+//! process is gone is said once more, with nothing running and its turn settled.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -179,7 +179,7 @@ impl Followed {
             },
             retrying: retry.is_some(),
             retry,
-            jobs: now.jobs,
+            jobs: jobs(&now.jobs, entry.started_at),
             model: now.model,
             thinking: now.thinking,
             context_left: now.context_left,
@@ -217,10 +217,23 @@ impl Followed {
     }
 }
 
+/// How much background work the process holding a session runs: what its transcript says
+/// runs (`began`), begun since that process took the session (`started`, its registry
+/// entry's `startedAt`). Work runs in the process that started it and ends with it,
+/// telling nothing, so what an earlier process of the conversation left is gone however
+/// the transcript reads.
+fn jobs(began: &[Option<u64>], started: Option<i64>) -> u32 {
+    let started = started.and_then(|at| u64::try_from(at).ok());
+    let running = began
+        .iter()
+        .filter(|began| started.is_none_or(|started| began.is_some_and(|began| began >= started)))
+        .count();
+    u32::try_from(running).unwrap_or(u32::MAX)
+}
+
 /// What a waiting session shows its person, as `waitingFor` names it. A permission prompt
-/// asks about a call that has no result yet: the newest such call of the main thread
-/// (`open`) names it, unless it is a sub-agent's run, whose own call is the one asked
-/// about.
+/// asks about a call that has no result yet: the newest answer's first such call (`open`)
+/// names it, unless it is a sub-agent's run, whose own call is the one asked about.
 fn dialog(waiting: &str, open: Option<&str>, since: u64) -> Dialog {
     let kind = match waiting {
         "permission prompt" | "sandbox request" | "worker request" => DialogKind::Confirm,
@@ -279,5 +292,12 @@ mod tests {
             dialog("permission prompt", None, 7).title,
             "Permission prompt"
         );
+    }
+
+    #[test]
+    fn background_work_of_an_earlier_process_is_gone() {
+        let began = [Some(10), Some(20), None];
+        assert_eq!(jobs(&began, Some(15)), 1);
+        assert_eq!(jobs(&began, None), 3);
     }
 }

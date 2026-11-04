@@ -109,10 +109,13 @@ pub struct Now {
     /// The newest request that failed, where no answer came after it, and until when
     /// Claude Code said it waits before it tries again.
     pub retry: Option<Retry>,
-    /// The background work the main thread started that runs, or ended untold.
-    pub jobs: u32,
-    /// The newest call of the main thread's with no result yet: its tool, and what it
-    /// acts on where its input names that (`Bash: rm -rf build`).
+    /// When each piece of background work the main thread's calls left running began, in
+    /// milliseconds where its record says, oldest first: work no notice told over yet.
+    pub jobs: Vec<Option<u64>>,
+    /// The call of the newest answer first in line for its result: its tool, and what it
+    /// acts on where its input names that (`Bash: rm -rf build`). Claude Code runs an
+    /// answer's calls in its order, one not safe beside others once those before it are
+    /// done, and asks its person about a call as it comes to run it.
     pub open: Option<String>,
 }
 
@@ -142,11 +145,14 @@ struct Seen {
     held: Option<u64>,
     ended: Option<u64>,
     retry: Option<Retry>,
-    /// The work left running, by Claude Code's id, oldest first.
-    jobs: Vec<String>,
+    /// The work left running, by Claude Code's id, with when its record began, oldest
+    /// first.
+    jobs: Vec<(String, Option<u64>)>,
     /// The calls that stop work ([`crate::events::STOPS`]), by id, and the work each names.
     stops: Vec<(String, String)>,
-    /// The main thread's calls with no result yet, oldest first: id, tool, subject.
+    /// The newest answer, by its `message.id`, whose calls `open` holds.
+    answer: Option<String>,
+    /// The newest answer's calls with no result yet, in its order: id, tool, subject.
     open: Vec<(String, String, Option<String>)>,
 }
 
@@ -158,15 +164,13 @@ impl Seen {
             return;
         }
         let at = || text(record, "timestamp").and_then(millis);
+        if let Some(work) = events::job_told(record) {
+            self.jobs.retain(|(job, _)| *job != work);
+        }
         match text(record, "type") {
             // An answer, or Claude Code's own error in place of one, ends the wait.
             Some("assistant") => self.retry = None,
-            Some("user") => self.results(record),
-            Some("attachment") => {
-                if let Some(work) = events::job_told(record) {
-                    self.jobs.retain(|job| job != work);
-                }
-            }
+            Some("user") => self.results(record, at()),
             _ => {}
         }
         if main_answer(record) {
@@ -200,8 +204,17 @@ impl Seen {
         }
     }
 
-    /// The calls an answer makes: each open until its result is written.
+    /// The calls an answer makes: each open until its result is written. Claude Code
+    /// writes one record per block of an answer, each with the answer's `message.id`, and
+    /// asks for the next answer only once every call of this one has its result, so a call
+    /// of an earlier answer still open is one a process that stopped left without one.
     fn calls(&mut self, message: &Value) {
+        if let Some(answer) = text(message, "id")
+            && self.answer.as_deref() != Some(answer)
+        {
+            self.open.clear();
+            self.answer = Some(answer.to_owned());
+        }
         let Some(blocks) = message.get("content").and_then(Value::as_array) else {
             return;
         };
@@ -225,9 +238,9 @@ impl Seen {
         }
     }
 
-    /// A user record's call results: each closes its call, and may leave work running, or
-    /// stop work one left.
-    fn results(&mut self, record: &Value) {
+    /// A user record's call results, written `at`: each closes its call, and may leave
+    /// work running, or stop work one left.
+    fn results(&mut self, record: &Value, at: Option<u64>) {
         let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
@@ -240,14 +253,14 @@ impl Seen {
             };
             self.open.retain(|(id, _, _)| id != call);
             if let Some(work) = events::job_started(record, block)
-                && !self.jobs.contains(&work)
+                && !self.jobs.iter().any(|(job, _)| *job == work)
             {
-                keep(&mut self.jobs, work);
+                keep(&mut self.jobs, (work, at));
             }
             if let Some(at) = self.stops.iter().position(|(id, _)| id == call) {
                 let (_, work) = self.stops.remove(at);
                 if block.get("is_error").and_then(Value::as_bool) != Some(true) {
-                    self.jobs.retain(|job| *job != work);
+                    self.jobs.retain(|(job, _)| *job != work);
                 }
             }
         }
@@ -264,8 +277,8 @@ impl Seen {
                 .map(|(model, held)| window.left(model, self.requested.as_deref(), held)),
             ended: self.ended,
             retry: self.retry.clone(),
-            jobs: u32::try_from(self.jobs.len()).unwrap_or(u32::MAX),
-            open: self.open.last().map(|(_, tool, subject)| match subject {
+            jobs: self.jobs.iter().map(|(_, began)| *began).collect(),
+            open: self.open.first().map(|(_, tool, subject)| match subject {
                 Some(subject) => format!("{tool}: {subject}"),
                 None => tool.clone(),
             }),
@@ -569,6 +582,14 @@ mod tests {
                 "stop_reason":"tool_use"}})
     }
 
+    /// One block of an answer, as Claude Code writes each in a record of its own carrying
+    /// the answer's `message.id`.
+    fn answer_in(message: &str, blocks: Value) -> Value {
+        let mut record = answer(blocks);
+        record["message"]["id"] = json!(message);
+        record
+    }
+
     fn result(call: &str, said: &str, result: Value) -> Value {
         json!({"type":"user","isSidechain":false,"toolUseResult":result,
             "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call,"content":said}]}})
@@ -610,48 +631,86 @@ mod tests {
         let check_in = json!({"type":"attachment","isSidechain":false,"attachment":{"type":"queued_command",
             "commandMode":"task-notification",
             "prompt":"<task-notification>\n<task-id>bj9ss2xbj</task-id>\n<summary>Background command \"build\" is still running</summary>\n</task-notification>"}});
+        let monitor = |event: &str| {
+            json!({"type":"attachment","isSidechain":false,"attachment":{"type":"queued_command",
+                "commandMode":"task-notification",
+                "prompt":format!("<task-notification>\n<task-id>bq10gp7qp</task-id>\n<summary>Monitor event: \"ship\"</summary>\n<event>{event}</event>\n</task-notification>")}})
+        };
+        let mut began = result(
+            "t1",
+            "Command running in background with ID: bj9ss2xbj. Output is being written to: /tmp/x",
+            json!({"backgroundTaskId":"bj9ss2xbj"}),
+        );
+        began["timestamp"] = json!("2026-10-15T12:59:10.000Z");
         let started = [
             answer(
                 json!([{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"make","run_in_background":true}}]),
             ),
-            result(
-                "t1",
-                "Command running in background with ID: bj9ss2xbj. Output is being written to: /tmp/x",
-                json!({"backgroundTaskId":"bj9ss2xbj"}),
-            ),
+            began,
             answer(json!([{"type":"tool_use","id":"t2","name":"Agent","input":{"prompt":"read"}}])),
             result(
                 "t2",
                 "Async agent launched",
                 json!({"status":"async_launched","agentId":"a77006"}),
             ),
+            answer(
+                json!([{"type":"tool_use","id":"t3","name":"Monitor","input":{"command":"tail -f log"}}]),
+            ),
+            result(
+                "t3",
+                "Monitor started",
+                json!({"taskId":"bq10gp7qp","timeoutMs":1_800_000,"persistent":false}),
+            ),
         ];
-        assert_eq!(seen(&started).jobs, 2);
+        assert_eq!(
+            seen(&started).jobs,
+            [millis("2026-10-15T12:59:10.000Z"), None, None]
+        );
         let mut told = started.to_vec();
-        told.extend([check_in, notice("bj9ss2xbj", "completed")]);
-        assert_eq!(seen(&told).jobs, 1);
         told.extend([
-            answer(json!([{"type":"tool_use","id":"t3","name":"TaskStop","input":{"task_id":"a77006"}}])),
-            result("t3", "stopped", json!({})),
+            check_in,
+            notice("bj9ss2xbj", "completed"),
+            monitor("SHIP_EXIT=0"),
         ]);
-        assert_eq!(seen(&told).jobs, 0);
+        assert_eq!(seen(&told).jobs.len(), 2);
+        // Told while the session is idle, a notice is the words of a turn of its own.
+        told.push(json!({"type":"user","isSidechain":false,"origin":{"kind":"task-notification"},
+            "message":{"role":"user","content":"<task-notification>\n<task-id>a77006</task-id>\n<status>completed</status>\n<summary>Agent \"read\" finished</summary>\n</task-notification>"}}));
+        assert_eq!(seen(&told).jobs.len(), 1);
+        let mut stopped = told.clone();
+        stopped.extend([
+            answer(json!([{"type":"tool_use","id":"t4","name":"TaskStop","input":{"task_id":"bq10gp7qp"}}])),
+            result("t4", "stopped", json!({})),
+        ]);
+        assert!(seen(&stopped).jobs.is_empty());
+        told.push(monitor(
+            "[Monitor expired after 30m with 16 events delivered. Re-arm it if you still need the watch.]",
+        ));
+        assert!(seen(&told).jobs.is_empty());
     }
 
     #[test]
-    fn the_newest_call_without_a_result_is_open() {
+    fn the_newest_answers_first_call_without_a_result_is_open() {
         let records = [
-            answer(
-                json!([{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/tmp/a"}}]),
+            // A process that stopped left this call with no result.
+            answer_in(
+                "m1",
+                json!([{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 9"}}]),
             ),
-            answer(
-                json!([{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"rm -rf\n  build"}}]),
+            answer_in(
+                "m2",
+                json!([{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/tmp/a"}}]),
+            ),
+            answer_in(
+                "m2",
+                json!([{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"rm -rf\n  build"}}]),
             ),
         ];
-        assert_eq!(seen(&records).open.as_deref(), Some("Bash: rm -rf build"));
+        assert_eq!(seen(&records).open.as_deref(), Some("Read: /tmp/a"));
         let mut answered = records.to_vec();
         answered.push(result("t2", "", Value::Null));
-        assert_eq!(seen(&answered).open.as_deref(), Some("Read: /tmp/a"));
-        answered.push(result("t1", "", Value::Null));
+        assert_eq!(seen(&answered).open.as_deref(), Some("Bash: rm -rf build"));
+        answered.push(result("t3", "", Value::Null));
         assert_eq!(seen(&answered).open, None);
     }
 }

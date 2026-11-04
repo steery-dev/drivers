@@ -820,15 +820,38 @@ pub(crate) fn job_started(record: &Value, block: &Value) -> Option<String> {
     left_running(record.get("toolUseResult"), said.trim())
 }
 
-/// The work a `<task-notification>` Claude Code files ([`notification`]) says is over and
-/// told to its agent: one whose `status` is `completed`, `failed`, `killed` or `stopped`.
-/// A check-in on a command still running carries no status, and ends nothing.
-pub(crate) fn job_told(record: &Value) -> Option<&str> {
-    let (_, notice) = notification(record)?.split_once("<task-notification>")?;
-    tagged(notice, "status")
-        .filter(|status| ["completed", "failed", "killed", "stopped"].contains(status))?;
-    tagged(notice, "task-id").filter(|work| !work.is_empty())
+/// The work a `<task-notification>` Claude Code files says is over and told to its agent:
+/// one whose `status` is `completed`, `failed`, `killed` or `stopped`, or a monitor whose
+/// `event` says it ended ([`MONITOR_ENDS`]; a monitor's notices carry no status). Claude
+/// Code files the notice as a `queued_command` attachment while a turn runs
+/// ([`notification`]), and as the words of a `user` record where it starts a turn of its
+/// own, the session idle (Claude Code 2.1.317). A check-in on a command still running, or
+/// a monitor's event, ends nothing.
+pub(crate) fn job_told(record: &Value) -> Option<String> {
+    let said = match notification(record) {
+        Some(notice) => notice.to_owned(),
+        None if text(record, "type") == Some("user") && !flag(record, "isSidechain") => {
+            texts(record.pointer("/message/content")?)
+        }
+        None => return None,
+    };
+    let (_, notice) = said.split_once("<task-notification>")?;
+    let over = tagged(notice, "status")
+        .is_some_and(|status| ["completed", "failed", "killed", "stopped"].contains(&status))
+        || tagged(notice, "event")
+            .is_some_and(|event| MONITOR_ENDS.iter().any(|end| event.starts_with(end)));
+    if !over {
+        return None;
+    }
+    tagged(notice, "task-id")
+        .filter(|work| !work.is_empty())
+        .map(str::to_owned)
 }
+
+/// The first words of the `event` with which Claude Code tells a monitor's agent that the
+/// monitor ended: it expired, timed out, or was stopped for too much output (Claude Code
+/// 2.1.318).
+const MONITOR_ENDS: [&str; 3] = ["[Monitor expired", "[Monitor timed out", "[Monitor stopped"];
 
 /// The tools that stop work a call left running. Claude Code files no notice of work
 /// stopped this way: its stop marks the work told.
