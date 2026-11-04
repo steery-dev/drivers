@@ -281,7 +281,7 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
                     _ = int.recv() => "SIGINT",
                     _ = hup.recv() => "SIGHUP",
                 };
-                Err(halt(&turn.binary, job.get(), signalled).await)
+                Err(halt(&turn.binary, &root, job.get(), signalled).await)
             })
     })();
     match ran {
@@ -422,7 +422,7 @@ async fn follow(
                             .ok()?
                             .transcripts
                             .pop()?;
-                        stopped_on(&transcript)
+                        stopped_on(&transcript, 0)
                     })
                     && let Some(object) = entry.as_object_mut()
                 {
@@ -600,14 +600,23 @@ const HALT_WITHIN: Duration = Duration::from_secs(2);
 
 /// The turn stopped by `signal`: the background session the launch started, where it named
 /// one (`job`), is ended through `claude stop`, which keeps its conversation, so the turn
-/// stops with the follower that stood for it. The line says what came of it.
-async fn halt(binary: &Path, job: Option<&String>, signal: &str) -> String {
+/// stops with the follower that stood for it, and so is every command the session's
+/// process had started that outlived it ([`crate::drive::end_left`]): they run outside the
+/// turn's group too. The line says what came of it.
+async fn halt(binary: &Path, root: &Path, job: Option<&String>, signal: &str) -> String {
     let Some(job) = job else {
         return format!("stopped by {signal} before the launch named its background session");
     };
+    let deadline = tokio::time::Instant::now() + HALT_WITHIN + crate::drive::COMMANDS_END_WITHIN;
+    let running = crate::registry::living(&crate::registry::dir(root))
+        .find(|session| session.job_id.as_deref() == Some(job.as_str()))
+        .and_then(|session| u32::try_from(session.pid).ok())
+        .map(crate::registry::kernel::descendants)
+        .unwrap_or_default();
     match agents::said(binary, &["stop", job], HALT_WITHIN).await {
         Ok(out) if out.status.success() => {
-            format!("stopped by {signal}; `claude stop {job}` ended its background session")
+            let ended = crate::drive::end_left(&running, deadline).await;
+            format!("stopped by {signal}; `claude stop {job}` ended its background session{ended}")
         }
         Ok(out) => format!(
             "stopped by {signal}; `claude stop {job}` did not end its background session: {}",
@@ -716,12 +725,19 @@ fn failed_on(end: &Value) -> Option<String> {
 }
 
 /// What Claude Code said went wrong, when the last assistant record of a transcript is
-/// its own error (`isApiErrorMessage`) rather than the model's words.
-fn stopped_on(transcript: &Path) -> Option<String> {
+/// its own error (`isApiErrorMessage`) rather than the model's words, written at or after
+/// `since` (milliseconds since 1970) where it says when.
+pub(crate) fn stopped_on(transcript: &Path, since: u64) -> Option<String> {
     let last = crate::context::newest(transcript, |record| {
         record.get("type").and_then(Value::as_str) == Some("assistant")
     })?;
-    if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true) {
+    if last.get("isApiErrorMessage").and_then(Value::as_bool) != Some(true)
+        || last
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(crate::events::millis)
+            .is_some_and(|at| at < since)
+    {
         return None;
     }
     let text = last

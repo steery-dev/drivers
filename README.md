@@ -8,9 +8,10 @@ writes, and says how to start, read and resume a turn. It decides nothing and wr
 of its own. The runtime itself names no harness: everything it knows of one, a driver says.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers version 5 of the program protocol where the runtime offers it, else version 4, which
-every runtime Steery supports offers; it keeps the version it picked, and plans needs only
-in 5. Steery adds the drivers below the way it adds any program: from this repository's
+answers the newest version of the program protocol the runtime offers, from 7 down to 4,
+which every runtime Steery supports offers; it keeps the version it picked, plans needs
+only from 5, and names says (`say`'s `id`, `stop`'s `say`) only in 7. Steery adds the
+drivers below the way it adds any program: from this repository's
 releases, each
 a prebuilt executable per target (`steery programs add https://github.com/steery-dev/drivers`,
 which Steery's installer runs). Everything a person sees of a driver, its label, its short
@@ -354,6 +355,13 @@ again has no sign-in waiting, so a code then is `not-found`.
     an owner token; a terminal is a process the runtime stops. Without a registered
     session, the runtime looks for processes holding the transcript.
   - `idle`: what `claude agents --json --all` lists, with the registry.
+  - `stop`: a background session through `claude stop <job>`, which keeps the
+    conversation, then every command its process had started and that outlived it (its
+    tools' shells run in process groups of their own, which `claude stop` leaves running):
+    SIGTERM to each and the group it leads, SIGKILL to what is still there 500 ms on. A
+    stop naming a say (protocol 7) ends the session only where the turn running took that
+    say's words; where another turn runs, or the words still wait in the inbox, it is
+    refused `other-turn`, and where no turn runs it is `stopped: false`.
   - `start`: a turn is a background session (`claude --bg`, `--resume`, `--fork-session`,
     `-w`, `--model`, `--effort`). The plan runs this driver's own binary in its turn mode
     (`steery-driver-claude-code turn …`), which starts the session and follows it through
@@ -371,8 +379,9 @@ again has no sign-in waiting, so a code then is `not-found`.
     first launch gave it, and a model or effort it would not run is refused first
     (`selection-unsupported`). A copy Claude Code starts anyway is stopped and removed, and
     the turn refused in its words. A turn the runtime stops (a signal to the turn mode)
-    ends its session through `claude stop`, which keeps the conversation: no signal of the
-    runtime's reaches a process of the supervisor's.
+    ends its session through `claude stop`, which keeps the conversation, and then the
+    commands it left running, as `stop` does: no signal of the runtime's reaches a process
+    of the supervisor's.
   - `receipt/mark`, `receipt/find`: the person's input carrying the delivery marker, in
     the transcript past a mark.
   - `models`: Claude Code's documented aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
@@ -386,10 +395,15 @@ again has no sign-in waiting, so a code then is `not-found`.
     kept.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session
     holds it, and the Claude app's link for a conversation it started.
-- **Live** (`say`), for a conversation Steery started that a Claude Code session holds.
-  Words go into the inbox socket the registered session opens, after its peer token; the socket says nothing back, so they are unconfirmed and the runtime finds
-  them with `receipt/find`. The session keeps its own model, so `pick` is unsupported, and
-  there is no `recap`.
+- **Live** (`say`, `session/changed`), for a conversation Steery started that a Claude Code
+  session holds. Words go into the inbox socket the registered session opens, after its
+  peer token; the socket says nothing back, so they are unconfirmed (`took: false`) and the
+  runtime finds them with `receipt/find`. A say with an `id` (protocol 7) is kept with where
+  the transcript ended as its words went in; the transcript then names the turn that took
+  them (a `user` record that begins it, or a queued prompt a running turn reads between its
+  calls), and `session/changed` names the say in that turn's `says`, and in `settled` once
+  it ended. The session keeps its own model, so `pick` is unsupported, and there is no
+  `recap`.
 
 ```sh
 cd claude-code && cargo build
@@ -456,7 +470,11 @@ Codex has no needs: under protocol 5 every `needs/give` is `not-found`.
     and their results, the running token total, the model (rerouted included), and the
     thread's title (`thread/name/updated`). A person's words and a compaction are left to
     the rollout: the app server names them by ids the rollout does not keep.
-  - `stop`: the owner interrupts its own turn and it is seen to end.
+  - `stop`: the owner interrupts its own turn and it is seen to end. A stop naming a say
+    (protocol 7) interrupts only the turn that say's words went into, through the window or
+    app server that owns the thread now, a terminal Codex's thread too; where another turn
+    runs, or which one runs cannot be told, it is refused `other-turn`, and where none runs
+    it is `stopped: false`.
   - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn
     after them carrying the delivery marker.
   - `models`: the app server's `model/list`, the default first; and `signed_in` from `codex
@@ -465,12 +483,15 @@ Codex has no needs: under protocol 5 every `needs/give` is `not-found`.
     and feature it can do without taken away, and a read-only sandbox; `reader/read` takes
     its last agent message.
   - `terminal`: `codex resume <thread>`, and the app's `codex://threads/<thread>`.
-- **Live** (`say`, `pick`, and `session/changed`), for a conversation Steery started. Words go to the window that owns the
-  thread, as typed in its composer, else into the running app server's queue, whose
-  acknowledgement is not delivery (`took: false`). A pick is checked against the owner's
-  own model list and set as the thread's settings. The windows' own state of each thread
-  the runtime asks about is followed and said as `session/changed`. Codex has no recap
-  short of a turn, so `recap` is unknown.
+- **Live** (`say`, `pick`, and `session/changed`), for a conversation Steery started. Words
+  go to the window that owns the thread, as typed in its composer, else into the running
+  app server's queue, whose acknowledgement is not delivery (`took: false`). A say with an
+  `id` (protocol 7) is tied to the turn that took its words: the one Codex named as it took
+  them, else the turn whose person input carries its delivery marker once the thread's
+  history has it; `session/changed` names it in that turn's `says`, and in `settled` once it
+  ended. A pick is checked against the owner's own model list and set as the thread's
+  settings. The windows' own state of each thread the runtime asks about is followed and
+  said as `session/changed`. Codex has no recap short of a turn, so `recap` is unknown.
 
 Build and check it, with Codex on `PATH`:
 

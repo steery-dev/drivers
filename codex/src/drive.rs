@@ -19,9 +19,10 @@ use steery_sdk::wire::harness::{
 use steery_sdk::{Error, refusal};
 
 use crate::appserver::AppServer;
-use crate::native::{self, Owner};
+use crate::native::{self, Owner, Words};
 use crate::rollout::Store;
 use crate::router::{self, Followers, Took};
+use crate::says::{self, Taken, Waiting};
 
 /// What a thread an app server has loaded with no window owning it says: the app is never
 /// quit for one thread, since it serves every other it has (decided 2026-10-06).
@@ -30,6 +31,11 @@ const APP_LOADED: &str = "app has it loaded with no window: open it in a Codex w
 const LATEST: u64 = 256 * 1024;
 /// The stop's graceful step must be done within the runtime's bound for `stop`.
 const STOP_WITHIN: std::time::Duration = std::time::Duration::from_millis(2500);
+/// How long a say has to read the thread's newest turn before its words go.
+const BEFORE_WITHIN: std::time::Duration = std::time::Duration::from_secs(3);
+/// The waits between looks for the turns of says Codex took unnamed, about two minutes
+/// in all: a turn that took them is in the thread's history once it began.
+const WATCH_AFTER: [u64; 8] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 60_000];
 
 /// What drive needs: Codex's home and conversations, its binary, and the followers.
 pub struct Drive {
@@ -55,6 +61,20 @@ enum Owned {
     Window(Option<String>),
     /// A running app server of the thread's home, whose queue holds it.
     Queue(Option<String>),
+}
+
+/// What a stop's step came to.
+enum Halt {
+    /// The owner runs no turn.
+    Idle,
+    /// The turn running is not the one the say named, or which it is cannot be told.
+    Other(String),
+    /// The turn, as Codex lists it after the interrupt.
+    Ended {
+        thread: String,
+        turn: String,
+        after: native::Turn,
+    },
 }
 
 impl Drive {
@@ -277,82 +297,83 @@ impl Drive {
     }
 
     /// `stop`: the owner's own way to end the turn it runs, seen to end. A terminal
-    /// Codex has no such way: the runtime's signals are its stop.
+    /// Codex has no such way: the runtime's signals are its stop. Naming a say, only the
+    /// turn its words went into is stopped, through the window or app server that owns
+    /// the thread now where the holder is a terminal Codex.
     pub async fn stop(&self, stop: Stop) -> Result<Stopped, Error> {
         let not_stopped = |line: String| Error::refused(refusal::NOT_STOPPED, line);
+        let idle = Stopped {
+            stopped: false,
+            proof: None,
+        };
         let token = match &stop.holder {
             Holder::Person {
                 stop: HolderStop::Owner(Some(token)),
                 ..
-            } => token,
-            _ => {
-                return Ok(Stopped {
-                    stopped: false,
-                    proof: None,
-                });
+            } => Some(token),
+            Holder::Person {
+                stop: HolderStop::Owner(None),
+                ..
             }
+            | Holder::Nobody { .. } => return Ok(idle),
+            _ if stop.say.is_none() => return Ok(idle),
+            _ => None,
         };
-        let owner = Owner::parse(token)
-            .ok_or_else(|| Error::invalid("an owner token this driver did not give"))?;
+        let given = token
+            .map(|token| {
+                Owner::parse(token)
+                    .ok_or_else(|| Error::invalid("an owner token this driver did not give"))
+            })
+            .transpose()?;
         let codex = binary()?;
+        let thread = &stop.external_id;
         let stopping = async {
-            match &owner {
-                Owner::App { thread, turn } => {
-                    let home = self
-                        .thread_home(thread)
-                        .map_err(|_| "the thread is gone".to_owned())?;
-                    let mut server = native::reader(&codex, &home).await?;
-                    let found = native::find(&mut server, thread, turn)
-                        .await?
-                        .ok_or("the turn is gone from Codex's history")?;
-                    if !found.ended() {
-                        let router = self
-                            .followers
-                            .router()
-                            .ok_or("the Codex app's router is gone")?
-                            .to_owned();
-                        let mut app = router::App::open(&router)
-                            .await
-                            .map_err(|e| e.to_string())?;
-                        app.interrupt(thread, turn).await?;
+            let owner = match given {
+                Some(owner) => owner,
+                None => match self.owned(thread).await {
+                    Some(Owned::Window(Some(turn))) => Owner::App {
+                        thread: thread.clone(),
+                        turn,
+                    },
+                    Some(Owned::Queue(Some(turn))) => Owner::Queue {
+                        home: self
+                            .thread_home(thread)
+                            .map_err(|_| "the thread is gone".to_owned())?,
+                        thread: thread.clone(),
+                        turn,
+                    },
+                    Some(Owned::Window(None) | Owned::Queue(None)) => return Ok(Halt::Idle),
+                    None => {
+                        return Err(
+                            "Codex in a terminal has no stop of its own for one turn".to_owned()
+                        );
                     }
-                    let after = native::find(&mut server, thread, turn)
-                        .await?
-                        .ok_or("the turn is gone")?;
-                    server.close().await;
-                    Ok::<_, String>((thread.clone(), turn.clone(), after))
-                }
-                Owner::Queue { home, thread, turn } => {
-                    let mut server = native::queue(&codex, home, thread).await?;
-                    let found = native::find(&mut server, thread, turn)
-                        .await?
-                        .ok_or("the turn is gone from Codex's history")?;
-                    if !found.ended() {
-                        server
-                            .call(
-                                "turn/interrupt",
-                                json!({"threadId": thread, "turnId": turn}),
-                            )
-                            .await
-                            .map_err(|e| e.to_string())?;
-                    }
-                    let after = native::find(&mut server, thread, turn)
-                        .await?
-                        .ok_or("the turn is gone")?;
-                    server.close().await;
-                    Ok((thread.clone(), turn.clone(), after))
-                }
-            }
+                },
+            };
+            self.halt(&codex, &owner, stop.say.as_deref()).await
         };
-        let (thread, turn, after) = tokio::time::timeout(STOP_WITHIN, stopping)
+        let halted = tokio::time::timeout(STOP_WITHIN, stopping)
             .await
             .map_err(|_| not_stopped("Codex did not interrupt its turn in time".into()))?
             .map_err(not_stopped)?;
+        let (thread, turn, after) = match halted {
+            Halt::Idle => return Ok(idle),
+            Halt::Other(line) => return Err(Error::refused(refusal::OTHER_TURN, line)),
+            Halt::Ended {
+                thread,
+                turn,
+                after,
+            } => (thread, turn, after),
+        };
         if !after.ended() {
             return Err(not_stopped(format!(
                 "Codex turn {turn} is still {}",
                 after.status
             )));
+        }
+        let says = self.followers.says();
+        if says.ended(&thread, Some(&turn), None, crate::home::now(), false, None) {
+            self.followers.said(&thread);
         }
         Ok(Stopped {
             stopped: true,
@@ -360,6 +381,91 @@ impl Drive {
                 "Codex thread {thread} turn {turn} is {}",
                 after.status
             )),
+        })
+    }
+
+    /// Interrupt the turn `owner` runs, the owner's own way, and read it again after; with
+    /// `say`, only where that say's words went into it.
+    async fn halt(&self, codex: &Path, owner: &Owner, say: Option<&str>) -> Result<Halt, String> {
+        let (thread, turn, mut server) = match owner {
+            Owner::App { thread, turn } => {
+                let home = self
+                    .thread_home(thread)
+                    .map_err(|_| "the thread is gone".to_owned())?;
+                (thread, turn, native::reader(codex, &home).await?)
+            }
+            Owner::Queue { home, thread, turn } => {
+                (thread, turn, native::queue(codex, home, thread).await?)
+            }
+        };
+        let halted = self.halt_in(&mut server, owner, thread, turn, say).await;
+        server.close().await;
+        halted
+    }
+
+    async fn halt_in(
+        &self,
+        server: &mut AppServer,
+        owner: &Owner,
+        thread: &str,
+        turn: &str,
+        say: Option<&str>,
+    ) -> Result<Halt, String> {
+        if let Some(say) = say {
+            let says = self.followers.says();
+            if says.taken(thread, say) == Taken::Waiting
+                && says::tie_waiting(says, server, thread).await?
+            {
+                self.followers.said(thread);
+            }
+            match says.taken(thread, say) {
+                Taken::Turn(took) if took == turn => {}
+                Taken::Turn(took) => {
+                    return Ok(Halt::Other(format!(
+                        "Codex runs turn {turn}; say {say}'s words went into turn {took}"
+                    )));
+                }
+                Taken::Waiting | Taken::Unknown => {
+                    return Ok(Halt::Other(format!(
+                        "Codex runs turn {turn}; which turn took say {say}'s words is not known"
+                    )));
+                }
+            }
+        }
+        let found = native::find(server, thread, turn)
+            .await?
+            .ok_or("the turn is gone from Codex's history")?;
+        if !found.ended() {
+            match owner {
+                Owner::App { .. } => {
+                    let router = self
+                        .followers
+                        .router()
+                        .ok_or("the Codex app's router is gone")?
+                        .to_owned();
+                    let mut app = router::App::open(&router)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    app.interrupt(thread, turn).await?;
+                }
+                Owner::Queue { .. } => {
+                    server
+                        .call(
+                            "turn/interrupt",
+                            json!({"threadId": thread, "turnId": turn}),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        let after = native::find(server, thread, turn)
+            .await?
+            .ok_or("the turn is gone")?;
+        Ok(Halt::Ended {
+            thread: thread.to_owned(),
+            turn: turn.to_owned(),
+            after,
         })
     }
 
@@ -453,7 +559,8 @@ impl Drive {
 
     /// `say`: words through the window of the app that owns the thread, which takes them
     /// as typed into its composer; else into the queue of the running app server that owns
-    /// it, which acknowledges and does not confirm.
+    /// it, which acknowledges and does not confirm. Neither names the turn that took them:
+    /// a say with an id is tied to its turn once the thread's history has it.
     pub async fn say(&self, say: Say) -> Result<Said, Error> {
         let thread = &say.external_id;
         uuid(thread)?;
@@ -465,6 +572,10 @@ impl Drive {
                 "Codex is running a turn in it",
             ));
         }
+        let waiting = match &say.id {
+            Some(id) => self.waiting(thread, &say.words, id).await,
+            None => None,
+        };
         if let Some(router) = self.followers.router().map(Path::to_path_buf) {
             let took = async {
                 let mut app = router::App::open(&router).await.ok()?;
@@ -472,7 +583,10 @@ impl Drive {
             }
             .await;
             match took {
-                Some(Took::Yes) => return Ok(Said { took: true }),
+                Some(Took::Yes) => {
+                    self.watch(thread, waiting);
+                    return Ok(Said { took: true });
+                }
                 Some(Took::No(word, line)) => return Err(Error::refused(word, line)),
                 Some(Took::Nobody) | None => {}
             }
@@ -497,13 +611,84 @@ impl Drive {
         .flatten();
         match queued {
             // A queue's acknowledgement is not delivery: the runtime looks for the words.
-            Some(Ok(_)) => Ok(Said { took: false }),
+            Some(Ok(_)) => {
+                self.watch(thread, waiting);
+                Ok(Said { took: false })
+            }
             Some(Err(failed)) => Err(Error::refused(refusal::REFUSED, failed.to_string())),
             None => Err(Error::refused(
                 refusal::NO_DOOR,
                 "no Codex window or app server takes words for it now",
             )),
         }
+    }
+
+    /// The say `id` about to put `words` into `thread`, to be tied to the turn that takes
+    /// them. Words of no delivery are matched only after the thread's newest turn before
+    /// them, so none where that cannot be read.
+    async fn waiting(&self, thread: &str, words: &str, id: &str) -> Option<Waiting> {
+        let words = Words::of(words, id);
+        let before = match &words {
+            Words::Marker(_) => None,
+            Words::Text(_) => {
+                let home = self.thread_home(thread).ok()?;
+                let codex = binary().ok()?;
+                tokio::time::timeout(BEFORE_WITHIN, async {
+                    let mut server = native::reader(&codex, &home).await.ok()?;
+                    let latest = native::latest(&mut server, thread).await;
+                    server.close().await;
+                    latest.ok()
+                })
+                .await
+                .ok()
+                .flatten()?
+                .map(|turn| turn.id)
+            }
+        };
+        Some(Waiting {
+            say: id.to_owned(),
+            words,
+            before,
+            at: crate::home::now(),
+        })
+    }
+
+    /// Look for the turn of a say whose words went, a while, and say the thread's state
+    /// again once it is tied.
+    fn watch(&self, thread: &str, waiting: Option<Waiting>) {
+        let Some(waiting) = waiting else {
+            return;
+        };
+        let says = self.followers.says();
+        says.wait(thread, waiting);
+        let (Ok(home), Ok(codex)) = (self.thread_home(thread), binary()) else {
+            return;
+        };
+        let followers = Arc::clone(&self.followers);
+        let thread = thread.to_owned();
+        tokio::spawn(async move {
+            for after in WATCH_AFTER {
+                tokio::time::sleep(std::time::Duration::from_millis(after)).await;
+                let says = followers.says();
+                if says.waiting(&thread).is_empty() {
+                    return;
+                }
+                if !says.look(&thread) {
+                    continue;
+                }
+                let changed = tokio::time::timeout(native::WITHIN, async {
+                    let mut server = native::reader(&codex, &home).await?;
+                    let changed = says::tie_waiting(says, &mut server, &thread).await;
+                    server.close().await;
+                    changed
+                })
+                .await;
+                says.looked(&thread);
+                if matches!(changed, Ok(Ok(true))) {
+                    followers.said(&thread);
+                }
+            }
+        });
     }
 
     /// `pick`: a model and effort for the thread's next turns, set on the running app

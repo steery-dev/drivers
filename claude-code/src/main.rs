@@ -2,7 +2,8 @@
 //! Code's conversations from their transcripts, plans the entries that set Claude Code up
 //! for Steery, answers its hooks, plans and follows its background sessions' turns,
 //! reaches a live session through the inbox socket Claude Code opens for it, and says how
-//! each live session stands ([`state`]).
+//! each live session stands ([`state`]), naming the turn that took each of Steery's says
+//! ([`says`]).
 //!
 //! Run as `steery-driver-claude-code turn …`, it is one turn's follower ([`turn`]), which
 //! `start` plans.
@@ -16,6 +17,7 @@ mod hooks;
 mod live;
 mod mcp;
 mod registry;
+mod says;
 mod setup;
 mod sign_in;
 mod state;
@@ -78,12 +80,13 @@ const TRANSCRIPT: &str = "One JSON record per line: `user` and `assistant` recor
                           the conversation.";
 
 /// The driver: where Claude Code is, from `initialize`, the last listing of its background
-/// sessions, the sign-ins it started that wait for their code, and where it says how live
-/// sessions stand ([`state`]).
+/// sessions, the sign-ins it started that wait for their code, the says it gave live
+/// sessions, and where it says how live sessions stand ([`state`]).
 struct ClaudeCode {
     place: OnceLock<Place>,
     listing: drive::Listing,
     sign_ins: sign_in::SignIns,
+    says: Arc<says::Says>,
     notifier: Notifier,
 }
 
@@ -101,6 +104,7 @@ impl ClaudeCode {
             place: OnceLock::new(),
             listing: drive::Listing::default(),
             sign_ins: sign_in::SignIns::default(),
+            says: Arc::default(),
             notifier,
         }
     }
@@ -145,7 +149,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4, 5 and 6"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 7"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             protocol,
@@ -157,7 +161,12 @@ impl Program for ClaudeCode {
         if self.place.set(place).is_ok()
             && let Ok(store) = &self.place()?.store
         {
-            state::watch(store.root(), Arc::clone(store), self.notifier.clone());
+            state::watch(
+                store.root(),
+                Arc::clone(store),
+                Arc::clone(&self.says),
+                self.notifier.clone(),
+            );
         }
         Ok(wire::Initialized {
             protocol: self.place()?.protocol,
@@ -233,7 +242,9 @@ impl Program for ClaudeCode {
             }
             method::START => result(drive::start(self.store()?, given(params)?)?),
             method::TURN_READ => result(turn::read(given(params)?)),
-            method::STOP => result(drive::stop(self.root()?, given(params)?).await?),
+            method::STOP => {
+                result(drive::stop(self.root()?, self.store()?, &self.says, given(params)?).await?)
+            }
             method::RECEIPT_MARK => {
                 result(drive::mark(self.root()?, self.store()?, given(params)?)?)
             }
@@ -244,7 +255,7 @@ impl Program for ClaudeCode {
                 self.store()?,
                 given(params)?,
             )?),
-            method::SAY => result(live::say(self.root()?, given(params)?).await?),
+            method::SAY => result(live::say(self.store()?, &self.says, given(params)?).await?),
             method::PICK => {
                 let _: harness::Pick = given(params)?;
                 Err(Error::refused(
