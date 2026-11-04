@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use steery_driver_common::program::{NEEDS, WAITED};
+use steery_driver_common::program::{NEEDS, PROTOCOLS, WAITED};
 use steery_sdk::wire;
 use steery_sdk::{Error, Program, method, refusal, result};
 
@@ -79,8 +79,10 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4, 5 and 6"))?;
+        let protocol = steery_driver_common::program::protocol(&params.protocol).ok_or_else(|| {
+            let spoken: Vec<_> = PROTOCOLS.iter().rev().map(u32::to_string).collect();
+            Error::invalid(format!("this driver speaks protocols {}", spoken.join(", ")))
+        })?;
         let harness = self.harness;
         let _ = self.place.set(Place {
             protocol,
@@ -177,7 +179,13 @@ impl Program for Driver {
                 )
             }
             method::START => result(
-                drive::start(self.store()?, &self.catalog, steery_sdk::params(params)?).await?,
+                drive::start(
+                    &self.place()?.home,
+                    self.store()?,
+                    &self.catalog,
+                    steery_sdk::params(params)?,
+                )
+                .await?,
             ),
             method::TURN_READ => result(drive::read(harness, steery_sdk::params(params)?)),
             method::RECEIPT_MARK => {

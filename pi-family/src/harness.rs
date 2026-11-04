@@ -161,7 +161,9 @@ impl Harness {
                 },
                 door: Some(harness::LiveDoor::Plugin),
                 checks_idle: true,
-                worktrees: false,
+                // Neither makes a worktree for a turn, so the driver makes one where omp
+                // keeps its own (`drive::start`).
+                worktrees: true,
                 acts: vec![
                     harness::Act::Continue,
                     harness::Act::Fork,
