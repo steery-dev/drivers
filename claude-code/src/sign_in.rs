@@ -1,40 +1,38 @@
 //! The one need Claude Code has (PROTOCOL.md §4.1, Needs): a sign-in, where it is found and
-//! `claude auth status` says it is not signed in. Its person gives it with an Anthropic API
-//! key, which the runtime keeps and sets as `ANTHROPIC_API_KEY` on every host, or through
-//! Claude Code's own `claude auth login`, run unmodified on a terminal of the driver's:
-//! the driver relays the link it prints and writes back the code its person pastes. Claude
-//! Code keeps what that sign-in gives; the driver reads no token and keeps none.
+//! `claude auth status` says it is not signed in. Its person gives it through Claude Code's
+//! own `claude auth login`, run unmodified on a terminal of the driver's
+//! ([`steery_driver_common::login`]), or with an Anthropic API key, which the runtime keeps
+//! and sets as `ANTHROPIC_API_KEY` on every host. Claude Code keeps what its sign-in gives;
+//! the driver reads no token and keeps none.
+//!
+//! `claude auth login` opens its loopback link (`redirect_uri=http://localhost:<port>/callback`)
+//! through `$BROWSER` and prints a manual one whose page shows a code
+//! (`redirect_uri=https://platform.claude.com/oauth/code/callback`; both Claude Code 2.1.317 on
+//! macOS). The driver's `$BROWSER` records the link it is given, and the card shows that one:
+//! the Steery app catches its return and fills the field, and the driver fetches that address
+//! inside this host, where Claude Code's own listener completes the sign-in.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{Read as _, Write as _};
-use std::os::fd::{AsRawFd as _, OwnedFd};
-use std::path::Path;
-use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use steery_driver_common::anthropic;
+use steery_driver_common::login::{self, Login, Waiting};
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
-use tokio::process::Child;
-use tokio::sync::watch;
 
 /// The need, by its id in every plan.
 const NEED: &str = "sign-in";
 /// Claude Code's own sign-in, and the step it asks next once started.
 const CLAUDE_SIGN_IN: &str = "claude-sign-in";
-const CLAUDE_SIGN_IN_CODE: &str = "claude-sign-in-code";
-/// The field that step's person fills.
-const CODE: &str = "code";
+const CLAUDE_SIGN_IN_RETURN: &str = "claude-sign-in-return";
+/// The field that step's return fills, or its person pastes into.
+const ADDRESS: &str = "address";
 
-/// How long `claude auth login` has to print its link: it printed it at once (2.1.310).
+/// How long `claude auth login` has to call `$BROWSER` or print its link: it did both at
+/// once (2.1.317).
 const LINK_WITHIN: Duration = Duration::from_secs(15);
-/// How long a code written to it has to end it: inside `needs/give`'s 30 s.
-const CODE_WITHIN: Duration = Duration::from_secs(20);
-/// How long a started sign-in waits for its code before it is ended.
-const KEPT: Duration = Duration::from_secs(10 * 60);
+/// How long `$BROWSER` may still be called once the manual link is printed.
+const BROWSER_AFTER: Duration = Duration::from_secs(3);
 
 /// The need, where Claude Code is found here and not signed in.
 pub fn need() -> Need {
@@ -43,16 +41,6 @@ pub fn need() -> Need {
         title: "Sign Claude Code in?".into(),
         line: "Claude Code is not signed in on this host, so it runs no turn here.".into(),
         ways: vec![
-            // Claude Code's docs (https://code.claude.com/docs/en/authentication.md,
-            // "Authentication precedence"): in non-interactive mode (`-p`) the key is always
-            // used when present, over a plan's sign-in; an interactive session asks once to
-            // approve it. `claude auth status --json` counts it as signed in (`"authMethod":
-            // "api_key"`, `"apiKeySource": "ANTHROPIC_API_KEY"`, Claude Code 2.1.310).
-            anthropic::way(
-                "Billed per token to your Claude Console account, on every host. Claude Code \
-                 always uses it in non-interactive runs, over any plan it is signed in with."
-                    .into(),
-            ),
             Way {
                 id: CLAUDE_SIGN_IN.into(),
                 label: "Sign in with your Claude plan".into(),
@@ -64,23 +52,23 @@ pub fn need() -> Need {
                 fields: Vec::new(),
                 ends_at: None,
             },
+            // Claude Code's docs (https://code.claude.com/docs/en/authentication.md,
+            // "Authentication precedence"): in non-interactive mode (`-p`) the key is always
+            // used when present, over a plan's sign-in; an interactive session asks once to
+            // approve it. `claude auth status --json` counts it as signed in (`"authMethod":
+            // "api_key"`, `"apiKeySource": "ANTHROPIC_API_KEY"`, Claude Code 2.1.310).
+            anthropic::way(
+                "Billed per token to your Claude Console account, on every host. Claude Code \
+                 always uses it in non-interactive runs, over any plan it is signed in with."
+                    .into(),
+            ),
         ],
     }
 }
 
-/// The sign-ins started here and waiting for their code, by need. A driver started again
-/// has none.
+/// The sign-in started here and waiting for its person.
 #[derive(Default, Clone)]
-pub struct SignIns(Arc<Mutex<HashMap<String, Login>>>);
-
-/// One `claude auth login` running on a terminal of the driver's: what it printed so far,
-/// read off that terminal until it closes.
-struct Login {
-    id: u64,
-    child: Child,
-    terminal: File,
-    said: watch::Receiver<Vec<u8>>,
-}
+pub struct SignIns(Waiting);
 
 impl SignIns {
     /// `needs/give`.
@@ -90,293 +78,132 @@ impl SignIns {
         }
         match give.way.as_str() {
             anthropic::WAY => {
-                self.waiting().remove(NEED);
+                self.0.end();
                 anthropic::give(&give.values, "Claude Code uses your Anthropic API key")
             }
             CLAUDE_SIGN_IN => self.start().await,
-            CLAUDE_SIGN_IN_CODE => {
-                let code = give.values.get(CODE).map_or("", |code| code.trim());
-                if code.is_empty() {
-                    return Err(refused("Paste the code the sign-in page shows"));
-                }
-                self.finish(code).await
+            CLAUDE_SIGN_IN_RETURN => {
+                let given = give.values.get(ADDRESS).map_or("", String::as_str);
+                self.0.give(CLAUDE_SIGN_IN_RETURN, given, "Claude Code").await?;
+                Ok(Given::Done {
+                    line: "Claude Code is signed in on this host".into(),
+                    env: Default::default(),
+                })
             }
             way => Err(gone(format!("Claude Code signs in no way {way}"))),
         }
     }
 
-    fn waiting(&self) -> MutexGuard<'_, HashMap<String, Login>> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Start `claude auth login` and answer the step its link and code are: the link it
-    /// prints for a browser that cannot return to it, whose page shows the code. Claude
-    /// Code 2.1.310 printed that one with `redirect_uri=https://platform.claude.com/oauth/code/callback`,
-    /// no loopback address, so nothing fills the code but its person. A sign-in started
-    /// before is ended.
+    /// Start `claude auth login` with the driver's `$BROWSER`, and answer the step its link
+    /// is: the loopback link it gave `$BROWSER`, else the manual one it printed. A sign-in
+    /// started before is ended.
     async fn start(&self) -> Result<Given, Error> {
+        self.0.end();
         let binary = crate::binary().ok_or_else(|| gone("Claude Code is not installed here"))?;
-        let login = Login::start(&binary)
+        let browser = Browser::new().map_err(|e| refused(format!("no $BROWSER for Claude Code: {e}")))?;
+        let mut command = steery_driver_common::program::helper(&binary);
+        command.args(["auth", "login"]).env("BROWSER", browser.program());
+        let mut running = Login::start(command, CLAUDE_SIGN_IN_RETURN.into(), true)
             .map_err(|e| refused(format!("claude auth login did not start: {e}")))?;
-        let mut said = login.said.clone();
-        let printed = tokio::time::timeout(LINK_WITHIN, async {
-            said.wait_for(|said| link(said).is_some())
-                .await
-                .ok()
-                .and_then(|said| link(&said))
-        })
-        .await
-        .ok()
-        .flatten();
-        let Some(url) = printed else {
-            let own = own_line(&login.said.borrow(), 0, None);
-            return Err(refused(own.unwrap_or_else(|| {
+        let began = Instant::now();
+        let mut printed = None;
+        let url = loop {
+            if let Some(url) = browser.given() {
+                break Some(url);
+            }
+            let now = Instant::now();
+            if printed.is_none() && running.showed(login::link).is_some() {
+                printed = Some(now);
+            }
+            if now >= began + LINK_WITHIN || printed.is_some_and(|at| now >= at + BROWSER_AFTER) {
+                break running.showed(login::link);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        drop(browser);
+        let Some(url) = url else {
+            return Err(refused(running.last_line().unwrap_or_else(|| {
                 format!(
-                    "claude auth login printed no sign-in link within {} s",
+                    "claude auth login gave no sign-in link within {} s",
                     LINK_WITHIN.as_secs()
                 )
             })));
         };
-        let id = login.id;
-        let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default();
-        let ends_at = now.saturating_add(u64::try_from(KEPT.as_millis()).unwrap_or(u64::MAX));
-        self.waiting().insert(NEED.into(), login);
-        let kept = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(KEPT).await;
-            let mut waiting = kept.waiting();
-            if waiting.get(NEED).is_some_and(|login| login.id == id) {
-                waiting.remove(NEED);
-            }
-        });
+        let returns = running.link(&url);
+        let ends_at = self.0.keep(running);
         Ok(Given::Next(Way {
-            id: CLAUDE_SIGN_IN_CODE.into(),
-            label: "Paste the code Claude shows".into(),
-            about: Some("Sign in on Claude's page; it then shows a code to paste here.".into()),
+            id: CLAUDE_SIGN_IN_RETURN.into(),
+            label: "Sign in to Claude".into(),
+            about: Some(
+                "Sign in on Claude's page. Where it ends on an address that does not load, or \
+                 shows a code, paste that here."
+                    .into(),
+            ),
             link: Some(NeedLink {
                 label: "Sign in to Claude".into(),
                 url,
-                fills: None,
+                fills: returns.then(|| ADDRESS.into()),
             }),
             fields: vec![Field {
-                name: CODE.into(),
-                label: "Code".into(),
-                about: Some("Shown once you sign in".into()),
+                name: ADDRESS.into(),
+                label: "Address or code".into(),
+                about: Some(
+                    "Where your browser ended, or the code Claude's page shows; empty once \
+                     signed in"
+                        .into(),
+                ),
                 secret: true,
             }],
             ends_at: Some(ends_at),
         }))
     }
+}
 
-    /// Write `code` to the sign-in waiting here, and answer how Claude Code ended it. One
-    /// still running after [`CODE_WITHIN`] waits again, so a code typed again reaches it.
-    async fn finish(&self, code: &str) -> Result<Given, Error> {
-        let mut login = self.waiting().remove(NEED).ok_or_else(|| {
-            gone("No Claude Code sign-in waits on this host any more: start it again")
-        })?;
-        let before = login.said.borrow().len();
-        login
-            .terminal
-            .write_all(format!("{code}\r").as_bytes())
-            .map_err(|e| refused(format!("claude auth login took no code: {e}")))?;
-        match tokio::time::timeout(CODE_WITHIN, login.child.wait()).await {
-            Ok(Ok(status)) if status.success() => Ok(Given::Done {
-                line: "Claude Code is signed in on this host".into(),
-                env: BTreeMap::new(),
-            }),
-            Ok(Ok(status)) => {
-                // Its last words reach the terminal before it closes.
-                let mut said = login.said.clone();
-                let _ = tokio::time::timeout(Duration::from_secs(1), said.wait_for(|_| false)).await;
-                let own = own_line(&said.borrow(), before, Some(code));
-                Err(refused(own.unwrap_or_else(|| {
-                    format!("claude auth login ended with {status}")
-                })))
-            }
-            Ok(Err(e)) => Err(refused(format!("claude auth login: {e}"))),
-            Err(_) => {
-                let own = own_line(&login.said.borrow(), before, Some(code));
-                self.waiting().entry(NEED.into()).or_insert(login);
-                Err(refused(own.unwrap_or_else(|| {
-                    format!(
-                        "Claude Code did not finish signing in within {} s",
-                        CODE_WITHIN.as_secs()
-                    )
-                })))
-            }
-        }
+/// A `$BROWSER` of the driver's: a script in a folder of its own that records the link it
+/// is given, and opens nothing. The folder goes once it is dropped.
+struct Browser(PathBuf);
+
+impl Browser {
+    fn new() -> std::io::Result<Self> {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let folder = std::env::temp_dir().join(format!(
+            "steery-browser-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&folder)?;
+        let browser = Self(folder);
+        let at = quoted(&browser.0);
+        // Written whole, then moved, so it is never read half written.
+        std::fs::write(
+            browser.program(),
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > {at}/given.tmp && mv {at}/given.tmp {at}/given\n"),
+        )?;
+        std::fs::set_permissions(browser.program(), std::fs::Permissions::from_mode(0o700))?;
+        Ok(browser)
+    }
+
+    fn program(&self) -> PathBuf {
+        self.0.join("browser")
+    }
+
+    /// The link it was given, where it was.
+    fn given(&self) -> Option<String> {
+        let given = std::fs::read_to_string(self.0.join("given")).ok()?;
+        given.starts_with("https://").then_some(given)
     }
 }
 
-impl Login {
-    /// `claude auth login` on a new terminal, which it needs: with no terminal to read a
-    /// pasted code from it stops ("Couldn't start the local listener that receives the
-    /// browser sign-in", Claude Code's docs, for input piped into it). It is killed once
-    /// dropped.
-    fn start(binary: &Path) -> std::io::Result<Self> {
-        let (terminal, theirs) = terminal()?;
-        let mut command = steery_driver_common::program::helper(binary);
-        command.args(["auth", "login"]).stdout(Stdio::null());
-        let side = theirs.as_raw_fd();
-        // SAFETY: between fork and exec the child calls only `login_tty`, which makes `side`
-        // its controlling terminal and its standard input, output and error: `setsid`,
-        // `ioctl`, `dup2` and `close`, each safe there.
-        unsafe {
-            command.pre_exec(move || match libc::login_tty(side) {
-                0 => Ok(()),
-                _ => Err(std::io::Error::last_os_error()),
-            });
-        }
-        let child = command.spawn()?;
-        drop(theirs);
-        let (tell, said) = watch::channel(Vec::new());
-        let mut reading = terminal.try_clone()?;
-        // Reading ends as the terminal closes: Claude Code ended, or was killed.
-        std::thread::spawn(move || {
-            let mut chunk = [0u8; 4096];
-            loop {
-                match reading.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(read) => tell.send_modify(|said| said.extend_from_slice(&chunk[..read])),
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-        });
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        Ok(Self {
-            id: NEXT.fetch_add(1, Ordering::Relaxed),
-            child,
-            terminal,
-            said,
-        })
+impl Drop for Browser {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
-/// A new terminal: the side the driver reads and writes, and the side Claude Code is given.
-/// Both are opened close-on-exec from the start, so nothing else the driver starts meanwhile
-/// inherits either and keeps the terminal open: `/dev/ptmx` and the side it names, through
-/// `std::fs`, which opens every file `O_CLOEXEC`, on macOS and Linux alike (`posix_openpt`
-/// is `open("/dev/ptmx")` on both, and macOS's takes only `O_RDWR` and `O_NOCTTY`). Wide, so
-/// a link is printed on one line.
-fn terminal() -> std::io::Result<(File, OwnedFd)> {
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let open = |path: &Path| {
-        std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NOCTTY)
-            .open(path)
-    };
-    let ours = open(Path::new("/dev/ptmx"))?;
-    let fd = ours.as_raw_fd();
-    // SAFETY: `grantpt` and `unlockpt` on the primary side this function owns.
-    if unsafe { libc::grantpt(fd) } != 0 || unsafe { libc::unlockpt(fd) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let mut name = [0 as libc::c_char; 128];
-    // SAFETY: `ptsname_r` writes at most `name.len()` bytes, its closing NUL among them.
-    match unsafe { ptsname_r(fd, name.as_mut_ptr(), name.len()) } {
-        0 => {}
-        // macOS says -1 and sets `errno`; Linux answers the error number itself.
-        -1 => return Err(std::io::Error::last_os_error()),
-        error => return Err(std::io::Error::from_raw_os_error(error)),
-    }
-    // SAFETY: `ptsname_r` wrote a NUL-terminated name into `name`.
-    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
-    let theirs = open(Path::new(std::ffi::OsStr::from_bytes(name.to_bytes())))?;
-    let size = libc::winsize {
-        ws_row: 24,
-        ws_col: 1000,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: `TIOCSWINSZ` reads one `winsize`. The cast meets each platform's type of the
-    // request.
-    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &raw const size) } == -1 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok((ours, OwnedFd::from(theirs)))
-}
-
-// The libc crate names no `ptsname_r` on macOS, which has it since 10.13.4 (ptsname(3)).
-#[cfg(target_vendor = "apple")]
-unsafe extern "C" {
-    fn ptsname_r(fd: libc::c_int, buffer: *mut libc::c_char, length: libc::size_t) -> libc::c_int;
-}
-#[cfg(not(target_vendor = "apple"))]
-use libc::ptsname_r;
-
-/// The first link in what Claude Code printed, once it is whole: it ends at the first
-/// character no URL holds (RFC 3986), and something follows it.
-fn link(said: &[u8]) -> Option<String> {
-    let text = plain(said);
-    let rest = &text[text.find("https://")?..];
-    let end = rest.find(|c: char| {
-        !(c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c))
-    })?;
-    Some(rest[..end].to_owned())
-}
-
-/// Claude Code's own last line after the first `from` bytes it printed: one it had not
-/// printed before them (its prompt, drawn again), and not the code `echo` its terminal
-/// echoed.
-fn own_line(said: &[u8], from: usize, echo: Option<&str>) -> Option<String> {
-    let from = from.min(said.len());
-    let earlier = plain(&said[..from]);
-    let earlier: HashSet<&str> = lines(&earlier).collect();
-    let later = plain(&said[from..]);
-    lines(&later)
-        .filter(|line| !earlier.contains(line) && echo.is_none_or(|echo| !line.contains(echo)))
-        .last()
-        .map(str::to_owned)
-}
-
-fn lines(text: &str) -> impl Iterator<Item = &str> {
-    text.split(['\r', '\n'])
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-}
-
-/// What a terminal shows of `said`: its text without escape sequences (a colour, a cursor
-/// move, a hyperlink's target, whose text stays) or bells.
-fn plain(said: &[u8]) -> String {
-    let text = String::from_utf8_lossy(said);
-    let mut shown = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                // A control sequence ends at its final byte. It reads as a space: a cursor
-                // move or an erase stands between what is printed before and after it.
-                Some('[') => {
-                    for c in chars.by_ref() {
-                        if ('\x40'..='\x7e').contains(&c) {
-                            break;
-                        }
-                    }
-                    shown.push(' ');
-                }
-                // An operating-system command ends at a bell or at `ESC \`.
-                Some(']') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' {
-                            break;
-                        }
-                        if c == '\x1b' {
-                            chars.next();
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\x07' => {}
-            c => shown.push(c),
-        }
-    }
-    shown
+/// `path` as one word of a shell's.
+fn quoted(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', r"'\''"))
 }
 
 fn gone(line: impl Into<String>) -> Error {
