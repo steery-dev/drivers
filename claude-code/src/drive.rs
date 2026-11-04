@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use crate::agents;
 use crate::registry::{self, Job};
+use crate::says::Says;
 use crate::transcripts::Store;
 use crate::turn::{self, EFFORT, Turn};
 
@@ -276,14 +277,30 @@ fn sample(
 
 /// `stop`: a background session's own `claude stop <job>`, which keeps the conversation,
 /// then its registry entry and `claude agents` watched until it is gone, inside the
-/// runtime's bound for a stop. A session in a terminal has no graceful stop of Claude
-/// Code's own: the runtime's signals end it.
-pub async fn stop(root: &Path, stop: Stop) -> Result<Stopped, Error> {
+/// runtime's bound for a stop. `claude stop` leaves the commands the session was running
+/// in groups of their own (its tools' shells, run in the background or not) running
+/// with nobody to read them, so what the session's process had started as the stop began
+/// is ended once it is gone ([`end_left`]). A session in a terminal has no graceful stop
+/// of Claude Code's own: the runtime's signals end it. A stop naming a say ends the
+/// session only where the turn running took that say's words ([`said_turn`]), and
+/// refuses where only signals could end it: none follow it.
+pub async fn stop(root: &Path, store: &Store, says: &Says, stop: Stop) -> Result<Stopped, Error> {
+    if let Some(say) = stop.say.as_deref()
+        && let Some(stopped) = said_turn(root, store, says, &stop.external_id, say)?
+    {
+        return Ok(stopped);
+    }
     let token = match stop.holder {
         Holder::Person {
             stop: HolderStop::Owner(Some(token)),
             ..
         } => token,
+        _ if stop.say.is_some() => {
+            return Err(Error::refused(
+                refusal::NOT_STOPPED,
+                "Claude Code outside a background session has no stop of its own for one turn",
+            ));
+        }
         Holder::Person {
             stop: HolderStop::Process { pid, .. },
             ..
@@ -333,6 +350,7 @@ pub async fn stop(root: &Path, stop: Stop) -> Result<Stopped, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     let left = || deadline.saturating_duration_since(tokio::time::Instant::now());
+    let running = registry::kernel::descendants(job.pid);
     let out = agents::said(&binary, &["stop", &job.job], left())
         .await
         .map_err(refused)?;
@@ -359,13 +377,85 @@ pub async fn stop(root: &Path, stop: Stop) -> Result<Stopped, Error> {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    let ended = end_left(&running, deadline).await;
     Ok(Stopped {
         stopped: true,
         proof: Some(format!(
-            "`claude stop {}` ended background session pid {} in {}",
+            "`claude stop {}` ended background session pid {} in {}{ended}",
             job.job, job.pid, job.session
         )),
     })
+}
+
+/// How long the commands a stopped session left running have to end on SIGTERM before
+/// SIGKILL.
+pub(crate) const COMMANDS_END_WITHIN: Duration = Duration::from_millis(500);
+
+/// End what a stopped session's process had started and that outlived it: SIGTERM, then
+/// SIGKILL for whatever is still there after [`COMMANDS_END_WITHIN`] or by `deadline`,
+/// each to the process read then alone and the group it leads. What the proof says of it.
+pub(crate) async fn end_left(running: &[(u32, u64)], deadline: tokio::time::Instant) -> String {
+    let termed = registry::kernel::signal(running, libc::SIGTERM);
+    if termed == 0 {
+        return String::new();
+    }
+    let killed_by = (tokio::time::Instant::now() + COMMANDS_END_WITHIN)
+        .min(deadline - Duration::from_millis(100));
+    while tokio::time::Instant::now() < killed_by {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if running
+            .iter()
+            .all(|&(pid, start)| registry::kernel::started(pid) != Some(start))
+        {
+            return format!(", and the {termed} processes it left running ended on SIGTERM");
+        }
+    }
+    let killed = registry::kernel::signal(running, libc::SIGKILL);
+    format!(", and of the {termed} processes it left running {killed} were sent SIGKILL")
+}
+
+/// Whether the turn running in `external_id` took the words of say `say` (PROTOCOL.md
+/// §4.2), its transcript read on first: none where it does, `stopped` false where no turn
+/// runs, and refused `other-turn` where another runs or Claude Code says nothing of one.
+/// Words that went in before the transcript's newest turn end were a turn's that is over.
+fn said_turn(
+    root: &Path,
+    store: &Store,
+    says: &Says,
+    external_id: &str,
+    say: &str,
+) -> Result<Option<Stopped>, Error> {
+    let other = |line: &str| Err(Error::refused(refusal::OTHER_TURN, line));
+    let Some(live) = registry::live(&registry::dir(root), external_id) else {
+        return Ok(Some(Stopped {
+            stopped: false,
+            proof: Some("no Claude Code session is in it now".into()),
+        }));
+    };
+    match live.status.as_deref() {
+        Some("busy" | "waiting") => {}
+        Some(status) => {
+            return Ok(Some(Stopped {
+                stopped: false,
+                proof: Some(format!("the Claude Code session in it is {status}")),
+            }));
+        }
+        None => return other("the Claude Code session in it says nothing of a turn"),
+    }
+    let transcript = store.transcript(external_id).ok();
+    says.read(external_id, transcript.as_deref());
+    let ended = transcript.as_deref().and_then(|path| store.now(path).ended);
+    if says
+        .took(external_id)
+        .iter()
+        .any(|(id, went)| id == say && ended.is_none_or(|ended| *went > ended))
+    {
+        Ok(None)
+    } else if says.waits(external_id, say) {
+        other("its words still wait in Claude Code's inbox: the turn running is another")
+    } else {
+        other("the turn running in Claude Code did not take its words")
+    }
 }
 
 /// A point in a conversation's transcript: the file, its identity, the end of its last
@@ -430,7 +520,7 @@ pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
 /// through a live session's inbox arrive as another session's message: `isMeta`, with a
 /// `peer` origin. They are the input all the same. Sent while a turn runs, they arrive as
 /// a queued prompt instead ([`crate::events::queued`]), and no `user` record repeats them.
-fn input_carries(record: &Value, marker: &str) -> bool {
+pub(crate) fn input_carries(record: &Value, marker: &str) -> bool {
     if let Some(queued) = crate::events::queued(record) {
         return matches!(
             queued.pointer("/origin/kind").and_then(Value::as_str),

@@ -6,9 +6,11 @@
 //! waits on in `waitingFor`, `idle` once the turn is over, and `statusUpdatedAt`. The
 //! model and effort it runs on are its transcript's newest answer's, read on as it grows
 //! ([`crate::context`]), and a turn its transcript ended since the one running began is
-//! over, whatever the registry was seen saying in between. Nothing of Claude Code's says
-//! what its person is typing, what is queued, or which calls run, so those stay unsaid. A
-//! session whose process is gone is said once more, with nothing running.
+//! over, whatever the registry was seen saying in between. The says a turn took are the
+//! ones whose words went in by its end ([`crate::says`]), and a turn that took any is
+//! said settled once it is over. Nothing of Claude Code's says what its person is typing,
+//! what is queued, or which calls run, so those stay unsaid. A session whose process is
+//! gone is said once more, with nothing running and its turn settled.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,9 +18,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use steery_sdk::Notifier;
-use steery_sdk::wire::harness::{Dialog, DialogKind, LiveState, LiveTurn, SessionChanged};
+use steery_sdk::wire::harness::{
+    Dialog, DialogKind, LiveSettled, LiveState, LiveTurn, SessionChanged,
+};
 
 use crate::registry::{self, Registered};
+use crate::says::Says;
 use crate::transcripts::Store;
 
 /// How often the registry is read again: Claude Code rewrites an entry as its status
@@ -33,14 +38,17 @@ const LOOK_AGAIN: Duration = Duration::from_secs(10);
 /// conversation Steery lists ([`crate::transcripts`]).
 const HEADLESS: &str = "sdk-cli";
 
+/// The most settled turns said, the newest kept (PROTOCOL.md §4.3).
+const SETTLED_KEPT: usize = 16;
+
 /// Follow every live session under `root` on a thread of its own, for as long as the
 /// driver's process runs.
-pub fn watch(root: &Path, store: Arc<Store>, notifier: Notifier) {
+pub fn watch(root: &Path, store: Arc<Store>, says: Arc<Says>, notifier: Notifier) {
     let dir = registry::dir(root);
     std::thread::spawn(move || {
         let mut followed: HashMap<String, Followed> = HashMap::new();
         loop {
-            look(&dir, &store, &notifier, &mut followed);
+            look(&dir, &store, &says, &notifier, &mut followed);
             std::thread::sleep(EVERY);
         }
     });
@@ -55,11 +63,19 @@ struct Followed {
     transcript: Option<PathBuf>,
     /// When its transcript was last looked for and not found.
     missed: Option<Instant>,
+    /// Turns that took Steery's words and are over, oldest first.
+    settled: Vec<LiveSettled>,
 }
 
 /// One look at every live session: each one whose state changed is said, and each one
 /// gone is said with nothing running, then forgotten.
-fn look(dir: &Path, store: &Store, notifier: &Notifier, followed: &mut HashMap<String, Followed>) {
+fn look(
+    dir: &Path,
+    store: &Store,
+    says: &Says,
+    notifier: &Notifier,
+    followed: &mut HashMap<String, Followed>,
+) {
     let mut live: Vec<Registered> = Vec::new();
     for entry in registry::living(dir) {
         if entry.entrypoint.as_deref() != Some(HEADLESS)
@@ -68,16 +84,28 @@ fn look(dir: &Path, store: &Store, notifier: &Notifier, followed: &mut HashMap<S
             live.push(entry);
         }
     }
-    followed.retain(|id, _| {
+    followed.retain(|id, follow| {
         let gone = !live.iter().any(|entry| &entry.session_id == id);
         if gone {
-            say(notifier, id, LiveState::default());
+            // The turn it ran is over with its process: by `claude stop`, or its end.
+            says.read(id, follow.transcript.as_deref());
+            let began = follow.began.take();
+            follow.settle(says, id, began, millis_now());
+            say(
+                notifier,
+                id,
+                LiveState {
+                    settled: follow.settled.clone(),
+                    ..LiveState::default()
+                },
+            );
+            says.forget(id);
         }
         !gone
     });
     for entry in live {
         let follow = followed.entry(entry.session_id.clone()).or_default();
-        let state = follow.state(&entry, store);
+        let state = follow.state(&entry, store, says);
         if follow.said.as_ref() != Some(&state) {
             say(notifier, &entry.session_id, state.clone());
             follow.said = Some(state);
@@ -86,15 +114,17 @@ fn look(dir: &Path, store: &Store, notifier: &Notifier, followed: &mut HashMap<S
 }
 
 impl Followed {
-    /// Where the session stands now: its registry entry's status, and what its
-    /// transcript's end says.
-    fn state(&mut self, entry: &Registered, store: &Store) -> LiveState {
+    /// Where the session stands now: its registry entry's status, what its transcript's
+    /// end says, and which of Steery's says the turn running took.
+    fn state(&mut self, entry: &Registered, store: &Store, says: &Says) -> LiveState {
+        let id = &entry.session_id;
         if self.transcript.is_none()
             && self.missed.is_none_or(|missed| missed.elapsed() >= LOOK_AGAIN)
         {
-            self.transcript = store.transcript(&entry.session_id).ok();
+            self.transcript = store.transcript(id).ok();
             self.missed = self.transcript.is_none().then(Instant::now);
         }
+        says.read(id, self.transcript.as_deref());
         let now = self
             .transcript
             .as_deref()
@@ -102,16 +132,33 @@ impl Followed {
             .unwrap_or_default();
         let since = entry.status_updated_at.unwrap_or_else(millis_now);
         let running = matches!(entry.status.as_deref(), Some("busy" | "waiting"));
-        let began = match self.began {
+        let was = self.began;
+        let began = match was {
             Some(began) if now.ended.is_none_or(|ended| ended < began) => began,
             Some(_) => since.max(now.ended.unwrap_or_default()),
             None => since,
         };
         self.began = running.then_some(began);
+        // The turn seen running is over: none runs now, or the transcript ended it and
+        // another began.
+        if let Some(over) = was.filter(|over| self.began != Some(*over)) {
+            let at = now
+                .ended
+                .filter(|ended| *ended >= over)
+                .unwrap_or(self.began.unwrap_or(since));
+            self.settle(says, id, Some(over), at);
+        }
+        // A turn no look saw run: words went in and the transcript ended a turn after
+        // them, and no turn running began before that end.
+        if let Some(ended) = now.ended
+            && self.began.is_none_or(|began| began > ended)
+        {
+            self.settle(says, id, None, ended);
+        }
         LiveState {
             turn: self.began.map(|began_at| LiveTurn {
                 began_at,
-                says: Vec::new(),
+                says: says.took(id).into_iter().map(|(say, _)| say).collect(),
             }),
             idle: match entry.status.as_deref() {
                 Some("idle") => Some(true),
@@ -125,8 +172,33 @@ impl Followed {
                 .then_some(entry.waiting_for.as_deref())
                 .flatten()
                 .map(|waiting| dialog(waiting, since)),
+            settled: self.settled.clone(),
             ..LiveState::default()
         }
+    }
+
+    /// A turn over at `at`, begun at `began` where a look saw it run: the says whose words
+    /// went in by then are the ones it took, and where it took any it is settled, failed
+    /// where Claude Code's own error is the last answer written since it began.
+    fn settle(&mut self, says: &Says, id: &str, began: Option<u64>, at: u64) {
+        let took = says.settle(id, at);
+        let Some(first) = took.iter().map(|(_, went)| *went).min() else {
+            return;
+        };
+        let began_at = began.map_or(first, |began| began.min(first));
+        let error = self
+            .transcript
+            .as_deref()
+            .and_then(|transcript| crate::turn::stopped_on(transcript, began_at));
+        self.settled.push(LiveSettled {
+            began_at,
+            at,
+            says: took.into_iter().map(|(say, _)| say).collect(),
+            failed: error.is_some(),
+            error,
+        });
+        let past = self.settled.len().saturating_sub(SETTLED_KEPT);
+        self.settled.drain(..past);
     }
 }
 
@@ -154,6 +226,6 @@ fn say(notifier: &Notifier, external_id: &str, state: LiveState) {
 }
 
 /// Now, in milliseconds since 1970.
-fn millis_now() -> u64 {
+pub(crate) fn millis_now() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }

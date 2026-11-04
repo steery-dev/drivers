@@ -17,6 +17,7 @@ mod mcp;
 mod native;
 mod rollout;
 mod router;
+mod says;
 mod setup;
 mod turn;
 mod words;

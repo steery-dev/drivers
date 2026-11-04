@@ -20,6 +20,7 @@ use steery_sdk::{Error, refusal};
 use tokio::io::AsyncWriteExt;
 
 use crate::registry;
+use crate::says::Says;
 use crate::transcripts::Store;
 
 /// How long the conversation's own model has to write a recap, its words read and all:
@@ -46,9 +47,10 @@ const POST_WITHIN: Duration = Duration::from_secs(8);
 /// handed over are unconfirmed and the runtime looks for them with `receipt/find`. Words
 /// that may go in only while nothing runs (`immediate`) are refused `harness-busy` while
 /// the session's registry entry says anything but `idle`; it is read before, so a turn its
-/// person begins in between may still take them.
-pub async fn say(root: &Path, say: Say) -> Result<Said, Error> {
-    let dir = registry::dir(root);
+/// person begins in between may still take them. A say with an `id` is given to `says`
+/// first, whose transcript then names the turn that took its words.
+pub async fn say(store: &Store, says: &Says, say: Say) -> Result<Said, Error> {
+    let dir = registry::dir(store.root());
     let live = registry::live(&dir, &say.external_id)
         .ok_or_else(|| Error::refused(refusal::NO_DOOR, "no Claude Code session is in it now"))?;
     let idle = live.status.as_deref() == Some("idle");
@@ -67,14 +69,23 @@ pub async fn say(root: &Path, say: Say) -> Result<Said, Error> {
             "the Claude Code session in it has messaging off",
         )
     })?;
-    post(
+    if let Some(id) = say.id.as_deref() {
+        let transcript = store.transcript(&say.external_id).ok();
+        says.give(&say.external_id, id, &say.words, transcript.as_deref());
+    }
+    let posted = post(
         &socket,
         registry::peer_token(&dir, live.pid),
         &say.words,
         POST_WITHIN,
     )
-    .await?;
-    Ok(Said { took: false })
+    .await;
+    if let (Err(Error::Refused { word, .. }), Some(id)) = (&posted, say.id.as_deref())
+        && word == refusal::NO_DOOR
+    {
+        says.ungive(&say.external_id, id);
+    }
+    posted.map(|()| Said { took: false })
 }
 
 /// One message into a session's inbox: the auth line where a token is known, then the

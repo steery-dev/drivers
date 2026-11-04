@@ -7,9 +7,9 @@
 //! the router passes it.
 //!
 //! The [`Followers`] keep a subscription to each thread the runtime asks about
-//! (`thread-stream-following-changed`), so the owning window's own state of the thread
-//! — running or idle — is known as it changes, and said to the runtime as
-//! `session/changed`.
+//! (`thread-stream-following-changed`), so the owning window's own state of the thread,
+//! running or idle, is known as it changes, and said to the runtime as `session/changed`
+//! with the says its turns took ([`crate::says`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +21,8 @@ use steery_sdk::Notifier;
 use steery_sdk::wire::harness::{Execution, LiveState, LiveTurn, SessionChanged};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+use crate::says::Says;
 
 /// The versions of its requests the Codex app speaks, read off its own bundle (ChatGPT
 /// 26.917).
@@ -308,6 +310,7 @@ pub struct Followers {
     notifier: Notifier,
     threads: Mutex<HashMap<String, Follow>>,
     started: Mutex<bool>,
+    says: Says,
 }
 
 struct Follow {
@@ -317,6 +320,8 @@ struct Follow {
     last_discover: Instant,
     /// What was last said of it, and since when it ran.
     said: Option<(Execution, u64)>,
+    /// The state last sent.
+    sent: LiveState,
 }
 
 impl Follow {
@@ -327,6 +332,7 @@ impl Follow {
             projection: Projection::default(),
             last_discover: Instant::now() - DISCOVERY_INTERVAL,
             said: None,
+            sent: LiveState::default(),
         }
     }
 
@@ -344,7 +350,13 @@ impl Followers {
             notifier,
             threads: Mutex::new(HashMap::new()),
             started: Mutex::new(false),
+            says: Says::default(),
         })
+    }
+
+    /// The says each thread took.
+    pub fn says(&self) -> &Says {
+        &self.says
     }
 
     fn threads(&self) -> std::sync::MutexGuard<'_, HashMap<String, Follow>> {
@@ -387,7 +399,13 @@ impl Followers {
         self.router.as_deref().filter(|path| path.exists())
     }
 
-    /// Say a thread's state where it changed.
+    /// Say a thread's state again where its says changed.
+    pub fn said(&self, thread: &str) {
+        self.changed(thread);
+    }
+
+    /// Say a thread's state where it changed. A turn seen to end settles the turns of
+    /// says not yet seen to end: the app runs one turn of a thread at a time.
     fn changed(&self, thread: &str) {
         let state = {
             let mut threads = self.threads();
@@ -399,29 +417,48 @@ impl Followers {
                 .as_ref()
                 .and_then(|_| follow.projection.execution());
             let before = follow.said.map(|(state, _)| state);
-            if now == before {
-                return;
-            }
+            let at = crate::home::now();
             let since = match (now, follow.said) {
                 (Some(Execution::Running), Some((Execution::Running, since))) => since,
-                _ => crate::home::now(),
+                _ => at,
             };
+            if now != before
+                && let Some(ended) = now.filter(|now| *now != Execution::Running)
+            {
+                let began = follow
+                    .said
+                    .filter(|(state, _)| *state == Execution::Running)
+                    .map(|(_, since)| since);
+                self.says
+                    .ended(thread, None, began, at, ended == Execution::Failed, None);
+            }
             follow.said = now.map(|state| (state, since));
-            match now {
+            let settled = self.says.settled(thread);
+            let state = match now {
                 Some(Execution::Running) => LiveState {
                     turn: Some(LiveTurn {
                         began_at: since,
-                        says: Vec::new(),
+                        says: self.says.running(thread),
                     }),
                     idle: Some(false),
+                    settled,
                     ..LiveState::default()
                 },
                 Some(_) => LiveState {
                     idle: Some(true),
+                    settled,
                     ..LiveState::default()
                 },
-                None => LiveState::default(),
+                None => LiveState {
+                    settled,
+                    ..LiveState::default()
+                },
+            };
+            if state == follow.sent {
+                return;
             }
+            follow.sent = state.clone();
+            state
         };
         if let Ok(params) = serde_json::to_value(SessionChanged {
             external_id: thread.to_owned(),

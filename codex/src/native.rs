@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use steery_driver_common::receipt::marked;
+use steery_driver_common::receipt::{DELIVERED, marked};
 
 use crate::appserver::{AppServer, Failed};
 
@@ -264,7 +264,7 @@ pub async fn carrying(
         if Some(id.as_str()) == before {
             return Ok(true);
         }
-        if carries(value, marker)? {
+        if carries(value, |text| marked(text, marker))? {
             matches.push(id);
         }
         Ok(false)
@@ -280,7 +280,82 @@ pub async fn carrying(
     }
 }
 
-fn carries(turn: &Value, marker: &str) -> Result<bool, String> {
+/// How many of a thread's newest turns are looked through for a say's words.
+const TAKEN_WITHIN: usize = 50;
+
+/// The words a say put in, as a turn's person input is matched to them: the delivery
+/// marker they carry whole, else the words themselves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Words {
+    Marker(String),
+    Text(String),
+}
+
+impl Words {
+    /// The words of the say `id`: its delivery's marker where they carry it.
+    pub fn of(words: &str, id: &str) -> Self {
+        let marker = format!("{DELIVERED}{id}");
+        match marked(words, &marker) {
+            true => Self::Marker(marker),
+            false => Self::Text(words.trim().to_owned()),
+        }
+    }
+
+    fn in_text(&self, text: &str) -> bool {
+        match self {
+            Self::Marker(marker) => marked(text, marker),
+            Self::Text(words) => text.trim() == words,
+        }
+    }
+}
+
+/// A turn that took a say's words, and the error it failed on, as Codex lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taking {
+    pub turn: Turn,
+    pub error: Option<String>,
+}
+
+/// For each of `asked`, the newest turn after its own `before` whose person input carries
+/// its words, among the thread's [`TAKEN_WITHIN`] newest turns.
+pub async fn taking(
+    server: &mut AppServer,
+    thread: &str,
+    asked: &[(Option<&str>, &Words)],
+) -> Result<Vec<Option<Taking>>, String> {
+    let mut found: Vec<Option<Taking>> = vec![None; asked.len()];
+    let mut passed = vec![false; asked.len()];
+    let mut seen = 0;
+    pages(server, thread, "full", |value| {
+        let listed = turn(value)?;
+        seen += 1;
+        for (at, (before, words)) in asked.iter().enumerate() {
+            if found[at].is_some() || passed[at] {
+                continue;
+            }
+            if *before == Some(listed.id.as_str()) {
+                passed[at] = true;
+            } else if carries(value, |text| words.in_text(text))? {
+                found[at] = Some(Taking {
+                    turn: listed.clone(),
+                    error: value
+                        .pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
+            }
+        }
+        Ok(seen >= TAKEN_WITHIN
+            || found
+                .iter()
+                .zip(&passed)
+                .all(|(found, passed)| found.is_some() || *passed))
+    })
+    .await?;
+    Ok(found)
+}
+
+fn carries(turn: &Value, holds: impl Fn(&str) -> bool) -> Result<bool, String> {
     if turn.get("itemsView").and_then(Value::as_str) != Some("full") {
         return Err("Codex did not load the turn's items".into());
     }
@@ -297,7 +372,7 @@ fn carries(turn: &Value, marker: &str) -> Result<bool, String> {
                 .flatten()
                 .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
                 .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .any(|text| marked(text, marker))
+                .any(&holds)
     }))
 }
 
@@ -316,13 +391,28 @@ mod tests {
         assert_eq!(Owner::parse("{\"app\":{\"thread\":\"t\"}}"), None);
     }
 
+    /// A turn carries a say's words where its person input holds the delivery marker
+    /// whole, or, for words of no delivery, is those words.
     #[test]
     fn a_turn_s_items_say_whether_it_carries_the_words() {
         let full = json!({"id": "t1", "status": "completed", "itemsView": "full", "items": [
             {"type": "userMessage", "content": [{"type": "text", "text": "do it steery-delivery:d1"}]}]});
-        assert_eq!(carries(&full, "steery-delivery:d1"), Ok(true));
-        assert_eq!(carries(&full, "steery-delivery:d2"), Ok(false));
-        assert!(carries(&json!({"id": "t1", "itemsView": "notLoaded"}), "x").is_err());
+        let holds = |words: Words| carries(&full, |text| words.in_text(text));
+        assert_eq!(
+            Words::of("do it steery-delivery:d1", "d1"),
+            Words::Marker("steery-delivery:d1".into())
+        );
+        assert_eq!(holds(Words::of("do it steery-delivery:d1", "d1")), Ok(true));
+        assert_eq!(
+            holds(Words::of("do it steery-delivery:d10", "d1")),
+            Ok(false)
+        );
+        assert_eq!(
+            holds(Words::of(" do it steery-delivery:d1\n", "r1")),
+            Ok(true)
+        );
+        assert_eq!(holds(Words::of("do it", "r1")), Ok(false));
+        assert!(carries(&json!({"id": "t1", "itemsView": "notLoaded"}), |_| true).is_err());
     }
 
     /// An app server that serves `CODEX_HOME` and lists a thread's turns as `pages` says,
@@ -414,6 +504,56 @@ for line in sys.stdin:
             server.close().await;
             assert_eq!(found.map_err(|_| ()), expected, "{pages}");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Each say's words are found in the newest turn after the one before them that
+    /// carries them, with the error it failed on; words whose turn before is reached
+    /// first, or that no turn carries, have none.
+    #[tokio::test]
+    async fn each_say_s_words_are_found_in_the_turn_that_took_them() {
+        let dir =
+            std::env::temp_dir().join(format!("steery-codex-taking-{}", uuid::Uuid::now_v7()));
+        let said = |id: &str, status: &str, text: &str| {
+            json!({"id": id, "status": status, "itemsView": "full", "error": null, "items": [
+                {"type": "userMessage", "content": [{"type": "text", "text": text}]}]})
+        };
+        let mut failed = said("t2", "failed", "go on");
+        failed["error"] = json!({"message": "usage limit"});
+        let pages = json!({"start": {"data": [said("t3", "inProgress", "a steery-delivery:d1"),
+            failed, said("t1", "completed", "go on")], "nextCursor": null}});
+        let binary = app_server(&dir, &pages);
+        let mut server = reader(&binary, &dir).await.unwrap();
+        let (marker, text, other) = (
+            Words::of("a steery-delivery:d1", "d1"),
+            Words::of("go on", "r1"),
+            Words::of("b steery-delivery:d9", "d9"),
+        );
+        let found = taking(
+            &mut server,
+            "thread",
+            &[
+                (Some("t2"), &marker),
+                (Some("t1"), &text),
+                (Some("t3"), &text),
+                (None, &other),
+            ],
+        )
+        .await
+        .unwrap();
+        server.close().await;
+        let turn = |found: &Option<Taking>| {
+            found
+                .as_ref()
+                .map(|found| (found.turn.id.clone(), found.error.clone()))
+        };
+        assert_eq!(turn(&found[0]), Some(("t3".to_owned(), None)));
+        assert_eq!(
+            turn(&found[1]),
+            Some(("t2".to_owned(), Some("usage limit".to_owned())))
+        );
+        assert_eq!(turn(&found[2]), None);
+        assert_eq!(turn(&found[3]), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
