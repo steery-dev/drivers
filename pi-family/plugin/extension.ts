@@ -305,8 +305,8 @@ const ENDED_KEPT = 64;
 const SETTLED_KEPT = 16;
 
 /**
- * How often what nothing announces — somebody typing, words queued — is looked at
- * again while the door is open. Sent only when it changed.
+ * How often what nothing announces — somebody typing, words queued, omp's model and
+ * thinking switched — is looked at again while the door is open. Sent only when it changed.
  */
 const LOOK_EVERY_MS = 1000;
 
@@ -1623,6 +1623,14 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    */
   let autoCompaction: { reason?: string } | undefined;
   /**
+   * omp: a compaction it was asked for — `/compact`, rpc `compact` or another extension's,
+   * Steery's own aside ([`compacting`]) — from its `session_before_compact` to its
+   * `session_compact`. omp tells an extension nothing of one that fails (its
+   * `manual_compaction_end` goes to its own listeners only, v18.16.0), so one is over too
+   * once omp takes words or starts a run again.
+   */
+  let askedCompaction = false;
+  /**
    * The cause last written ([`COMPACTION`]), until a compaction or a message is written
    * after it: omp offers `session_before_compact` again for each method it tries
    * (v18.10.4), and the entry already stands before the compaction to come.
@@ -1876,7 +1884,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       ...known("idle", idle(ctx)),
       ...known("pending", ctx.hasPendingMessages?.()),
       ...known("typing", typing(ctx)),
-      compacting: compacting !== undefined,
+      // Every compaction the harness runs: pi's from `session_before_compact` on
+      // ([`compacting`]), omp's on its own and asked for, and Steery's own in either.
+      compacting: compacting !== undefined || autoCompaction !== undefined || askedCompaction,
       retrying,
       ...(retry ? { retry } : {}),
       ...(running > 0 ? { jobs: running } : {}),
@@ -3437,6 +3447,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     live = ctx;
     begun();
     turning = true;
+    // A run starts only once omp's asked compaction is over, failed or not ([`askedCompaction`]).
+    askedCompaction = false;
     began ??= Date.now();
     noteState();
   });
@@ -3559,8 +3571,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     noteState();
   });
   if (HARNESS === "pi") {
-    // pi says when the person switches model or thinking; omp has no such event, and its
-    // next turn or the door's own look says it.
+    // pi says when the person switches model or thinking. omp tells an extension of neither
+    // (v18.16.0), but its `ctx.model` and `getThinkingLevel` read the session's own as they
+    // are now, which the door's look reads again every [`LOOK_EVERY_MS`] ([`current`]).
     pi.on("model_select", changed);
     pi.on("thinking_level_select", changed);
     pi.on("session_compact_failed", (event, ctx) => {
@@ -3585,11 +3598,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return typeof reason === "string" ? { by: "harness", reason } : undefined;
   };
   if (HARNESS === "omp") {
-    pi.on("auto_compaction_start", (event) => {
+    pi.on("auto_compaction_start", (event, ctx) => {
+      live = ctx;
       autoCompaction = typeof event.reason === "string" ? { reason: event.reason } : {};
+      noteState();
     });
-    pi.on("auto_compaction_end", () => {
+    pi.on("auto_compaction_end", (_event, ctx) => {
+      live = ctx;
       autoCompaction = undefined;
+      noteState();
     });
   }
   // pi compacts after a run as well as when its person asks, and takes no words until it is
@@ -3600,9 +3617,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   pi.on("session_before_compact", (event, ctx) => {
     live = ctx;
     if (HARNESS === "pi") compacting ??= Promise.withResolvers<void>();
-    noteState();
     const asked = event.customInstructions;
-    if (typeof asked !== "string" || !asked.startsWith(COMPACT_MARK)) {
+    const steerys = typeof asked === "string" && asked.startsWith(COMPACT_MARK);
+    if (HARNESS === "omp" && !autoCompaction && !steerys) askedCompaction = true;
+    noteState();
+    if (!steerys) {
       const by = compactor(event.reason);
       const cause = by && JSON.stringify(by);
       if (cause && cause !== causeWritten) {
@@ -3634,6 +3653,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   pi.on("session_compact", (event, ctx) => {
     live = ctx;
     causeWritten = undefined;
+    askedCompaction = false;
     const details = entriesOf([event.compactionEntry])[0]?.details;
     const own = ownCompaction;
     if (own && details && typeof details === "object" && "steery" in details && details.steery === own.id) {
