@@ -527,7 +527,9 @@ by Codex.
     that owns it, or a running app server of its home that has it loaded with nothing
     queued. Else the runtime looks, an app server holding it being beyond reach.
   - `idle`: the owner's own state, else where the rollout's newest turn stands, while
-    nothing holds the rollout.
+    nothing holds the rollout; with the model and thinking the thread runs on (its running
+    app server's `thread/read` where one has it loaded, else the rollout's newest
+    `turn_context`) and when its newest turn began and ended.
   - `start`: this binary in its turn mode, `steery-driver-codex turn --codex <codex>
     <continue|fork|new> [<thread>] [--worktree] [--model m] [--thinking t] --inbox <socket>`.
     It opens the thread (`thread/resume`, `thread/fork`, `thread/start`), starts the turn,
@@ -560,9 +562,19 @@ by Codex.
   `id` (protocol 7) is tied to the turn that took its words: the one Codex named as it took
   them, else the turn whose person input carries its delivery marker once the thread's
   history has it; `session/changed` names it in that turn's `says`, and in `settled` once it
-  ended. A pick is checked against the owner's own model list and set as the thread's
-  settings. The windows' own state of each thread the runtime asks about is followed and
-  said as `session/changed`. Codex has no recap short of a turn, so `recap` is unknown.
+  ended. A pick is checked against the list of an app server of the driver's own: for a
+  thread a running app server has loaded it is set as the thread's settings
+  (`thread/settings/update`); for a thread a window owns it is kept and sent with the next
+  words Steery says there (`thread-follower-start-turn` carries model and effort), and read
+  back as picked. Each thread the runtime asks about is followed and said as
+  `session/changed`: a window's own state of it through the router, and a thread a running
+  app server has loaded (the window's own or one with nothing but its queue) through that
+  app server, looked at every second and at once on `thread/status/changed`, never
+  subscribed to (an app server sends a thread's approvals to every client subscribed to
+  it, and this client refuses them). The live state carries the turn, `pending` (the
+  queue, `thread/queue/list`), the model and thinking, the context left, the calls running
+  and lately ended (from the rollout's newest records), and `settled`. Codex has no recap
+  short of a turn, so `recap` is unknown.
 
 Build and check it, with Codex on `PATH`:
 
