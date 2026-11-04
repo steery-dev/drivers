@@ -1081,6 +1081,7 @@ fn read_from(
             ));
         }
         if let Some((parent, at)) = &segment.fork {
+            state.settle(&mut events);
             events.push(Event::Fork {
                 at: *at,
                 parent: parent.clone(),
@@ -1099,12 +1100,14 @@ fn answer(
     dev: u64,
     ino: u64,
     off: u64,
-    st: State,
-    events: Vec<Event>,
+    mut st: State,
+    mut events: Vec<Event>,
     more: bool,
     reset: bool,
     whole: bool,
 ) -> Events {
+    // A read ends on what it read: a compaction Codex has not yet counted is said as it is.
+    st.settle(&mut events);
     Events {
         cursor: Cursor {
             v: 1,

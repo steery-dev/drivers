@@ -503,9 +503,12 @@ by Codex.
   rollout up to where the fork took it, then a `fork` event, then its own. Events are turns
   and how they ended (a failure classified by its status or Codex's own code), the
   person's words with the files and pictures they attached (Codex's own fragments left
-  out), the agent's words and reasoning, calls and their results, the running token total
-  with the context left, models and efforts, sub-agents started and how they ended, and
-  rollbacks; a rollback that does not say how many turns went is refused.
+  out), the agent's words and reasoning, calls and their results, each response's own
+  tokens (`token_usage_record`, by its response id, cache writes included) and the running
+  total with the context left, compactions with the context before and after them (the
+  count Codex makes right after; it records no reason), models and efforts, sub-agents
+  started and how they ended, and rollbacks; a rollback that does not say how many turns
+  went is refused.
 - **Setup** (`setup/plan`). The MCP entry in `config.toml` (`mcp_servers.steery`, its
   `tool_timeout_sec` the runtime's bound, `default_tools_approval_mode = "approve"`: under
   `approval_policy = "never"` a tool Codex would ask about is refused), the rule
@@ -556,9 +559,10 @@ by Codex.
     and feature it can do without taken away, and a read-only sandbox; `reader/read` takes
     its last agent message.
   - `terminal`: `codex resume <thread>`, and the app's `codex://threads/<thread>`.
-- **Live** (`say`, `pick`, and `session/changed`), for a conversation Steery started. Words
-  go to the window that owns the thread, as typed in its composer, else into the running
-  app server's queue, whose acknowledgement is not delivery (`took: false`). A say with an
+- **Live** (`say`, `pick`, `recap`, and `session/changed`), for a conversation Steery
+  started. Words go to the window that owns the thread, as typed in its composer, else
+  into the running app server's queue, whose acknowledgement is not delivery (`took:
+  false`). A say with an
   `id` (protocol 7) is tied to the turn that took its words: the one Codex named as it took
   them, else the turn whose person input carries its delivery marker once the thread's
   history has it; `session/changed` names it in that turn's `says`, and in `settled` once it
@@ -573,8 +577,11 @@ by Codex.
   subscribed to (an app server sends a thread's approvals to every client subscribed to
   it, and this client refuses them). The live state carries the turn, `pending` (the
   queue, `thread/queue/list`), the model and thinking, the context left, the calls running
-  and lately ended (from the rollout's newest records), and `settled`. Codex has no recap
-  short of a turn, so `recap` is unknown.
+  and lately ended (from the rollout's newest records), and `settled`. A recap is one turn
+  in an ephemeral fork of the thread (`thread/fork`, `ephemeral: true`) on the model and
+  thinking it last ran on, by an app server of the driver's own in its home, with every
+  tool feature, hook and MCP server turned off as for the reader, `read-only` and asking
+  no approval; its last agent message is the recap, and nothing of the fork is kept.
 
 Build and check it, with Codex on `PATH`:
 
