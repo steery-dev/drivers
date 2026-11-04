@@ -8,9 +8,14 @@
 //! ([`crate::context`]), and a turn its transcript ended since the one running began is
 //! over, whatever the registry was seen saying in between. The says a turn took are the
 //! ones whose words went in by its end ([`crate::says`]), and a turn that took any is
-//! said settled once it is over. Nothing of Claude Code's says what its person is typing,
-//! what is queued, or which calls run, so those stay unsaid. A session whose process is
-//! gone is said once more, with nothing running and its turn settled.
+//! said settled once it is over. The transcript also says when a running turn waits to try
+//! a failed request again (`retrying`, until the wait its `api_error` record names is
+//! over), how much background work its calls left running that the process holding the
+//! session runs and no notice told over yet (`jobs`), and which call a permission prompt
+//! asks about: the newest answer's first with no result. Nothing of Claude Code's says
+//! what its person is typing, what is queued, or that it compacts while it does (its
+//! `compact_boundary` is written once it is done), so those stay unsaid. A session whose
+//! process is gone is said once more, with nothing running and its turn settled.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,6 +160,13 @@ impl Followed {
         {
             self.settle(says, id, None, ended);
         }
+        // A wait to try a request again is the turn's: one a turn left unanswered as it
+        // ended, or whose time is past, is waited on no more.
+        let now_at = millis_now();
+        let retry = now
+            .retry
+            .filter(|retry| running && retry.until > now_at)
+            .map(|retry| retry.retry);
         LiveState {
             turn: self.began.map(|began_at| LiveTurn {
                 began_at,
@@ -165,13 +177,16 @@ impl Followed {
                 Some(_) => Some(false),
                 None => None,
             },
+            retrying: retry.is_some(),
+            retry,
+            jobs: jobs(&now.jobs, entry.started_at),
             model: now.model,
             thinking: now.thinking,
             context_left: now.context_left,
             dialog: (entry.status.as_deref() == Some("waiting"))
                 .then_some(entry.waiting_for.as_deref())
                 .flatten()
-                .map(|waiting| dialog(waiting, since)),
+                .map(|waiting| dialog(waiting, now.open.as_deref(), since)),
             settled: self.settled.clone(),
             ..LiveState::default()
         }
@@ -202,13 +217,38 @@ impl Followed {
     }
 }
 
-/// What a waiting session shows its person, as `waitingFor` names it.
-fn dialog(waiting: &str, since: u64) -> Dialog {
+/// How much background work the process holding a session runs: what its transcript says
+/// runs (`began`), begun since that process took the session (`started`, its registry
+/// entry's `startedAt`). Work runs in the process that started it and ends with it,
+/// telling nothing, so what an earlier process of the conversation left is gone however
+/// the transcript reads.
+fn jobs(began: &[Option<u64>], started: Option<i64>) -> u32 {
+    let started = started.and_then(|at| u64::try_from(at).ok());
+    let running = began
+        .iter()
+        .filter(|began| started.is_none_or(|started| began.is_some_and(|began| began >= started)))
+        .count();
+    u32::try_from(running).unwrap_or(u32::MAX)
+}
+
+/// What a waiting session shows its person, as `waitingFor` names it. A permission prompt
+/// asks about a call that has no result yet: the newest answer's first such call (`open`)
+/// names it, unless it is a sub-agent's run, whose own call is the one asked about.
+fn dialog(waiting: &str, open: Option<&str>, since: u64) -> Dialog {
     let kind = match waiting {
         "permission prompt" | "sandbox request" | "worker request" => DialogKind::Confirm,
         "input needed" => DialogKind::Input,
         _ => DialogKind::Custom,
     };
+    let asked =
+        open.filter(|call| waiting == "permission prompt" && !crate::events::AGENTS.contains(call));
+    if let Some(call) = asked {
+        return Dialog {
+            kind,
+            title: format!("Allow {call}?"),
+            since,
+        };
+    }
     let mut title = waiting.to_owned();
     if let Some(first) = title.get_mut(..1) {
         first.make_ascii_uppercase();
@@ -228,4 +268,36 @@ fn say(notifier: &Notifier, external_id: &str, state: LiveState) {
 /// Now, in milliseconds since 1970.
 pub(crate) fn millis_now() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_permission_prompt_names_the_call_it_asks_about() {
+        let asked = dialog("permission prompt", Some("Bash: rm -rf build"), 7);
+        assert_eq!(asked.kind, DialogKind::Confirm);
+        assert_eq!(asked.title, "Allow Bash: rm -rf build?");
+        // A sub-agent's call asks inside its run; its lead's open call is not it.
+        assert_eq!(
+            dialog("permission prompt", Some("Agent"), 7).title,
+            "Permission prompt"
+        );
+        assert_eq!(
+            dialog("input needed", Some("Bash: ls"), 7).title,
+            "Input needed"
+        );
+        assert_eq!(
+            dialog("permission prompt", None, 7).title,
+            "Permission prompt"
+        );
+    }
+
+    #[test]
+    fn background_work_of_an_earlier_process_is_gone() {
+        let began = [Some(10), Some(20), None];
+        assert_eq!(jobs(&began, Some(15)), 1);
+        assert_eq!(jobs(&began, None), 3);
+    }
 }

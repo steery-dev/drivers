@@ -7,8 +7,9 @@
 //! reads as the words and never as a flag or a file), and follows it through `claude agents
 //! --json` to where its turn stopped. Every change in how the session is listed goes to
 //! standard output as `{"listed": <entry>}`, and the entry that settles the turn as
-//! `{"settled": <entry>}`; what Claude Code refused, in its own words, goes to standard
-//! error, and the mode exits 1.
+//! `{"settled": <entry>}`, each with `"took"`: whether the session's transcript holds the
+//! person's input carrying the words' delivery marker yet (null for words carrying none);
+//! what Claude Code refused, in its own words, goes to standard error, and the mode exits 1.
 //!
 //! Where the listing leaves a question — whether a stop it shows is this turn's, and what
 //! went wrong — the session's own `Stop` and `StopFailure` hooks answer it: the launch
@@ -38,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use steery_driver_common::anthropic;
+use steery_driver_common::{anthropic, receipt};
 use steery_sdk::wire::harness::{Act, Ended, Stream, TurnLine, TurnRead, TurnState};
 
 use crate::agents::{self, Follow, RUNNING};
@@ -313,6 +314,8 @@ async fn follow(
     if let Some(kept) = &kept {
         kept.takes(turn)?;
     }
+    let goes_on = turn.id.as_deref().filter(|_| turn.act == Act::Continue);
+    let mut taking = Taking::before(words, root, goes_on);
     let launched = now();
     // A woken job keeps the hooks its first launch gave it, which find no file to write
     // to; every other launch gives its session its own.
@@ -431,11 +434,16 @@ async fn follow(
                 // The stop is this turn's where its own hook said so, or where the row is
                 // of the process this launch started: hooks may not run at all.
                 let ended = || end.is_some() || agents::started_since(&entry, launched);
+                // Each line says whether the transcript showed the words taken yet, where
+                // they carry a delivery to know them by, and a look that first shows them
+                // says the entry again.
+                let newly = taking.look(root, &entry);
+                let took = taking.delivery.is_some().then_some(taking.took);
                 if follow.settled_by(&entry, ended) {
-                    return say(out, json!({ "settled": entry }));
+                    return say(out, json!({ "settled": entry, "took": took }));
                 }
-                if last.as_ref() != Some(&entry) {
-                    say(out, json!({ "listed": entry }))?;
+                if newly || last.as_ref() != Some(&entry) {
+                    say(out, json!({ "listed": entry, "took": took }))?;
                 }
                 last = Some(entry);
             }
@@ -457,6 +465,88 @@ fn say(out: &mut impl Write, line: Value) -> Result<(), String> {
     writeln!(out, "{line}")
         .and_then(|()| out.flush())
         .map_err(|e| format!("writing the turn's line: {e}"))
+}
+
+/// Whether the session took the words, as its transcript shows them: the person's input
+/// carrying the words' delivery marker (PROTOCOL.md §3.3), past where the conversation's
+/// transcript ended before the launch.
+struct Taking {
+    /// The delivery the words carry; none where they carry no marker.
+    delivery: Option<String>,
+    /// The transcript, once known, and where it was last read to.
+    read: Option<(PathBuf, receipt::End)>,
+    took: bool,
+}
+
+impl Taking {
+    /// Before the launch: the delivery `words` carry, and where the transcript of the
+    /// conversation `id` the launch goes on in ends now.
+    fn before(words: &str, root: &Path, id: Option<&str>) -> Self {
+        let read = id.and_then(|id| {
+            let path = crate::transcripts::Store::new(root.to_owned())
+                .session(id)
+                .ok()?
+                .transcripts
+                .pop()?;
+            let end = receipt::end(&path).ok()?;
+            Some((path, end))
+        });
+        Self {
+            delivery: delivery(words),
+            read,
+            took: false,
+        }
+    }
+
+    /// Whether the transcript of the session `entry` lists newly shows the words taken.
+    /// Each look reads on from where the last one ended.
+    fn look(&mut self, root: &Path, entry: &Value) -> bool {
+        let Some(delivery) = self.delivery.as_deref().filter(|_| !self.took) else {
+            return false;
+        };
+        let Some(session) = entry.get("sessionId").and_then(Value::as_str) else {
+            return false;
+        };
+        let known = self
+            .read
+            .as_ref()
+            .filter(|(path, _)| path.file_stem().and_then(|stem| stem.to_str()) == Some(session))
+            .map(|(path, end)| (path.clone(), *end));
+        let Some((path, from)) = known.or_else(|| {
+            let path = crate::transcripts::Store::new(root.to_owned())
+                .session(session)
+                .ok()?
+                .transcripts
+                .pop()?;
+            // A transcript new to this look is read whole.
+            Some((
+                path,
+                receipt::End {
+                    dev: 0,
+                    ino: 0,
+                    bytes: 0,
+                },
+            ))
+        }) else {
+            return false;
+        };
+        let to = receipt::end(&path).ok();
+        self.took =
+            receipt::found(&path, &from, delivery, crate::drive::input_carries).unwrap_or(false);
+        self.read = Some((path, to.unwrap_or(from)));
+        self.took
+    }
+}
+
+/// The delivery the words carry: the name after their first `steery-delivery:`, up to the
+/// first character no name holds (PROTOCOL.md §3.3).
+fn delivery(words: &str) -> Option<String> {
+    let (_, rest) = words.split_once(receipt::DELIVERED)?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// Now, in milliseconds since 1970.
@@ -767,8 +857,9 @@ pub fn heard(mut args: impl Iterator<Item = String>) -> std::process::ExitCode {
 
 /// `turn/read`: what one line of a turn says. Standard output is the turn mode's own
 /// lines: a session listed names its conversation, and the settling one says how the turn
-/// ended — `stopped` after it worked is a turn interrupted. Standard error is Claude
-/// Code's own words for what it would not start.
+/// ended — `stopped` after it worked is a turn interrupted. Each says whether the session's
+/// transcript showed the words taken by then (`took`). Standard error is Claude Code's own
+/// words for what it would not start.
 pub fn read(read: TurnRead) -> TurnLine {
     let line = match read.stream {
         Stream::Stderr => {
@@ -782,9 +873,11 @@ pub fn read(read: TurnRead) -> TurnLine {
             Err(_) => return TurnLine::default(),
         },
     };
+    let took = line.get("took").and_then(Value::as_bool);
     if let Some(entry) = line.get("listed") {
         return TurnLine {
             named: agents::named(entry),
+            took,
             ..TurnLine::default()
         };
     }
@@ -793,6 +886,7 @@ pub fn read(read: TurnRead) -> TurnLine {
     };
     TurnLine {
         named: agents::named(entry),
+        took,
         ended: Some(agents::end(entry).unwrap_or(Ended {
             state: TurnState::Interrupted,
             error: None,
@@ -986,6 +1080,67 @@ mod tests {
             delivery: None,
         });
         assert_eq!(refused.refused.as_deref(), Some("untrusted"));
+    }
+
+    #[test]
+    fn a_turns_lines_say_whether_it_took_the_words() {
+        let line = |text: Value| TurnRead {
+            turn: "t".into(),
+            stream: Stream::Stdout,
+            line: text.to_string(),
+            delivery: Some("d1".into()),
+        };
+        let entry = json!({"id": "6920e989", "sessionId": "s-1", "state": "working"});
+        assert_eq!(
+            read(line(json!({"listed": entry, "took": false}))).took,
+            Some(false)
+        );
+        assert_eq!(
+            read(line(json!({"listed": entry, "took": true}))).took,
+            Some(true)
+        );
+        assert_eq!(
+            read(line(json!({"listed": entry, "took": null}))).took,
+            None
+        );
+        assert_eq!(
+            read(line(
+                json!({"settled": {"sessionId": "s-1", "state": "done"}, "took": true})
+            ))
+            .took,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_words_are_taken_once_the_transcript_holds_them() {
+        assert_eq!(
+            delivery("go\n\nsteery-delivery:aim.t1.2) thanks").as_deref(),
+            Some("aim.t1.2")
+        );
+        assert_eq!(delivery("no marker"), None);
+        let dir = Scratch::new("taking");
+        let session = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5c";
+        let project = dir.path().join("projects/-private-tmp");
+        std::fs::create_dir_all(&project).unwrap();
+        let transcript = project.join(format!("{session}.jsonl"));
+        let user = |said: &str| {
+            json!({"type":"user","isSidechain":false,"sessionId":session,"cwd":"/private/tmp",
+                "message":{"role":"user","content":said}})
+            .to_string()
+        };
+        std::fs::write(&transcript, format!("{}\n", user("earlier words"))).unwrap();
+        let mut taking = Taking::before("do it steery-delivery:d7", dir.path(), Some(session));
+        let entry = json!({"sessionId": session});
+        assert!(!taking.look(dir.path(), &entry));
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap();
+        writeln!(file, "{}", user("do it steery-delivery:d7")).unwrap();
+        assert!(taking.look(dir.path(), &entry));
+        assert!(taking.took);
+        assert!(!taking.look(dir.path(), &entry), "taken is said once");
     }
 
     /// A `continue` into a conversation a background session holds never starts a turn

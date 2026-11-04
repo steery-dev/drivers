@@ -1,7 +1,9 @@
 //! What the end of a conversation's transcript says it stands at now: the model and effort
 //! of its newest main-thread answer, as Claude Code wrote them on that `assistant` record
-//! (`message.model`, `effort`), how much of its context window is left, and when its
-//! newest turn ended.
+//! (`message.model`, `effort`), how much of its context window is left, when its newest
+//! turn ended, the request it waits to try again (an `api_error` record no answer
+//! followed), the background work its calls left running and no notice told over yet, and
+//! its newest call with no result.
 //!
 //! The context is what the newest answer's `message.usage` counted (its input, fresh and
 //! from or into a cache, and its output), or after a compaction with no answer since, what
@@ -21,8 +23,9 @@ use std::sync::{Mutex, PoisonError};
 
 use serde_json::Value;
 use steery_driver_common::quiet::Stamp;
+use steery_sdk::wire::harness::LiveRetry;
 
-use crate::events::{ENDS, SYNTHETIC, millis, text};
+use crate::events::{self, ENDS, SYNTHETIC, millis, text};
 
 /// The window of a model with an extended context.
 const EXTENDED: u64 = 1_000_000;
@@ -103,7 +106,35 @@ pub struct Now {
     pub context_left: Option<f64>,
     /// When its newest turn ended, in milliseconds, where the records read say so.
     pub ended: Option<u64>,
+    /// The newest request that failed, where no answer came after it, and until when
+    /// Claude Code said it waits before it tries again.
+    pub retry: Option<Retry>,
+    /// When each piece of background work the main thread's calls left running began, in
+    /// milliseconds where its record says, oldest first: work no notice told over yet.
+    pub jobs: Vec<Option<u64>>,
+    /// The call of the newest answer first in line for its result: its tool, and what it
+    /// acts on where its input names that (`Bash: rm -rf build`). Claude Code runs an
+    /// answer's calls in its order, one not safe beside others once those before it are
+    /// done, and asks its person about a call as it comes to run it.
+    pub open: Option<String>,
 }
+
+/// A request Claude Code waits to try again, as its `api_error` record says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retry {
+    /// When it tries again, in milliseconds: the record's time and its `retryInMs`.
+    pub until: u64,
+    pub retry: LiveRetry,
+}
+
+/// The most calls, jobs and stops kept, the newest kept.
+const KEPT: usize = 64;
+
+/// The most characters of what a call acts on said in [`Now::open`].
+const SUBJECT: usize = 100;
+
+/// The most characters of a failed request's words said (PROTOCOL.md §4.3).
+const RETRY_WORDS: usize = 600;
 
 /// What the records read so far say, newest last.
 #[derive(Debug, Clone, Default)]
@@ -113,6 +144,16 @@ struct Seen {
     requested: Option<String>,
     held: Option<u64>,
     ended: Option<u64>,
+    retry: Option<Retry>,
+    /// The work left running, by Claude Code's id, with when its record began, oldest
+    /// first.
+    jobs: Vec<(String, Option<u64>)>,
+    /// The calls that stop work ([`crate::events::STOPS`]), by id, and the work each names.
+    stops: Vec<(String, String)>,
+    /// The newest answer, by its `message.id`, whose calls `open` holds.
+    answer: Option<String>,
+    /// The newest answer's calls with no result yet, in its order: id, tool, subject.
+    open: Vec<(String, String, Option<String>)>,
 }
 
 impl Seen {
@@ -123,6 +164,15 @@ impl Seen {
             return;
         }
         let at = || text(record, "timestamp").and_then(millis);
+        if let Some(work) = events::job_told(record) {
+            self.jobs.retain(|(job, _)| *job != work);
+        }
+        match text(record, "type") {
+            // An answer, or Claude Code's own error in place of one, ends the wait.
+            Some("assistant") => self.retry = None,
+            Some("user") => self.results(record, at()),
+            _ => {}
+        }
         if main_answer(record) {
             let message = &record["message"];
             self.model = text(message, "model")
@@ -139,6 +189,7 @@ impl Seen {
             if text(message, "stop_reason").is_some_and(|reason| ENDS.contains(&reason)) {
                 self.ended = at().or(self.ended);
             }
+            self.calls(message);
         } else if text(record, "type") == Some("system") {
             match text(record, "subtype") {
                 Some("compact_boundary") => {
@@ -147,7 +198,70 @@ impl Seen {
                     }
                 }
                 Some("turn_duration") => self.ended = at().or(self.ended),
+                Some("api_error") => self.retry = retry(record),
                 _ => {}
+            }
+        }
+    }
+
+    /// The calls an answer makes: each open until its result is written. Claude Code
+    /// writes one record per block of an answer, each with the answer's `message.id`, and
+    /// asks for the next answer only once every call of this one has its result, so a call
+    /// of an earlier answer still open is one a process that stopped left without one.
+    fn calls(&mut self, message: &Value) {
+        if let Some(answer) = text(message, "id")
+            && self.answer.as_deref() != Some(answer)
+        {
+            self.open.clear();
+            self.answer = Some(answer.to_owned());
+        }
+        let Some(blocks) = message.get("content").and_then(Value::as_array) else {
+            return;
+        };
+        for block in blocks {
+            if text(block, "type") != Some("tool_use") {
+                continue;
+            }
+            let (Some(id), Some(tool)) = (text(block, "id"), text(block, "name")) else {
+                continue;
+            };
+            let input = block.get("input").unwrap_or(&Value::Null);
+            if events::STOPS.contains(&tool)
+                && let Some(work) = events::waits_on(tool, input)
+            {
+                keep(&mut self.stops, (id.to_owned(), work.to_owned()));
+            }
+            keep(
+                &mut self.open,
+                (id.to_owned(), tool.to_owned(), subject(tool, input)),
+            );
+        }
+    }
+
+    /// A user record's call results, written `at`: each closes its call, and may leave
+    /// work running, or stop work one left.
+    fn results(&mut self, record: &Value, at: Option<u64>) {
+        let Some(blocks) = record.pointer("/message/content").and_then(Value::as_array) else {
+            return;
+        };
+        for block in blocks {
+            if text(block, "type") != Some("tool_result") {
+                continue;
+            }
+            let Some(call) = text(block, "tool_use_id") else {
+                continue;
+            };
+            self.open.retain(|(id, _, _)| id != call);
+            if let Some(work) = events::job_started(record, block)
+                && !self.jobs.iter().any(|(job, _)| *job == work)
+            {
+                keep(&mut self.jobs, (work, at));
+            }
+            if let Some(at) = self.stops.iter().position(|(id, _)| id == call) {
+                let (_, work) = self.stops.remove(at);
+                if block.get("is_error").and_then(Value::as_bool) != Some(true) {
+                    self.jobs.retain(|(job, _)| *job != work);
+                }
             }
         }
     }
@@ -162,8 +276,78 @@ impl Seen {
                 .zip(self.held)
                 .map(|(model, held)| window.left(model, self.requested.as_deref(), held)),
             ended: self.ended,
+            retry: self.retry.clone(),
+            jobs: self.jobs.iter().map(|(_, began)| *began).collect(),
+            open: self.open.first().map(|(_, tool, subject)| match subject {
+                Some(subject) => format!("{tool}: {subject}"),
+                None => tool.clone(),
+            }),
         }
     }
+}
+
+/// `item` kept as the newest of `kept`, the oldest let go past [`KEPT`].
+fn keep<T>(kept: &mut Vec<T>, item: T) {
+    kept.push(item);
+    let past = kept.len().saturating_sub(KEPT);
+    kept.drain(..past);
+}
+
+/// What a call acts on, as its input names it: a command, a file, a page or a pattern,
+/// on one line and at most [`SUBJECT`] characters.
+fn subject(tool: &str, input: &Value) -> Option<String> {
+    let field = match tool {
+        "Bash" | "PowerShell" => "command",
+        "Read" | "Write" | "Edit" | "MultiEdit" => "file_path",
+        "NotebookEdit" => "notebook_path",
+        "WebFetch" => "url",
+        "WebSearch" => "query",
+        "Glob" | "Grep" => "pattern",
+        _ => return None,
+    };
+    let said = events::one_line(text(input, field)?);
+    (!said.is_empty()).then(|| cut(&said, SUBJECT))
+}
+
+/// At most `most` characters of `said`, an ellipsis ending one cut short.
+fn cut(said: &str, most: usize) -> String {
+    match said.char_indices().nth(most) {
+        Some((at, _)) => format!("{}…", &said[..at]),
+        None => said.to_owned(),
+    }
+}
+
+/// The wait an `api_error` record says: Claude Code writes one as a request fails and
+/// before it waits `retryInMs` to try again, with the try that failed (`retryAttempt`, the
+/// first 1), the retries it makes (`maxRetries`, so one try more in all) and its error,
+/// in the words it shows (`error.formatted`, else the service's `error.message`).
+fn retry(record: &Value) -> Option<Retry> {
+    let wait = record.get("retryInMs")?.as_u64()?;
+    let at = text(record, "timestamp").and_then(millis)?;
+    let attempt = record
+        .get("retryAttempt")
+        .and_then(Value::as_u64)
+        .and_then(|attempt| u32::try_from(attempt).ok())?;
+    let of = record
+        .get("maxRetries")
+        .and_then(Value::as_u64)
+        .and_then(|retries| u32::try_from(retries).ok())
+        .map(|retries| retries.saturating_add(1));
+    let error = record.get("error");
+    let words = error
+        .and_then(|error| text(error, "formatted").or_else(|| text(error, "message")))
+        .or_else(|| error.and_then(Value::as_str))
+        .map(events::one_line)
+        .filter(|words| !words.is_empty())
+        .map(|words| cut(&words, RETRY_WORDS - 1));
+    Some(Retry {
+        until: at.saturating_add(wait),
+        retry: LiveRetry {
+            attempt,
+            of,
+            error: words,
+        },
+    })
 }
 
 /// What each transcript asked about said as far as it was read, and the window the
@@ -375,5 +559,158 @@ fn natively_extended(model: &str) -> bool {
         "haiku" => version >= (5, 5),
         "opus" => version >= (4, 7),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn seen(records: &[Value]) -> Now {
+        let mut seen = Seen::default();
+        for record in records {
+            seen.record(record);
+        }
+        seen.now(&Window::default())
+    }
+
+    fn answer(blocks: Value) -> Value {
+        json!({"type":"assistant","isSidechain":false,"timestamp":"2026-10-15T12:59:00.000Z",
+            "message":{"model":"claude-opus-5-5","role":"assistant","content":blocks,
+                "stop_reason":"tool_use"}})
+    }
+
+    /// One block of an answer, as Claude Code writes each in a record of its own carrying
+    /// the answer's `message.id`.
+    fn answer_in(message: &str, blocks: Value) -> Value {
+        let mut record = answer(blocks);
+        record["message"]["id"] = json!(message);
+        record
+    }
+
+    fn result(call: &str, said: &str, result: Value) -> Value {
+        json!({"type":"user","isSidechain":false,"toolUseResult":result,
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":call,"content":said}]}})
+    }
+
+    /// As Claude Code 2.1.318 writes one before it waits to retry (`api_error`).
+    fn api_error(at: &str) -> Value {
+        json!({"isSidechain":false,"type":"system","subtype":"api_error","level":"error",
+            "error":{"message":"429 {\"type\":\"error\"}","status":429,
+                "formatted":"429 All 3 accounts exhausted. Retry in 60s."},
+            "retryInMs":60000,"retryAttempt":1,"maxRetries":10,"timestamp":at})
+    }
+
+    #[test]
+    fn a_failed_request_is_waited_on_until_an_answer_comes() {
+        let failed = api_error("2026-10-15T12:59:38.774Z");
+        let waiting = seen(std::slice::from_ref(&failed));
+        assert_eq!(
+            waiting.retry,
+            Some(Retry {
+                until: millis("2026-10-15T13:00:38.774Z").unwrap(),
+                retry: LiveRetry {
+                    attempt: 1,
+                    of: Some(11),
+                    error: Some("429 All 3 accounts exhausted. Retry in 60s.".into()),
+                },
+            })
+        );
+        assert_eq!(seen(&[failed, answer(json!([]))]).retry, None);
+    }
+
+    #[test]
+    fn background_work_counts_until_it_is_told_or_stopped() {
+        let notice = |work: &str, status: &str| {
+            json!({"type":"attachment","isSidechain":false,"attachment":{"type":"queued_command",
+                "commandMode":"task-notification",
+                "prompt":format!("<task-notification>\n<task-id>{work}</task-id>\n<status>{status}</status>\n</task-notification>")}})
+        };
+        let check_in = json!({"type":"attachment","isSidechain":false,"attachment":{"type":"queued_command",
+            "commandMode":"task-notification",
+            "prompt":"<task-notification>\n<task-id>bj9ss2xbj</task-id>\n<summary>Background command \"build\" is still running</summary>\n</task-notification>"}});
+        let monitor = |event: &str| {
+            json!({"type":"attachment","isSidechain":false,"attachment":{"type":"queued_command",
+                "commandMode":"task-notification",
+                "prompt":format!("<task-notification>\n<task-id>bq10gp7qp</task-id>\n<summary>Monitor event: \"ship\"</summary>\n<event>{event}</event>\n</task-notification>")}})
+        };
+        let mut began = result(
+            "t1",
+            "Command running in background with ID: bj9ss2xbj. Output is being written to: /tmp/x",
+            json!({"backgroundTaskId":"bj9ss2xbj"}),
+        );
+        began["timestamp"] = json!("2026-10-15T12:59:10.000Z");
+        let started = [
+            answer(
+                json!([{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"make","run_in_background":true}}]),
+            ),
+            began,
+            answer(json!([{"type":"tool_use","id":"t2","name":"Agent","input":{"prompt":"read"}}])),
+            result(
+                "t2",
+                "Async agent launched",
+                json!({"status":"async_launched","agentId":"a77006"}),
+            ),
+            answer(
+                json!([{"type":"tool_use","id":"t3","name":"Monitor","input":{"command":"tail -f log"}}]),
+            ),
+            result(
+                "t3",
+                "Monitor started",
+                json!({"taskId":"bq10gp7qp","timeoutMs":1_800_000,"persistent":false}),
+            ),
+        ];
+        assert_eq!(
+            seen(&started).jobs,
+            [millis("2026-10-15T12:59:10.000Z"), None, None]
+        );
+        let mut told = started.to_vec();
+        told.extend([
+            check_in,
+            notice("bj9ss2xbj", "completed"),
+            monitor("SHIP_EXIT=0"),
+        ]);
+        assert_eq!(seen(&told).jobs.len(), 2);
+        // Told while the session is idle, a notice is the words of a turn of its own.
+        told.push(json!({"type":"user","isSidechain":false,"origin":{"kind":"task-notification"},
+            "message":{"role":"user","content":"<task-notification>\n<task-id>a77006</task-id>\n<status>completed</status>\n<summary>Agent \"read\" finished</summary>\n</task-notification>"}}));
+        assert_eq!(seen(&told).jobs.len(), 1);
+        let mut stopped = told.clone();
+        stopped.extend([
+            answer(json!([{"type":"tool_use","id":"t4","name":"TaskStop","input":{"task_id":"bq10gp7qp"}}])),
+            result("t4", "stopped", json!({})),
+        ]);
+        assert!(seen(&stopped).jobs.is_empty());
+        told.push(monitor(
+            "[Monitor expired after 30m with 16 events delivered. Re-arm it if you still need the watch.]",
+        ));
+        assert!(seen(&told).jobs.is_empty());
+    }
+
+    #[test]
+    fn the_newest_answers_first_call_without_a_result_is_open() {
+        let records = [
+            // A process that stopped left this call with no result.
+            answer_in(
+                "m1",
+                json!([{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 9"}}]),
+            ),
+            answer_in(
+                "m2",
+                json!([{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/tmp/a"}}]),
+            ),
+            answer_in(
+                "m2",
+                json!([{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"rm -rf\n  build"}}]),
+            ),
+        ];
+        assert_eq!(seen(&records).open.as_deref(), Some("Read: /tmp/a"));
+        let mut answered = records.to_vec();
+        answered.push(result("t2", "", Value::Null));
+        assert_eq!(seen(&answered).open.as_deref(), Some("Bash: rm -rf build"));
+        answered.push(result("t3", "", Value::Null));
+        assert_eq!(seen(&answered).open, None);
     }
 }
