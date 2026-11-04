@@ -15,6 +15,7 @@ mod hooks;
 mod mcp;
 mod models;
 mod setup;
+mod sign_in;
 mod transcripts;
 mod tree;
 
@@ -22,9 +23,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use steery_driver_common::anthropic;
 use steery_driver_common::program::{NEEDS, WAITED};
-use steery_sdk::wire::{self, harness::Give};
+use steery_sdk::wire;
 use steery_sdk::{Error, Program, method, refusal, result};
 
 pub use harness::Harness;
@@ -35,11 +35,13 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
 }
 
 /// The driver: the harness it speaks for, where that keeps everything, from
-/// `initialize`, and the models it listed last.
+/// `initialize`, the models it listed last, and the sign-in it started that waits for its
+/// person.
 struct Driver {
     harness: Harness,
     place: OnceLock<Place>,
     catalog: models::Catalog,
+    sign_ins: sign_in::SignIns,
 }
 
 /// The protocol the driver picked, the person's home, the runtime's config folder, and the
@@ -57,6 +59,7 @@ impl Driver {
             harness,
             place: OnceLock::new(),
             catalog: models::Catalog::default(),
+            sign_ins: sign_in::SignIns::default(),
         }
     }
 
@@ -132,20 +135,12 @@ impl Program for Driver {
                 );
                 let mut planned = planned?;
                 if lacking && planned.found.is_some() {
-                    planned.needs.push(setup::need(harness));
+                    planned.needs.push(sign_in::need(harness));
                 }
                 result(planned)
             }
             method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => {
-                let give: Give = steery_sdk::params(params)?;
-                if give.need != setup::NEED || give.way != anthropic::WAY {
-                    return Err(Error::refused(
-                        refusal::NOT_FOUND,
-                        format!("{} has no need {} by {} here", harness.label(), give.need, give.way),
-                    ));
-                }
-                let line = format!("{} runs Claude with your Anthropic API key", harness.label());
-                result(anthropic::give(&give.values, &line)?)
+                result(self.sign_ins.give(harness, steery_sdk::params(params)?).await?)
             }
             method::SESSIONS_LIST => result(self.store()?.list(steery_sdk::params(params)?)),
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),

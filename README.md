@@ -29,8 +29,9 @@ What the drivers share is the [`common`](common/) crate, `steery-driver-common`,
 driver naming it by path (`../common`): finding the harness's executable and asking its
 release under a bounded, killed probe (`program`); a transcript's lines read within
 bounds (`lines`); a file only appended to, read on from where the last read left it
-(`follow`); and a transcript that is a tree of records, kept between reads and read along
-its path in batches, records off the path within the same bound (`tree`). Each driver
+(`follow`); a transcript that is a tree of records, kept between reads and read along
+its path in batches, records off the path within the same bound (`tree`); and the
+harness's own sign-in run on a terminal of the driver's (`login`, see Signing in). Each driver
 keeps only how its harness's records name their parent and what they say.
 
 ## Finding and installing the harness
@@ -79,6 +80,36 @@ it cannot read, and its `Not logged in` says nothing where `config.toml` names a
 to standard error, the runtime's log of the driver, since `Models` has no field for a
 reason: showing it to a person needs one in the SDK (`signed_in_why?: string` beside
 `signed_in`, a protocol change).
+
+Where it is not signed in, `setup/plan` asks the `sign-in` need (protocol 5), its ways best
+first: one whose return the Steery app catches, then a code typed on the vendor's page, then
+a key. A way that runs the harness's own login starts it unmodified on a terminal of the
+driver's ([`common/src/login.rs`](common/src/login.rs)) and answers its link as the next step,
+kept 10 minutes; one login waits at a time. Where the link returns to a loopback address, its
+`fills` names the step's `address` field (secret, never required). `needs/give` then takes:
+
+| Given | What the driver does |
+|---|---|
+| an address on the login's own port (`http://localhost:<port>/…`, `127.0.0.1`, `[::1]`) | GETs it from inside this host, so the harness's own listener completes the sign-in |
+| anything else | types it into the login's prompt, where it has one; else refused, naming the address to paste |
+| nothing | done once the login exited 0 within 20 s, else refused, saying to paste the address (or finish on the page) |
+
+| Driver | Ways, in order | Next step's link |
+|---|---|---|
+| `claude-code` | `claude-sign-in`, `api-key` | the link `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`), else its printed manual link |
+| `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s (`127.0.0.1:1455`); `--device-auth`'s page, its code in the step's label |
+| `omp` | one per provider below, `api-key` | the link `omp login <provider>` prints; a code it shows in the step's label |
+| `pi` | `api-key` | none |
+
+omp lists its providers' ids and names (RPC `get_login_providers`, the `omp login` picker)
+but not how each signs in, and most only read an API key on its prompt, so the driver keeps
+its OAuth providers (`pi-family/src/sign_in.rs`, omp 18.12.6). Returning to an address:
+`openai-codex`, `google-gemini-cli`, `google-antigravity`, `openrouter`, `devin`, `stencil`,
+`gitlab-duo`, `gitlab-duo-agent` and `zai-coding-plan` (the last two return to an app's
+address, pasted). With a code on the vendor's page: `openai-codex-device`, `github-copilot`
+(its GitHub Enterprise question answered with Enter: github.com), `cursor`, `kimi-code`,
+`xai-oauth`, `muse-code`, `factory-droid` and `kilo`. Left out: `anthropic` (its terms),
+`perplexity` and `snowflake` (each asks an email or an account first).
 
 ## Building
 
@@ -214,10 +245,11 @@ has settings.
 
 **Needs** (protocol 5; a driver that picked 4 plans none). Where the harness lists no model
 (`omp models --json` prints `{"models":[]}`, `pi --list-models` "No models available"), the
-plan asks `sign-in` with one way, `api-key`: an Anthropic API key, checked for its
+plan asks `sign-in`. In omp, first one way per OAuth provider `omp login <provider>` signs in
+to, by its id (Signing in); then, in both, `api-key`: an Anthropic API key, checked for its
 `sk-ant-api` start and given back as `ANTHROPIC_API_KEY`, which both read. omp's and pi's own
 Claude login is never offered: it signs a third-party app in to a Claude plan, which
-Anthropic's terms forbid.
+Anthropic's terms forbid. pi has no login command, so it has the key alone.
 
 What each driver does:
 
@@ -315,10 +347,13 @@ plan asks `sign-in` two ways. `api-key`: an Anthropic API key, checked for its `
 start and given back as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
 `-p` (the reader); a `--bg` session uses it only once approved, so a turn holding it passes
 `--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, writing nothing.
-`claude-sign-in`: the driver runs the unmodified `claude auth login` on a terminal of its own,
-answers its printed link as the step `claude-sign-in-code`, and writes the pasted code back to
-it; Claude Code keeps the sign-in on this host, and the driver keeps no token. A driver started
-again has no sign-in waiting, so a code then is `not-found`.
+`claude-sign-in`, offered first: the driver runs the unmodified `claude auth login` on a
+terminal of its own with `BROWSER` naming a script of the driver's, which records the link
+Claude Code opens (`redirect_uri=http://localhost:<port>/callback`), and answers that link as
+the step `claude-sign-in-return`, the address filling its field; where no `$BROWSER` call came
+within 3 s of the printed manual link, the manual link is the step's (its page shows a code,
+and nothing fills the field). Claude Code keeps the sign-in on this host, and the driver keeps
+no token. A driver started again has no sign-in waiting, so a step then is `not-found`.
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). They are read
   from `projects/<folder>/<id>.jsonl` under the root, and from the `projects` folder of any
@@ -421,7 +456,13 @@ JSON-RPC over standard input and output), `codex app-server proxy` (the bytes of
 app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`, `codex exec`,
 `codex mcp list` and `codex features list`. Codex's home is `CODEX_HOME`, else `~/.codex`.
 
-Codex has no needs: under protocol 5 every `needs/give` is `not-found`.
+**Needs** (protocol 5; a driver that picked 4 plans none). Where `codex login status` says
+not logged in (see Signing in), the plan asks `sign-in` three ways, run on a terminal of the
+driver's in Codex's home. `chatgpt`: `codex login`, its printed loopback link
+(`127.0.0.1:1455`) the step `chatgpt-return`, which the address fills. `device`:
+`codex login --device-auth`, its page and one-time code the step `device-code`, with no field.
+`api-key`: an OpenAI API key, read by `codex login --with-api-key` on standard input and kept
+by Codex.
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). Rollouts are read
   from `sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl`. A thread continued in

@@ -19,6 +19,7 @@ mod rollout;
 mod router;
 mod says;
 mod setup;
+mod sign_in;
 mod turn;
 mod words;
 
@@ -77,13 +78,14 @@ terminal drew them.";
 const MINIMUM: &str = "0.155.1";
 const UPDATE: &str = "codex update";
 
-/// The driver: the protocol it picked, and Codex's home and conversations, from
-/// `initialize`.
+/// The driver: the protocol it picked, Codex's home and conversations, from `initialize`,
+/// and the sign-in it started that waits for its person.
 struct Codex {
     notifier: Notifier,
     protocol: OnceLock<u32>,
     place: OnceLock<Result<drive::Drive, String>>,
     home: OnceLock<PathBuf>,
+    sign_ins: sign_in::SignIns,
 }
 
 impl Codex {
@@ -93,7 +95,13 @@ impl Codex {
             protocol: OnceLock::new(),
             place: OnceLock::new(),
             home: OnceLock::new(),
+            sign_ins: sign_in::SignIns::default(),
         }
+    }
+
+    /// Whether the protocol picked has needs.
+    fn needs(&self) -> bool {
+        self.protocol.get().is_some_and(|picked| *picked >= NEEDS)
     }
 
     fn drive(&self) -> Result<&drive::Drive, Error> {
@@ -146,9 +154,9 @@ impl Program for Codex {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         match method {
-            method::SETUP_PLAN => {
-                result(setup::plan(self.home()?, steery_sdk::params(params)?).await?)
-            }
+            method::SETUP_PLAN => result(
+                setup::plan(self.home()?, steery_sdk::params(params)?, self.needs()).await?,
+            ),
             method::SESSIONS_LIST => result(self.drive()?.store.list(steery_sdk::params(params)?)),
             method::SESSIONS_LOCATE => {
                 result(self.drive()?.store.locate(steery_sdk::params(params)?)?)
@@ -194,14 +202,11 @@ impl Program for Codex {
             method::TERMINAL => result(self.drive()?.terminal(steery_sdk::params(params)?)?),
             method::SAY => result(self.drive()?.say(steery_sdk::params(params)?).await?),
             method::PICK => result(self.drive()?.pick(steery_sdk::params(params)?).await?),
-            // Codex lacks nothing here that only its person gives: it plans no needs.
-            method::NEEDS_GIVE if self.protocol.get().is_some_and(|picked| *picked >= NEEDS) => {
-                let give: harness::Give = steery_sdk::params(params)?;
-                Err(Error::refused(
-                    refusal::NOT_FOUND,
-                    format!("Codex has no need {} here", give.need),
-                ))
-            }
+            method::NEEDS_GIVE if self.needs() => result(
+                self.sign_ins
+                    .give(self.drive()?.store.root(), steery_sdk::params(params)?)
+                    .await?,
+            ),
             // Codex has no way to ask a thread's own model for a recap without running a
             // turn in it.
             _ => Err(Error::Unknown),

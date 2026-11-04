@@ -10,11 +10,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use steery_driver_common::anthropic;
 use steery_driver_common::mcp;
 use steery_driver_common::program::{release_within, version};
 use steery_sdk::Error;
-use steery_sdk::wire::harness::{Entry, Format, Found, Need, Part, Planned, Setup};
+use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
 use crate::Harness;
 
@@ -28,25 +27,6 @@ const LOADER: &str = include_str!("../plugin/loader.ts");
 
 /// Steery's MCP server, as the entries name it.
 const SERVER: &str = "steery";
-
-/// The need, by its id in every plan: a model provider signed in.
-pub const NEED: &str = "sign-in";
-
-/// The need, where the harness is found here and lists no model: one way, an Anthropic API
-/// key. omp's and pi's own Claude sign-in is none of its ways: it signs a third-party app
-/// in to a Claude plan, which Anthropic's terms forbid.
-pub fn need(harness: Harness) -> Need {
-    let label = harness.label();
-    Need {
-        id: NEED.into(),
-        title: format!("Give {label} an Anthropic API key?"),
-        line: format!("{label} has no model provider signed in on this host, so it runs no turn here."),
-        ways: vec![anthropic::way(format!(
-            "Billed per token to your Claude Console account, on every host. {label} then runs \
-             Claude models through Anthropic's API."
-        ))],
-    }
-}
 
 /// The plan for this machine. Whether the release found is one Steery speaks to is the
 /// runtime's to say, from `initialize`'s minimum.
