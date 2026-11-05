@@ -6,7 +6,8 @@
 //! read. omp continues a conversation by id, `--resume <id>`, and forks one with `--fork
 //! <id>`; pi by its transcript, `--session <file>` and `--fork <file>`. A fork starts in the
 //! folder the turn starts in. A conversation whose folder is gone neither resumes, and says
-//! so. Neither makes a worktree of its own.
+//! so. Neither makes a worktree for a turn, so a fork or a new conversation asked for in one
+//! starts in one this driver makes where omp makes its own ([`worktree`]).
 //!
 //! Either harness's standard error says what it refuses to start, before its door opens.
 //! omp's `--model` resolves loosely, so a pick goes to omp only as one of its own catalog's
@@ -79,14 +80,13 @@ const STEERY_THINKING: &str = "steery-thinking";
 
 /// `start`: the launch plan of a turn: the harness kept with its standard input held, its
 /// words to come through its door.
-pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Launch, Error> {
+pub async fn start(
+    home: &Path,
+    store: &Store,
+    catalog: &Catalog,
+    start: Start,
+) -> Result<Launch, Error> {
     let harness = store.harness();
-    if start.worktree {
-        return Err(Error::refused(
-            refusal::SELECTION_UNSUPPORTED,
-            format!("{} makes no worktree of its own", harness.id()),
-        ));
-    }
     let binary = harness.need_binary()?;
     // omp names a conversation by its id, pi by its transcript.
     let named = |id: &str, file: PathBuf| match harness {
@@ -148,6 +148,14 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
             Err(why) => return Err(Error::refused(refusal::START_FAILED, why)),
         }
     }
+    // Made once nothing is left to refuse, so a turn refused leaves no worktree behind.
+    let cwd = match start.worktree && start.act != Act::Continue {
+        true => worktree(harness, home, &start.cwd)
+            .await
+            .map_err(|why| Error::refused(refusal::START_FAILED, why))?
+            .unwrap_or(start.cwd),
+        false => start.cwd,
+    };
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned()];
     argv.extend(args(
         harness,
@@ -158,10 +166,76 @@ pub async fn start(store: &Store, catalog: &Catalog, start: Start) -> Result<Lau
     Ok(Launch {
         argv,
         env: BTreeMap::new(),
-        cwd: start.cwd,
+        cwd,
         stdin: Stdin::Held,
         inbox: false,
     })
+}
+
+/// A new worktree of the repository `cwd` is in, detached at its `HEAD`, and the folder in
+/// it that `cwd` is (the worktree itself where that folder holds nothing the repository
+/// tracks); none where `cwd` is in no repository, which the turn then runs in itself. It is
+/// made where omp keeps the worktrees it makes for its tasks and `omp worktree`: under
+/// `OMP_WORKTREE_DIR` (absolute, or under `~/`), else `<base>/wt` — `~/.omp/wt`, and for pi,
+/// which makes none, `~/.pi/wt` — as `<4 hex>/<repository>`.
+async fn worktree(harness: Harness, home: &Path, cwd: &Path) -> Result<Option<PathBuf>, String> {
+    let Ok(top) = git(cwd, &["rev-parse", "--show-toplevel"]).await else {
+        return Ok(None);
+    };
+    let top = PathBuf::from(top);
+    let set = match harness {
+        Harness::Omp => std::env::var("OMP_WORKTREE_DIR").ok(),
+        Harness::Pi => None,
+    };
+    let root = match set.as_deref().map(str::trim) {
+        Some(dir) if Path::new(dir).is_absolute() => PathBuf::from(dir),
+        Some(dir) if dir.starts_with("~/") => home.join(&dir[2..]),
+        _ => harness.base(home)?.join("wt"),
+    };
+    let name = top.file_name().ok_or("a repository has a name")?;
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |now| now.subsec_nanos())
+        ^ std::process::id();
+    let dir = (0..=u16::MAX)
+        .map(|n| {
+            let slot = (seed as u16).wrapping_add(n);
+            root.join(format!("{slot:04x}")).join(name)
+        })
+        .find(|dir| !dir.exists())
+        .ok_or_else(|| format!("every slot under {} is taken", root.display()))?;
+    let dir_arg = dir.to_str().ok_or("the worktree's path is not UTF-8")?;
+    git(&top, &["worktree", "add", "--detach", dir_arg, "HEAD"])
+        .await
+        .map_err(|why| format!("making a worktree at {dir_arg}: {why}"))?;
+    let within = cwd
+        .canonicalize()
+        .ok()
+        .and_then(|cwd| {
+            let top = top.canonicalize().ok()?;
+            cwd.strip_prefix(top).ok().map(Path::to_path_buf)
+        })
+        .unwrap_or_default();
+    let inside = dir.join(within);
+    Ok(Some(if inside.is_dir() { inside } else { dir }))
+}
+
+/// What `git` said on standard output where it succeeded, else on standard error.
+async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| format!("running git: {e}"))?;
+    let said = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_owned();
+    match out.status.success() {
+        true => Ok(said(&out.stdout)),
+        false => Err(said(&out.stderr)),
+    }
 }
 
 /// A turn's arguments after the binary: the harness's kept RPC host (omp's with no client
@@ -798,6 +872,63 @@ mod tests {
                 assert!(at(id, &cwd, None).is_err(), "{id}");
             }
         }
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    /// A worktree asked for is a new one of the folder's repository, detached at its `HEAD`,
+    /// under the harness's own `wt`, opened at the same folder within it; a folder in no
+    /// repository is run in itself.
+    #[test]
+    fn a_worktree_is_made_of_the_folders_repository() {
+        // Other tests point `PATH` at a folder with no `git`.
+        let _held = crate::setup::tests::ENVIRONMENT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(made_where_asked());
+    }
+
+    async fn made_where_asked() {
+        let home = std::env::temp_dir().join(format!("steery-pi-worktree-{}", std::process::id()));
+        let repo = home.join("work/repo");
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::write(repo.join("sub/f"), "f\n").unwrap();
+        let commit = [
+            "-c",
+            "user.name=Steery",
+            "-c",
+            "user.email=steery@example.com",
+            "commit",
+            "-qm",
+            "first",
+        ];
+        for args in [&["init", "-q"][..], &["add", "."], &commit] {
+            git(&repo, args).await.unwrap();
+        }
+        let head = git(&repo, &["rev-parse", "HEAD"]).await.unwrap();
+
+        let made = worktree(Harness::Pi, &home, &repo.join("sub"))
+            .await
+            .unwrap()
+            .expect("a worktree");
+        assert_eq!(made.file_name().unwrap(), "sub");
+        let top = made.parent().unwrap();
+        assert_eq!(top.file_name().unwrap(), "repo");
+        assert_eq!(top.parent().unwrap().parent().unwrap(), home.join(".pi/wt"));
+        assert_eq!(git(&made, &["rev-parse", "HEAD"]).await.unwrap(), head);
+        assert!(
+            git(&made, &["symbolic-ref", "-q", "HEAD"]).await.is_err(),
+            "detached"
+        );
+        let again = worktree(Harness::Pi, &home, &repo).await.unwrap().unwrap();
+        assert_ne!(again, top, "each is new");
+
+        let outside = home.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(worktree(Harness::Pi, &home, &outside).await.unwrap(), None);
         std::fs::remove_dir_all(home).ok();
     }
 }

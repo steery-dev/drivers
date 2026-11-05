@@ -251,12 +251,12 @@ fn literal(path: &Path) -> Result<&str, Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// The variables omp and pi read for their folders, and `PATH`, are the process's: one
-    /// test at a time changes them.
-    static ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// test at a time changes them, or runs what they find.
+    pub(crate) static ENVIRONMENT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     const MOVED: [&str; 4] = [
         "PI_CODING_AGENT_DIR",

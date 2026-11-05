@@ -287,7 +287,11 @@ What each driver does:
     included, through the plugin door. omp continues by id (`--resume`) and checks a model
     against its catalog first. pi continues by transcript (`--session <file>`) and passes a
     model to the plugin as well (`--steery-model`), which ends the process with a refusal
-    where pi does not run it exactly.
+    where pi does not run it exactly. Neither harness makes a worktree for a turn, so a
+    fork or a new conversation asked for in one (`facts.worktrees`) starts in one the
+    driver makes, detached at `HEAD`, where omp keeps its own: under `OMP_WORKTREE_DIR`,
+    else `~/.omp/wt` (pi's `~/.pi/wt`), as `<4 hex>/<repository>`. A folder in no
+    repository is run in itself.
   - `turn/read`: the harness's own refusals on standard error; its standard output is
     discarded, and its door says what it does.
   - `receipt/mark`, `receipt/find`: the person's message carrying the delivery marker, in
@@ -302,6 +306,14 @@ answered once the harness holds the words, dated `queued_at`, and asked again, o
 took them into its turn (`taken_at`): omp and pi take a steer only between tool calls.
 `force` aborts the turn running so the held words go in next, in the same process: omp
 drains words left queued at an abort into a turn of their own.
+
+The door's `state` says `compacting` for every compaction the harness runs: pi's from its
+`session_before_compact` to its `session_compact` (or `session_compact_failed`); omp's own
+from `auto_compaction_start` to `auto_compaction_end`, and one asked of it (`/compact`, an
+extension's) from `session_before_compact` to `session_compact`, or to its next run where
+it failed, which omp tells an extension nothing of. Its `model` and `thinking` are pi's
+from `model_select` and `thinking_level_select`; omp says neither, so the door reads omp's
+own every second while it is open.
 
 ### Layout: a template for a harness Steery does not ship
 
