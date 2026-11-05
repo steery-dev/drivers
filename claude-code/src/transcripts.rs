@@ -21,6 +21,7 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 use steery_driver_common::lines::{Line, RECORD, capped, consumed, first_whole};
+use steery_driver_common::receipt::DELIVERED;
 use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees, Walk};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
@@ -881,7 +882,8 @@ fn headless(open: &mut File, length: u64, head: &Head) -> std::io::Result<bool> 
 /// What a person asked for, as one short line: the first line of their words that is
 /// not markup, cut at a word, short enough to read on a phone. A block of markup someone
 /// put before their words (Steery's `<steery kind="context">`, a command's tags) is
-/// skipped whole, through the line that closes it.
+/// skipped whole, through the line that closes it, and so is the line naming the delivery
+/// the words carry (PROTOCOL.md §3.3), which is no word of theirs.
 fn asked(said: &str) -> Option<String> {
     const MOST: usize = 72;
     let lines: Vec<&str> = said.lines().map(str::trim).collect();
@@ -900,7 +902,11 @@ fn asked(said: &str) -> Option<String> {
             }
             continue;
         }
-        if line.len() > 2 && !line.starts_with('#') && !line.starts_with("```") {
+        if line.len() > 2
+            && !line.starts_with('#')
+            && !line.starts_with("```")
+            && !line.contains(DELIVERED)
+        {
             break line;
         }
     }
@@ -1356,6 +1362,16 @@ mod tests {
             title("{\"type\":\"agent-name\",\"agentName\":\"build-fixer\"}\n").as_deref(),
             Some("build-fixer"),
             "the session's name outranks every title, as Claude Code shows it"
+        );
+        // Thrown: Steery's blocks, then the line naming the delivery, which is no name.
+        let thrown = json!({"type":"user","cwd":"/private/tmp","message":{"role":"user","content":"<steery kind=\"context\">\nThese words start work.\n</steery>\n<steery kind=\"throw\" id=\"t1\">\nrun the build\n</steery>\nDelivery reference: steery-delivery:landing.l1\nthen ship it"}});
+        let file = project.join("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee.jsonl");
+        write(&file, &[thrown]);
+        assert_eq!(
+            named("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee")
+                .title
+                .as_deref(),
+            Some("then ship it")
         );
         std::fs::remove_dir_all(root).unwrap();
     }
