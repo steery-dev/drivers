@@ -22,6 +22,9 @@ use steery_sdk::wire::harness::{Execution, LiveState, LiveTurn, SessionChanged};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
+use crate::appserver::AppServer;
+use crate::native;
+use crate::rollout::Store;
 use crate::says::Says;
 
 /// The versions of its requests the Codex app speaks, read off its own bundle (ChatGPT
@@ -303,14 +306,31 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(15);
 const DISCOVERY_LIMIT: usize = 8;
 /// How many threads are followed at once.
 const FOLLOWED_MAX: usize = 256;
+/// How often a thread a running app server owns is looked at again, and a followed
+/// thread's rollout read again for its calls, model and context.
+const LOOK_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a thread no running app server had loaded is not looked for there again.
+const QUEUE_RETRY: Duration = Duration::from_secs(30);
 
-/// The threads the runtime asked about, each followed through the window that owns it.
+/// The threads the runtime asked about, each followed through the window that owns it or
+/// the running app server whose queue holds it.
 pub struct Followers {
     router: Option<PathBuf>,
     notifier: Notifier,
+    store: Arc<Store>,
     threads: Mutex<HashMap<String, Follow>>,
     started: Mutex<bool>,
     says: Says,
+    /// A model and effort picked for a thread a window owns, for the next words Steery
+    /// starts a turn of there: the window takes a pick only with a turn's words.
+    picks: Mutex<HashMap<String, Picked>>,
+}
+
+/// A pick waiting for the next turn a window starts with Steery's words.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Picked {
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 struct Follow {
@@ -318,10 +338,27 @@ struct Follow {
     owner: Option<String>,
     projection: Projection,
     last_discover: Instant,
+    /// What the running app server that has it loaded said last, while one is followed.
+    queue: Option<Queued>,
+    /// Whether a look at the running app server that has it loaded is running.
+    queue_watched: bool,
+    /// When a look found no running app server that has it loaded.
+    queue_missed: Option<Instant>,
     /// What was last said of it, and since when it ran.
     said: Option<(Execution, u64)>,
     /// The state last sent.
     sent: LiveState,
+}
+
+/// A thread as the running app server that owns it says it stands (`thread/read`,
+/// `thread/queue/list`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Queued {
+    pub running: bool,
+    /// Words wait in its queue.
+    pub pending: bool,
+    pub model: Option<String>,
+    pub thinking: Option<String>,
 }
 
 impl Follow {
@@ -331,6 +368,9 @@ impl Follow {
             owner: None,
             projection: Projection::default(),
             last_discover: Instant::now() - DISCOVERY_INTERVAL,
+            queue: None,
+            queue_watched: false,
+            queue_missed: None,
             said: None,
             sent: LiveState::default(),
         }
@@ -341,17 +381,58 @@ impl Follow {
         self.projection = Projection::default();
         self.last_discover = Instant::now() - DISCOVERY_INTERVAL;
     }
+
+    /// Where it stands now, as its owner says: the window's state where a window owns it,
+    /// else the running app server's.
+    fn now(&self) -> Option<Execution> {
+        match (&self.owner, &self.queue) {
+            (Some(_), _) => self.projection.execution(),
+            (None, Some(queued)) if queued.running => Some(Execution::Running),
+            (None, Some(_)) => Some(Execution::Finished),
+            (None, None) => None,
+        }
+    }
 }
 
 impl Followers {
-    pub fn new(router: Option<PathBuf>, notifier: Notifier) -> Arc<Self> {
+    pub fn new(router: Option<PathBuf>, notifier: Notifier, store: Arc<Store>) -> Arc<Self> {
         Arc::new(Self {
             router,
             notifier,
+            store,
             threads: Mutex::new(HashMap::new()),
             started: Mutex::new(false),
             says: Says::default(),
+            picks: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn picks(&self) -> std::sync::MutexGuard<'_, HashMap<String, Picked>> {
+        self.picks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep `picked` for the next turn Steery's words start in `thread` through its
+    /// window.
+    pub fn pick(&self, thread: &str, picked: Picked) {
+        let mut picks = self.picks();
+        if picks.len() >= FOLLOWED_MAX && !picks.contains_key(thread) {
+            picks.clear();
+        }
+        picks.insert(thread.to_owned(), picked);
+    }
+
+    /// The pick waiting for `thread`'s next turn, where one is.
+    pub fn picked(&self, thread: &str) -> Picked {
+        self.picks().get(thread).cloned().unwrap_or_default()
+    }
+
+    /// The window started a turn on the pick `applied`: it waits no longer, unless a new
+    /// one came meanwhile.
+    pub fn applied(&self, thread: &str, applied: &Picked) {
+        let mut picks = self.picks();
+        if picks.get(thread) == Some(applied) {
+            picks.remove(thread);
+        }
     }
 
     /// The says each thread took.
@@ -405,21 +486,32 @@ impl Followers {
     }
 
     /// Say a thread's state where it changed. A turn seen to end settles the turns of
-    /// says not yet seen to end: the app runs one turn of a thread at a time.
+    /// says not yet seen to end: the app runs one turn of a thread at a time. While an
+    /// owner says where it stands, the rollout's newest records say what it runs on, the
+    /// share of its context left and its calls ([`Tail`]); the app server that owns it says
+    /// its model and thinking first, and whether words wait in its queue.
     fn changed(&self, thread: &str) {
+        if !self.threads().contains_key(thread) {
+            return;
+        }
+        let tail = self
+            .store
+            .latest(thread, crate::drive::LATEST)
+            .unwrap_or_default();
         let state = {
             let mut threads = self.threads();
             let Some(follow) = threads.get_mut(thread) else {
                 return;
             };
-            let now = follow
-                .owner
-                .as_ref()
-                .and_then(|_| follow.projection.execution());
+            let now = follow.now();
             let before = follow.said.map(|(state, _)| state);
             let at = crate::home::now();
             let since = match (now, follow.said) {
                 (Some(Execution::Running), Some((Execution::Running, since))) => since,
+                (Some(Execution::Running), _) => tail
+                    .running_since()
+                    .filter(|began| *began <= at)
+                    .unwrap_or(at),
                 _ => at,
             };
             if now != before
@@ -434,26 +526,38 @@ impl Followers {
             }
             follow.said = now.map(|state| (state, since));
             let settled = self.says.settled(thread);
-            let state = match now {
+            let queued = follow.queue.as_ref();
+            let mut state = match now {
                 Some(Execution::Running) => LiveState {
                     turn: Some(LiveTurn {
                         began_at: since,
                         says: self.says.running(thread),
                     }),
                     idle: Some(false),
-                    settled,
+                    calls: match tail.running_since() {
+                        Some(_) => tail.calls.clone(),
+                        None => Vec::new(),
+                    },
                     ..LiveState::default()
                 },
                 Some(_) => LiveState {
                     idle: Some(true),
-                    settled,
                     ..LiveState::default()
                 },
-                None => LiveState {
-                    settled,
-                    ..LiveState::default()
-                },
+                None => LiveState::default(),
             };
+            state.settled = settled;
+            if now.is_some() {
+                state.pending = queued.map(|queued| queued.pending);
+                state.model = queued
+                    .and_then(|queued| queued.model.clone())
+                    .or_else(|| tail.model.clone());
+                state.thinking = queued
+                    .and_then(|queued| queued.thinking.clone())
+                    .or_else(|| tail.thinking.clone());
+                state.context_left = tail.context_left;
+                state.ended = tail.ended.clone();
+            }
             if state == follow.sent {
                 return;
             }
@@ -466,6 +570,112 @@ impl Followers {
         }) {
             self.notifier
                 .notify(steery_sdk::method::SESSION_CHANGED, params);
+        }
+    }
+
+    /// Say again the state of each thread a window owns, where its rollout moved.
+    fn refresh(&self) {
+        let owned: Vec<String> = self
+            .threads()
+            .iter()
+            .filter(|(_, follow)| follow.owner.is_some())
+            .map(|(thread, _)| thread.clone())
+            .collect();
+        for thread in owned {
+            self.changed(&thread);
+        }
+    }
+
+    /// Follow `thread` through the running app server of `home` that has it loaded, while
+    /// the runtime asks about it: one connection kept, the thread looked at every
+    /// [`LOOK_INTERVAL`] and at once where the app server says its status changed
+    /// (`thread/status/changed`, which it says to every client). The connection never
+    /// subscribes to the thread: an app server sends a thread's approvals to every client
+    /// subscribed to it, and this one would refuse them in front of the person. Followed
+    /// until the app server has it no more, stops answering, or nobody asked about it for
+    /// [`FOLLOWER_IDLE`]. A thread a window owns is followed the same way where the app's
+    /// own app server has it loaded; one no running app server has is not looked for
+    /// again within [`QUEUE_RETRY`].
+    pub fn queued(self: &Arc<Self>, thread: &str, home: &Path, binary: &Path) {
+        {
+            let mut threads = self.threads();
+            if !threads.contains_key(thread) && threads.len() >= FOLLOWED_MAX {
+                return;
+            }
+            let follow = threads.entry(thread.to_owned()).or_insert_with(Follow::new);
+            follow.requested = Instant::now();
+            if follow.queue_watched
+                || follow
+                    .queue_missed
+                    .is_some_and(|missed| missed.elapsed() < QUEUE_RETRY)
+            {
+                return;
+            }
+            follow.queue_watched = true;
+        }
+        tokio::spawn(Arc::clone(self).watch_queue(
+            thread.to_owned(),
+            home.to_owned(),
+            binary.to_owned(),
+        ));
+    }
+
+    async fn watch_queue(self: Arc<Self>, thread: String, home: PathBuf, binary: PathBuf) {
+        let opened = tokio::time::timeout(native::WITHIN, native::queue(&binary, &home, &thread))
+            .await
+            .ok()
+            .and_then(Result::ok);
+        if let Some(mut server) = opened {
+            'watch: loop {
+                let wanted = self
+                    .threads()
+                    .get(&thread)
+                    .is_some_and(|follow| follow.requested.elapsed() < FOLLOWER_IDLE);
+                if !wanted {
+                    break;
+                }
+                let Ok(Ok(queued)) =
+                    tokio::time::timeout(native::WITHIN, look(&mut server, &thread)).await
+                else {
+                    break;
+                };
+                match self.threads().get_mut(&thread) {
+                    Some(follow) => follow.queue = Some(queued),
+                    None => break,
+                }
+                self.changed(&thread);
+                let wake = tokio::time::sleep(LOOK_INTERVAL);
+                tokio::pin!(wake);
+                loop {
+                    tokio::select! {
+                        _ = &mut wake => break,
+                        message = server.recv() => match message {
+                            Ok(message) if status_changed(&message, &thread) => break,
+                            Ok(_) => {}
+                            Err(_) => break 'watch,
+                        },
+                    }
+                }
+            }
+            server.close().await;
+        }
+        let forgotten = {
+            let mut threads = self.threads();
+            let forgotten = threads.get_mut(&thread).is_some_and(|follow| {
+                if follow.queue.is_none() {
+                    follow.queue_missed = Some(Instant::now());
+                }
+                follow.queue = None;
+                follow.queue_watched = false;
+                follow.owner.is_none() && follow.requested.elapsed() >= FOLLOWER_IDLE
+            });
+            if forgotten {
+                threads.remove(&thread);
+            }
+            forgotten
+        };
+        if !forgotten {
+            self.changed(&thread);
         }
     }
 
@@ -498,6 +708,8 @@ impl Followers {
             let mut pending: HashMap<String, (String, Instant)> = HashMap::new();
             let mut ticker = tokio::time::interval(Duration::from_millis(100));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut looks = tokio::time::interval(LOOK_INTERVAL);
+            looks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 let result = tokio::select! {
                     frame = app.frame() => match frame {
@@ -505,6 +717,10 @@ impl Followers {
                         Err(error) => Err(error),
                     },
                     _ = ticker.tick() => self.tick(&mut app, &mut pending).await,
+                    _ = looks.tick() => {
+                        self.refresh();
+                        Ok(())
+                    }
                 };
                 if result.is_err() {
                     break;
@@ -723,6 +939,43 @@ impl Followers {
         }
         app.refuse(frame).await
     }
+}
+
+/// A thread as the running app server that owns it says it stands now: its status, model
+/// and effort (`thread/read`; `Active` while a turn runs), and whether words wait in its
+/// queue (`thread/queue/list`). A thread it no longer has loaded is no longer its.
+pub(crate) async fn look(server: &mut AppServer, thread: &str) -> Result<Queued, String> {
+    let read = server
+        .call(
+            "thread/read",
+            json!({"threadId": thread, "includeTurns": false}),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    let said = &read["thread"];
+    let running = match said["status"]["type"].as_str() {
+        Some("active") => true,
+        Some("idle") | Some("systemError") => false,
+        _ => return Err("the running Codex app server no longer has this thread".into()),
+    };
+    let text = |value: &Value| {
+        value
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    Ok(Queued {
+        running,
+        pending: !native::queue_empty(server, thread).await?,
+        model: text(&said["model"]),
+        thinking: text(&said["reasoningEffort"]),
+    })
+}
+
+/// Whether an app server's message says `thread`'s status changed, or anything of the
+/// thread's own turns: either is a reason to look at it again.
+fn status_changed(message: &Value, thread: &str) -> bool {
+    message.get("id").is_none() && message["params"]["threadId"].as_str() == Some(thread)
 }
 
 /// The owning window's own state of a thread, patched as it changes.

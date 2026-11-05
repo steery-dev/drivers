@@ -10,11 +10,10 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
-    Act, Beyond, Door, Ended, Event, Execution, FailureKind, Held, HeldBy, Holder, HolderStop,
-    Launch, Look,
-    Looked, Marked, Model, Models, Pick, Picked, ReadAs, Reader, ReaderPlan, ReaderRead,
-    ReaderTools, Receipt, ReceiptFind, ReceiptMark, Said, Sample, Sampled, Say, SayMode, Start,
-    Stdin, Stop, Stopped, Stream, Terminal, TerminalCommand, Text, TurnLine, TurnRead, TurnState,
+    Act, Beyond, Door, Ended, Execution, FailureKind, Held, HeldBy, Holder, HolderStop, Launch,
+    Look, Looked, Marked, Model, Models, Pick, Picked, ReadAs, Reader, ReaderPlan, ReaderRead,
+    ReaderTools, Receipt, ReceiptFind, ReceiptMark, Said, Sampled, Say, SayMode, Start, Stdin,
+    Stop, Stopped, Stream, Terminal, TerminalCommand, Text, TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
@@ -28,7 +27,7 @@ use crate::says::{self, Taken, Waiting};
 /// quit for one thread, since it serves every other it has (decided 2026-10-06).
 const APP_LOADED: &str = "app has it loaded with no window: open it in a Codex window, or Fork";
 /// How much of a rollout's end is read for where its conversation stands.
-const LATEST: u64 = 256 * 1024;
+pub(crate) const LATEST: u64 = 256 * 1024;
 /// The stop's graceful step must be done within the runtime's bound for `stop`.
 const STOP_WITHIN: std::time::Duration = std::time::Duration::from_millis(2500);
 /// How long a say has to read the thread's newest turn before its words go.
@@ -40,7 +39,7 @@ const WATCH_AFTER: [u64; 8] = [500, 1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 
 /// What drive needs: Codex's home and conversations, its binary, and the followers.
 pub struct Drive {
     pub home: PathBuf,
-    pub store: Store,
+    pub store: Arc<Store>,
     pub followers: Arc<Followers>,
 }
 
@@ -185,61 +184,55 @@ impl Drive {
         }))
     }
 
-    /// `idle`: the owning window's or app server's own state of the thread; else where
-    /// its rollout says it stands, which holds only while nothing holds the rollout.
+    /// `idle`: the owning window's or app server's own state of the thread, with the
+    /// model, thinking and turn times its rollout and app server say; else where its
+    /// rollout says it stands, which holds only while nothing holds the rollout. A thread a
+    /// running app server owns is followed through it from here, so its live state is said
+    /// as it changes ([`Followers::queued`]).
     pub async fn idle(&self, held: Held) -> Result<Sampled, Error> {
         let thread = &held.external_id;
         let now = crate::home::now();
+        // What the rollout says is kept while it stands; when it was looked at is now.
+        let tail = || self.store.latest(thread, LATEST).unwrap_or_default();
         if let Some(execution) = self.followers.execution(thread) {
+            if let (Ok(home), Some(binary)) = (self.thread_home(thread), crate::home::binary()) {
+                self.followers.queued(thread, &home, &binary);
+            }
             return Ok(Sampled {
-                sample: Some(sample(execution, now, false, false)),
+                sample: Some(tail().owned(execution, now)),
             });
         }
         if let (Ok(home), Some(binary)) = (self.thread_home(thread), crate::home::binary()) {
             let queued = tokio::time::timeout(native::WITHIN, async {
                 let mut server = native::queue(&binary, &home, thread).await.ok()?;
-                let empty = native::queue_empty(&mut server, thread).await.ok();
-                let read = server
-                    .call(
-                        "thread/read",
-                        json!({"threadId": thread, "includeTurns": false}),
-                    )
-                    .await
-                    .ok();
+                let queued = router::look(&mut server, thread).await.ok();
                 server.close().await;
-                let running = match read?.pointer("/thread/status/type").and_then(Value::as_str) {
-                    Some("active") => true,
-                    Some("idle") => empty != Some(true),
-                    _ => return None,
-                };
-                Some(running)
+                queued
             })
             .await
             .ok()
             .flatten();
-            if let Some(running) = queued {
-                let execution = if running {
+            if let Some(queued) = queued {
+                self.followers.queued(thread, &home, &binary);
+                let execution = if queued.running || queued.pending {
                     Execution::Running
                 } else {
                     Execution::Finished
                 };
+                let mut sample = tail().owned(execution, now);
+                sample.model = queued.model.or(sample.model);
+                sample.thinking = queued.thinking.or(sample.thinking);
                 return Ok(Sampled {
-                    sample: Some(sample(execution, now, false, false)),
+                    sample: Some(sample),
                 });
             }
         }
-        // What the rollout says is kept while it stands; when it was looked at is now.
-        let Ok(said) = self
-            .store
-            .latest(thread, LATEST, |events| stands(events, now))
-        else {
-            return Ok(Sampled { sample: None });
-        };
         Ok(Sampled {
-            sample: said.map(|sample| Sample {
-                observed_at: now,
-                ..sample
-            }),
+            sample: self
+                .store
+                .latest(thread, LATEST)
+                .ok()
+                .and_then(|tail| tail.sample(now)),
         })
     }
 
@@ -577,13 +570,23 @@ impl Drive {
             None => None,
         };
         if let Some(router) = self.followers.router().map(Path::to_path_buf) {
+            let picked = self.followers.picked(thread);
             let took = async {
                 let mut app = router::App::open(&router).await.ok()?;
-                Some(app.say(thread, &say.words, None, None).await)
+                Some(
+                    app.say(
+                        thread,
+                        &say.words,
+                        picked.model.as_deref(),
+                        picked.effort.as_deref(),
+                    )
+                    .await,
+                )
             }
             .await;
             match took {
                 Some(Took::Yes) => {
+                    self.followers.applied(thread, &picked);
                     self.watch(thread, waiting);
                     return Ok(Said { took: true });
                 }
@@ -612,6 +615,7 @@ impl Drive {
         match queued {
             // A queue's acknowledgement is not delivery: the runtime looks for the words.
             Some(Ok(_)) => {
+                self.followers.queued(thread, &home, &codex);
                 self.watch(thread, waiting);
                 Ok(Said { took: false })
             }
@@ -693,7 +697,10 @@ impl Drive {
 
     /// `pick`: a model and effort for the thread's next turns, set on the running app
     /// server that owns it (`thread/settings/update`) once its own list has them. Codex
-    /// takes any model there and fails only at the turn, so the pick is checked first.
+    /// takes any model there and fails only at the turn, so the pick is checked first. A
+    /// thread a window of the app owns takes a pick only with a turn's words
+    /// (`thread-follower-start-turn`): the pick is checked against the list of an app
+    /// server of the driver's own, and kept for the next words Steery says there.
     pub async fn pick(&self, pick: Pick) -> Result<Picked, Error> {
         let thread = &pick.external_id;
         uuid(thread)?;
@@ -702,13 +709,19 @@ impl Drive {
         let unsupported = || {
             Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
-                "only a Codex app server that owns the thread applies a pick on its own",
+                "only a Codex app server or window that owns the thread applies a pick",
             )
         };
-        let mut server = tokio::time::timeout(native::WITHIN, native::queue(&codex, &home, thread))
+        let queued = tokio::time::timeout(native::WITHIN, native::queue(&codex, &home, thread))
             .await
-            .map_err(|_| unsupported())?
-            .map_err(|_| unsupported())?;
+            .ok()
+            .and_then(Result::ok);
+        let Some(mut server) = queued else {
+            if self.followers.execution(thread).is_none() {
+                return Err(unsupported());
+            }
+            return self.pick_window(&pick, &codex, &home).await;
+        };
         let result = async {
             let listed = list(&mut server)
                 .await
@@ -720,31 +733,12 @@ impl Drive {
                 )
                 .await
                 .map_err(|e| Error::refused(refusal::REFUSED, e.to_string()))?;
-            let model = pick
-                .model
-                .clone()
-                .or_else(|| {
-                    read.pointer("/thread/model")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .unwrap_or_default();
-            let offer = listed.iter().find(|offer| offer.model == model);
-            if pick.model.is_some() && offer.is_none() {
-                return Err(Error::refused(
-                    refusal::MODEL_MISSING,
-                    format!("Codex lists no {model} here"),
-                ));
-            }
-            if let (Some(thinking), Some(offer)) = (&pick.thinking, offer)
-                && !offer.thinking.is_empty()
-                && !offer.thinking.contains(thinking)
-            {
-                return Err(Error::refused(
-                    refusal::SELECTION_UNSUPPORTED,
-                    format!("{model} takes no effort {thinking}"),
-                ));
-            }
+            let model = pick.model.clone().or_else(|| {
+                read.pointer("/thread/model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+            offered(&listed, &pick, model.as_deref().unwrap_or_default())?;
             let mut settings = json!({"threadId": thread});
             if let Some(model) = &pick.model {
                 settings["model"] = json!(model);
@@ -778,6 +772,40 @@ impl Drive {
         .await;
         server.close().await;
         result
+    }
+
+    /// A pick for a thread a window owns: checked against the models an app server of
+    /// the driver's own lists, and kept for the next words Steery says through the window,
+    /// which start their turn on it. Read back as what that turn starts on: the pick, else
+    /// what the rollout last ran on.
+    async fn pick_window(&self, pick: &Pick, codex: &Path, home: &Path) -> Result<Picked, Error> {
+        let thread = &pick.external_id;
+        let listed = tokio::time::timeout(native::WITHIN, async {
+            let mut server = native::reader(codex, home).await?;
+            let listed = list(&mut server).await;
+            server.close().await;
+            listed
+        })
+        .await
+        .map_err(|_| Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time"))?
+        .map_err(|line| Error::refused(refusal::REFUSED, line))?;
+        let kept = self.followers.picked(thread);
+        let tail = self.store.latest(thread, LATEST).unwrap_or_default();
+        let model = pick
+            .model
+            .clone()
+            .or(kept.model.clone())
+            .or(tail.model.clone());
+        offered(&listed, pick, model.as_deref().unwrap_or_default())?;
+        let picked = router::Picked {
+            model: pick.model.clone().or(kept.model),
+            effort: pick.thinking.clone().or(kept.effort),
+        };
+        self.followers.pick(thread, picked.clone());
+        Ok(Picked {
+            model,
+            thinking: picked.effort.or(tail.thinking),
+        })
     }
 
     /// `terminal`: `codex resume <thread>` in its folder, under the home its rollout is
@@ -833,7 +861,9 @@ impl Drive {
         });
         let (listed, signed_in) = tokio::join!(ask, signed_in(&codex, root));
         let listed = listed
-            .map_err(|_| Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time"))?
+            .map_err(|_| {
+                Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time")
+            })?
             .map_err(|line| Error::refused(refusal::REFUSED, line))?;
         let mut watch: Vec<PathBuf> = ["config.toml", "auth.json", "models_cache.json"]
             .iter()
@@ -925,6 +955,29 @@ async fn list(server: &mut AppServer) -> Result<Vec<Model>, String> {
     Ok(models.into_iter().map(|(_, model)| model).collect())
 }
 
+/// Whether Codex's list offers `pick`: its model, where it names one, listed, and its
+/// effort among the efforts of `model` (the model the pick's turn runs on), where that
+/// model lists any.
+fn offered(listed: &[Model], pick: &Pick, model: &str) -> Result<(), Error> {
+    let offer = listed.iter().find(|offer| offer.model == model);
+    if pick.model.is_some() && offer.is_none() {
+        return Err(Error::refused(
+            refusal::MODEL_MISSING,
+            format!("Codex lists no {model} here"),
+        ));
+    }
+    if let (Some(thinking), Some(offer)) = (&pick.thinking, offer)
+        && !offer.thinking.is_empty()
+        && !offer.thinking.contains(thinking)
+    {
+        return Err(Error::refused(
+            refusal::SELECTION_UNSUPPORTED,
+            format!("{model} takes no effort {thinking}"),
+        ));
+    }
+    Ok(())
+}
+
 /// A `model/list` page: the models it shows, whether each is the default, and its next
 /// cursor.
 /// One page of models, each with whether it is the default, and the next page's cursor.
@@ -987,99 +1040,6 @@ fn page_of(result: &Value) -> Result<Page, String> {
         ));
     }
     Ok((models, next))
-}
-
-fn sample(state: Execution, now: u64, vacant: bool, if_unheld: bool) -> Sample {
-    Sample {
-        state,
-        observed_at: now,
-        started_at: None,
-        ended_at: None,
-        model: None,
-        thinking: None,
-        error: None,
-        vacant,
-        if_unheld,
-    }
-}
-
-/// Where a rollout's newest records say its conversation stands, standing only while no
-/// process holds the rollout (`if_unheld`): a turn ended is how it ended; a turn begun and
-/// never ended with nothing holding the rollout was cut off, so it is `Interrupted` at the
-/// rollout's last record and vacant. Every live Codex is caught before this: the app's
-/// windows and a running app server answer in `idle` first, and a terminal or IDE session
-/// holds its rollout, which the runtime reads as held.
-fn stands(events: &[Event], now: u64) -> Option<Sample> {
-    let mut model = None;
-    let mut thinking = None;
-    let mut last = None;
-    for event in events {
-        match event {
-            Event::Model {
-                model: m,
-                thinking: t,
-                ..
-            } => {
-                model = Some(m.clone());
-                thinking = t.clone();
-            }
-            Event::TurnBegan { at, .. } => last = Some((Execution::Running, Some(*at), None, None)),
-            Event::TurnEnded {
-                at, state, failure, ..
-            } => {
-                let started = last.and_then(
-                    |(_, started, _, _): (Execution, Option<u64>, Option<u64>, Option<String>)| {
-                        started
-                    },
-                );
-                let execution = match state {
-                    TurnState::Finished => Execution::Finished,
-                    TurnState::Failed => Execution::Failed,
-                    TurnState::Interrupted => Execution::Interrupted,
-                };
-                last = Some((
-                    execution,
-                    started,
-                    Some(*at),
-                    failure.as_ref().map(|f| f.line.clone()),
-                ));
-            }
-            _ => {}
-        }
-    }
-    let (state, started_at, ended_at, error) = last?;
-    let (state, ended_at) = match state {
-        Execution::Running => (Execution::Interrupted, events.iter().map(written).max()),
-        state => (state, ended_at),
-    };
-    Some(Sample {
-        state,
-        observed_at: now,
-        started_at,
-        ended_at,
-        model,
-        thinking,
-        error,
-        vacant: true,
-        if_unheld: true,
-    })
-}
-
-/// When a rollout record was written.
-fn written(event: &Event) -> u64 {
-    match event {
-        Event::TurnBegan { at, .. }
-        | Event::TurnEnded { at, .. }
-        | Event::Words { at, .. }
-        | Event::Rollback { at, .. }
-        | Event::CallBegan { at, .. }
-        | Event::CallEnded { at, .. }
-        | Event::Tokens { at, .. }
-        | Event::Model { at, .. }
-        | Event::SubAgent { at, .. }
-        | Event::Fork { at, .. }
-        | Event::Compacted { at, .. } => *at,
-    }
 }
 
 /// `turn/read`: one line of a turn's output, as the turn mode writes it — every message
@@ -1424,7 +1384,7 @@ fn quoted(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steery_sdk::wire::harness::{Count, Voice};
+    use steery_sdk::wire::harness::{Count, Event, Voice};
 
     fn line(stream: Stream, line: &str, delivery: Option<&str>) -> TurnLine {
         turn_line(TurnRead {
@@ -1458,7 +1418,11 @@ mod tests {
                 error: Some("unexpected status 401 Unauthorized".into())
             })
         );
-        assert_eq!(line(Stream::Stdout, failed, None).refused, None, "wording is no class");
+        assert_eq!(
+            line(Stream::Stdout, failed, None).refused,
+            None,
+            "wording is no class"
+        );
         let classed = |info: &str| {
             let failed = format!(
                 r#"{{"method":"turn/completed","params":{{"turn":{{"id":"u","status":"failed","error":{{"message":"x","codexErrorInfo":{info}}}}}}}}}"#
@@ -1470,7 +1434,10 @@ mod tests {
             classed(r#"{"httpConnectionFailed":{"httpStatusCode":429}}"#).as_deref(),
             Some("limited")
         );
-        assert_eq!(classed(r#""usageLimitExceeded""#).as_deref(), Some("limited"));
+        assert_eq!(
+            classed(r#""usageLimitExceeded""#).as_deref(),
+            Some("limited")
+        );
         assert_eq!(classed(r#""other""#), None);
         let done =
             r#"{"method":"turn/completed","params":{"turn":{"id":"u","status":"completed"}}}"#;
@@ -1519,8 +1486,12 @@ mod tests {
         // Codex 0.163's own lines, cut down: each event under the id its rollout gives the
         // same fact (turn id, item id, call_id, the total's numbers), a person's words none.
         let said = |text: &str| line(Stream::Stdout, text, None);
-        said(r#"{"id":2,"result":{"thread":{"id":"01a158a8"},"model":"claude-haiku-4-5","modelProvider":"cpa-gui","reasoningEffort":"ultra"}}"#);
-        let began = said(r#"{"method":"turn/started","params":{"threadId":"01a158a8","turn":{"id":"01a158a8-03de","status":"inProgress"}},"emittedAtMs":1792488768669}"#);
+        said(
+            r#"{"id":2,"result":{"thread":{"id":"01a158a8"},"model":"claude-haiku-4-5","modelProvider":"cpa-gui","reasoningEffort":"ultra"}}"#,
+        );
+        let began = said(
+            r#"{"method":"turn/started","params":{"threadId":"01a158a8","turn":{"id":"01a158a8-03de","status":"inProgress"}},"emittedAtMs":1792488768669}"#,
+        );
         assert_eq!(
             began.events,
             vec![
@@ -1536,25 +1507,40 @@ mod tests {
                 }
             ]
         );
-        let person = said(r#"{"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a158a8-094a","content":[{"type":"text","text":"Run cat a.txt"}]}},"emittedAtMs":1792488769905}"#);
-        assert!(person.events.is_empty(), "the rollout names a person's words otherwise");
-        let thought = said(r#"{"method":"item/completed","params":{"item":{"type":"reasoning","id":"rs_msg_011CgDFw_0","summary":["Run it."],"content":[]}},"emittedAtMs":1792488775769}"#);
+        let person = said(
+            r#"{"method":"item/completed","params":{"item":{"type":"userMessage","id":"01a158a8-094a","content":[{"type":"text","text":"Run cat a.txt"}]}},"emittedAtMs":1792488769905}"#,
+        );
+        assert!(
+            person.events.is_empty(),
+            "the rollout names a person's words otherwise"
+        );
+        let thought = said(
+            r#"{"method":"item/completed","params":{"item":{"type":"reasoning","id":"rs_msg_011CgDFw_0","summary":["Run it."],"content":[]}},"emittedAtMs":1792488775769}"#,
+        );
         assert!(
             matches!(thought.events.as_slice(), [Event::Words { id, voice: Voice::Thought, text, .. }] if id == "rs_msg_011CgDFw_0" && text == "Run it.")
         );
-        let call = said(r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"toolu_0124","command":"/bin/zsh -lc 'cat a.txt'","source":"unifiedExecStartup","status":"inProgress"}},"emittedAtMs":1792488775950}"#);
+        let call = said(
+            r#"{"method":"item/started","params":{"item":{"type":"commandExecution","id":"toolu_0124","command":"/bin/zsh -lc 'cat a.txt'","source":"unifiedExecStartup","status":"inProgress"}},"emittedAtMs":1792488775950}"#,
+        );
         assert!(
             matches!(call.events.as_slice(), [Event::CallBegan { call, .. }] if call.id == "toolu_0124" && call.tool == "exec_command" && call.input == json!({"cmd": "cat a.txt"}))
         );
-        let back = said(r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"toolu_0124","command":"/bin/zsh -lc 'cat a.txt'","source":"unifiedExecStartup","status":"completed","aggregatedOutput":"hello\n","exitCode":0}},"emittedAtMs":1792488776399}"#);
+        let back = said(
+            r#"{"method":"item/completed","params":{"item":{"type":"commandExecution","id":"toolu_0124","command":"/bin/zsh -lc 'cat a.txt'","source":"unifiedExecStartup","status":"completed","aggregatedOutput":"hello\n","exitCode":0}},"emittedAtMs":1792488776399}"#,
+        );
         assert!(
             matches!(back.events.as_slice(), [Event::CallEnded { id, ok: true, chars: 6, .. }, Event::Words { id: out, voice: Voice::Tool, .. }] if id == "toolu_0124" && out == "toolu_0124:out")
         );
-        let spent = said(r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"totalTokens":196086,"inputTokens":195948,"cachedInputTokens":0,"outputTokens":138,"reasoningOutputTokens":65},"last":{"totalTokens":196086},"modelContextWindow":258400}},"emittedAtMs":1792488776483}"#);
+        let spent = said(
+            r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"totalTokens":196086,"inputTokens":195948,"cachedInputTokens":0,"outputTokens":138,"reasoningOutputTokens":65},"last":{"totalTokens":196086},"modelContextWindow":258400}},"emittedAtMs":1792488776483}"#,
+        );
         assert!(
             matches!(spent.events.as_slice(), [Event::Tokens { count: Count::Total, input: 195948, output: 138, reasoning: 65, model: Some(model), .. }] if model == "claude-haiku-4-5")
         );
-        let named = said(r#"{"method":"thread/name/updated","params":{"threadId":"01a158a8","threadName":"Read a.txt"}}"#);
+        let named = said(
+            r#"{"method":"thread/name/updated","params":{"threadId":"01a158a8","threadName":"Read a.txt"}}"#,
+        );
         assert_eq!(named.title.as_deref(), Some("Read a.txt"));
     }
 
@@ -1694,53 +1680,5 @@ mod tests {
         ] {
             assert!(page_of(&page).is_err(), "{page}");
         }
-    }
-
-    /// Where a rollout says its conversation stands, only while nothing holds the rollout:
-    /// a turn begun and never ended was cut off (interrupted at the last record, vacant);
-    /// an ended one is how it ended.
-    #[test]
-    fn a_rollout_s_newest_turn_says_where_it_stands() {
-        let running = stands(
-            &[
-                Event::TurnBegan { at: 5, turn: None },
-                Event::Model {
-                    at: 8,
-                    model: "m".into(),
-                    provider: None,
-                    thinking: None,
-                },
-            ],
-            9,
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                running.state,
-                running.started_at,
-                running.ended_at,
-                running.vacant,
-                running.if_unheld
-            ),
-            (Execution::Interrupted, Some(5), Some(8), true, true)
-        );
-        let ended = stands(
-            &[
-                Event::TurnBegan { at: 5, turn: None },
-                Event::TurnEnded {
-                    at: 7,
-                    turn: None,
-                    state: TurnState::Interrupted,
-                    failure: None,
-                },
-            ],
-            9,
-        )
-        .unwrap();
-        assert_eq!(
-            (ended.state, ended.started_at, ended.ended_at, ended.vacant),
-            (Execution::Interrupted, Some(5), Some(7), true)
-        );
-        assert!(stands(&[], 9).is_none());
     }
 }

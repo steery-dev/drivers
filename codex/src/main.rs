@@ -20,11 +20,12 @@ mod router;
 mod says;
 mod setup;
 mod sign_in;
+mod tail;
 mod turn;
 mod words;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 use steery_driver_common::program::{NEEDS, WAITED};
@@ -122,19 +123,21 @@ impl Codex {
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4, 5 and 6"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 7"))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         let _ = self.home.set(params.home.clone());
-        let _ = self
-            .place
-            .set(home::root(&params.home).map(|root| drive::Drive {
+        let _ = self.place.set(home::root(&params.home).map(|root| {
+            let store = Arc::new(rollout::Store::new(root.clone()));
+            drive::Drive {
                 home: params.home.clone(),
                 followers: router::Followers::new(
                     Some(root.join("ipc").join("ipc.sock")),
                     self.notifier.clone(),
+                    Arc::clone(&store),
                 ),
-                store: rollout::Store::new(root),
-            }));
+                store,
+            }
+        }));
         Ok(wire::Initialized {
             protocol,
             program: wire::ProgramInfo {
@@ -202,13 +205,13 @@ impl Program for Codex {
             method::TERMINAL => result(self.drive()?.terminal(steery_sdk::params(params)?)?),
             method::SAY => result(self.drive()?.say(steery_sdk::params(params)?).await?),
             method::PICK => result(self.drive()?.pick(steery_sdk::params(params)?).await?),
+            // Codex has no way to ask a thread's own model for a recap without running a
+            // turn in it.
             method::NEEDS_GIVE if self.needs() => result(
                 self.sign_ins
                     .give(self.drive()?.store.root(), steery_sdk::params(params)?)
                     .await?,
             ),
-            // Codex has no way to ask a thread's own model for a recap without running a
-            // turn in it.
             _ => Err(Error::Unknown),
         }
     }

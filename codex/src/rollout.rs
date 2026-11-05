@@ -23,11 +23,12 @@ use serde_json::Value;
 use steery_driver_common::lines::{BATCH, Line, RECORD, capped, consumed, first_whole};
 use steery_driver_common::quiet::{Memo, Quiet, Stamp};
 use steery_sdk::wire::harness::{
-    Event, Events, List, Listed, Locate, Located, Read, Sample, Session, SubAgent,
+    Event, Events, List, Listed, Locate, Located, Read, Session, SubAgent,
 };
 use steery_sdk::{Error, refusal};
 
 use crate::events::{self, Place, State, stamped, text};
+use crate::tail::Tail;
 use crate::words;
 
 /// How many opening records are read for the first thing a person asked.
@@ -48,7 +49,7 @@ pub struct Store {
     listed: Mutex<Option<Arc<Index>>>,
     heads: Mutex<HashMap<PathBuf, Kept>>,
     quiet: Quiet,
-    latest: Memo<String, Option<Sample>>,
+    latest: Memo<String, Tail>,
 }
 
 /// Every rollout here, in the order the folders listed them, and the thread each is:
@@ -316,17 +317,12 @@ impl Store {
         Ok(events)
     }
 
-    /// What `says` makes of the events within `tail` bytes of the end of conversation
-    /// `id`'s history, kept as a quiet read is ([`Store::read`]) and made again only once
-    /// one of the rollouts it stood on changed. Measured 2026-10-17 on a Mac with 146
+    /// What the events within `tail` bytes of the end of conversation `id`'s history say
+    /// of it now ([`Tail`]), kept as a quiet read is ([`Store::read`]) and made again only
+    /// once one of the rollouts it stood on changed. Measured 2026-10-17 on a Mac with 146
     /// conversations: `idle` read each one's tail on every call, 7 ms a call, and a sweep
     /// waited 1 s on them.
-    pub fn latest(
-        &self,
-        id: &str,
-        tail: u64,
-        says: impl FnOnce(&[Event]) -> Option<Sample>,
-    ) -> Result<Option<Sample>, Error> {
+    pub fn latest(&self, id: &str, tail: u64) -> Result<Tail, Error> {
         if let Some(said) = self.latest.get(id, |said| Some(said.clone())) {
             return Ok(said);
         }
@@ -336,7 +332,7 @@ impl Store {
             cursor: None,
             tail: Some(tail),
         })?;
-        let said = says(&events.events);
+        let said = Tail::of(&events.events);
         if let Some((stands, filed)) = stood {
             self.latest.put(id.to_owned(), stands, filed, said.clone());
         }
@@ -1085,6 +1081,7 @@ fn read_from(
             ));
         }
         if let Some((parent, at)) = &segment.fork {
+            state.settle(&mut events);
             events.push(Event::Fork {
                 at: *at,
                 parent: parent.clone(),
@@ -1103,12 +1100,14 @@ fn answer(
     dev: u64,
     ino: u64,
     off: u64,
-    st: State,
-    events: Vec<Event>,
+    mut st: State,
+    mut events: Vec<Event>,
     more: bool,
     reset: bool,
     whole: bool,
 ) -> Events {
+    // A read ends on what it read: a compaction Codex has not yet counted is said as it is.
+    st.settle(&mut events);
     Events {
         cursor: Cursor {
             v: 1,

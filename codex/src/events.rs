@@ -64,6 +64,12 @@ pub struct State {
     /// Calls begun naming a background session, until answered: `(call, starter)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     waiting: Vec<(String, String)>,
+    /// A compaction read, held until Codex counts the context it left: the `token_count`
+    /// it sends once the history is replaced, after the `world_state`, `turn_context` and
+    /// `thread_settings_applied` it writes with it. Said then, at any other record, or at
+    /// the read's end ([`State::settle`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compacting: Option<Event>,
 }
 
 /// What a rollback that does not say how much went is refused with: reading on would
@@ -89,6 +95,17 @@ impl State {
             return Ok(());
         };
         let kind = text(payload, "type");
+        let kept = matches!(
+            (text(record, "type"), kind),
+            (Some("world_state" | "turn_context"), _)
+                | (
+                    Some("event_msg"),
+                    Some("thread_settings_applied" | "token_count")
+                )
+        );
+        if !kept {
+            self.settle(out);
+        }
         match text(record, "type") {
             Some("session_meta") => {
                 if let Some(provider) = text(payload, "model_provider") {
@@ -116,8 +133,33 @@ impl State {
                     });
                 }
                 if !place.copied {
-                    out.push(compacted(place, payload));
+                    self.compacting = Some(compacted(place, payload));
                 }
+            }
+            // One model response's own count, by the response it names: Codex writes one
+            // for each response it saw complete, cache writes included where its service
+            // says them.
+            Some("token_usage_record") => {
+                let (Some(response), Some(usage)) = (
+                    text(payload, "response_id").filter(|id| !id.is_empty()),
+                    payload.get("usage").filter(|usage| usage.is_object()),
+                ) else {
+                    return Ok(());
+                };
+                out.push(Event::Tokens {
+                    at,
+                    count: Count::Response,
+                    response: Some(response.to_owned()),
+                    model: self.model.clone(),
+                    input: number(usage, "input_tokens"),
+                    cached: number(usage, "cached_input_tokens"),
+                    cache_write: usage
+                        .get("cache_write_input_tokens")
+                        .and_then(Value::as_u64),
+                    output: number(usage, "output_tokens"),
+                    reasoning: number(usage, "reasoning_output_tokens"),
+                    context_left: None,
+                });
             }
             Some("event_msg") => return self.event(kind, payload, at, out),
             Some("response_item") => self.item(kind, payload, place, out),
@@ -152,6 +194,11 @@ impl State {
                 thinking: self.effort.clone(),
             });
         }
+    }
+
+    /// Says the compaction held for the count after it, as it stands.
+    pub fn settle(&mut self, out: &mut Vec<Event>) {
+        out.extend(self.compacting.take());
     }
 
     fn event(
@@ -229,7 +276,16 @@ impl State {
                 if let Some(limits) = payload.get("rate_limits").filter(|l| l.is_object()) {
                     self.spent_until = spent_until(limits);
                 }
-                let Some(info) = payload.get("info").filter(|info| info.is_object()) else {
+                let info = payload.get("info").filter(|info| info.is_object());
+                let used = info
+                    .and_then(|info| info.pointer("/last_token_usage/total_tokens"))
+                    .and_then(Value::as_u64);
+                // The count Codex makes of the history a compaction left, summary included.
+                if let Some(Event::Compacted { tokens_after, .. }) = &mut self.compacting {
+                    *tokens_after = used;
+                }
+                self.settle(out);
+                let Some(info) = info else {
                     return Ok(());
                 };
                 let Some(total) = info.get("total_token_usage") else {
@@ -239,10 +295,7 @@ impl State {
                     .get("model_context_window")
                     .and_then(Value::as_u64)
                     .filter(|window| *window > 0)
-                    .zip(
-                        info.pointer("/last_token_usage/total_tokens")
-                            .and_then(Value::as_u64),
-                    )
+                    .zip(used)
                     .map(|(window, used)| (1.0 - used as f64 / window as f64).clamp(0.0, 1.0));
                 out.push(Event::Tokens {
                     at,
@@ -251,7 +304,9 @@ impl State {
                     model: self.model.clone(),
                     input: number(total, "input_tokens"),
                     cached: number(total, "cached_input_tokens"),
-                    cache_write: None,
+                    cache_write: total
+                        .get("cache_write_input_tokens")
+                        .and_then(Value::as_u64),
                     output: number(total, "output_tokens"),
                     reasoning: number(total, "reasoning_output_tokens"),
                     context_left,
@@ -713,8 +768,10 @@ pub fn person_words(blocks: &[Value]) -> Option<(String, Vec<Clip>)> {
 }
 
 /// A `compacted` record as Codex writes it: named by the context window it opens
-/// (`window_id`), else where it is; who made it unrecorded. `latest_token_usage_record`
-/// is the last response's before it, whose `total_tokens` Codex counts as the context's.
+/// (`window_id`), else where it is; who made it and why unrecorded.
+/// `latest_token_usage_record` is the last response's before it, whose `total_tokens` Codex
+/// counts as the context's; the context after it is the `token_count` Codex sends next
+/// ([`State::settle`]).
 fn compacted(place: &Place<'_>, payload: &Value) -> Event {
     Event::Compacted {
         at: place.at,
@@ -863,7 +920,87 @@ mod tests {
                 &mut out,
             );
         }
+        state.settle(&mut out);
         out
+    }
+
+    /// Each response Codex saw complete is counted on its own, by its id, cache writes
+    /// included; a compaction says the context before it and the count Codex makes of
+    /// what it left, past the records Codex writes with it.
+    #[test]
+    fn responses_count_on_their_own_and_compactions_say_what_they_left() {
+        let events = read(&[
+            json!({"timestamp":"2026-10-09T09:40:00Z","type":"turn_context","payload":{"turn_id":"t","model":"gpt-6.1-sol"}}),
+            json!({"timestamp":"2026-10-09T09:40:01Z","type":"token_usage_record","payload":{"thread_id":"x","turn_id":"t","session_id":"x","root_turn_id":"t","response_id":"resp_1","usage":{"input_tokens":100,"cached_input_tokens":40,"cache_write_input_tokens":60,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":110},"turn_token_usage":{},"thread_token_usage":{}}}),
+            json!({"timestamp":"2026-10-09T09:40:01Z","type":"token_usage_record","payload":{"response_id":"resp_0","usage":{"input_tokens":7,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0,"total_tokens":8}}}),
+            json!({"timestamp":"2026-10-09T09:40:02Z","type":"compacted","payload":{"message":"so far","window_id":"w2","latest_token_usage_record":{"usage":{"total_tokens":9000}}}}),
+            json!({"timestamp":"2026-10-09T09:40:02Z","type":"world_state","payload":{}}),
+            json!({"timestamp":"2026-10-09T09:40:02Z","type":"turn_context","payload":{"turn_id":"t","model":"gpt-6.1-sol"}}),
+            json!({"timestamp":"2026-10-09T09:40:02Z","type":"event_msg","payload":{"type":"thread_settings_applied"}}),
+            json!({"timestamp":"2026-10-09T09:40:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":107,"cached_input_tokens":40,"cache_write_input_tokens":60,"output_tokens":11,"reasoning_output_tokens":5,"total_tokens":118},"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":1200},"model_context_window":10000}}}),
+            json!({"timestamp":"2026-10-09T09:40:04Z","type":"compacted","payload":{"message":"again","window_id":"w3"}}),
+        ]);
+        let counts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Tokens {
+                    count,
+                    response,
+                    input,
+                    cached,
+                    cache_write,
+                    output,
+                    reasoning,
+                    ..
+                } => Some((
+                    *count,
+                    response.as_deref(),
+                    *input,
+                    *cached,
+                    *cache_write,
+                    *output,
+                    *reasoning,
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                (Count::Response, Some("resp_1"), 100, 40, Some(60), 10, 5),
+                (Count::Response, Some("resp_0"), 7, 0, None, 1, 0),
+                (Count::Total, None, 107, 40, Some(60), 11, 5),
+            ]
+        );
+        let compactions: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Compacted {
+                    id,
+                    tokens_before,
+                    tokens_after,
+                    ..
+                } => Some((id.as_str(), *tokens_before, *tokens_after)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            compactions,
+            [("w2", Some(9000), Some(1200)), ("w3", None, None)]
+        );
+        let total = events.iter().position(|event| {
+            matches!(
+                event,
+                Event::Tokens {
+                    count: Count::Total,
+                    ..
+                }
+            )
+        });
+        let first = events
+            .iter()
+            .position(|event| matches!(event, Event::Compacted { .. }));
+        assert_eq!(first.zip(total).map(|(c, t)| c + 1 == t), Some(true));
     }
 
     fn failure(events: &[Event]) -> Option<&Failure> {
