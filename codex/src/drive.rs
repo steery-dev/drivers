@@ -10,10 +10,10 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
-    Act, Beyond, Door, Ended, Event, Execution, FailureKind, Held, HeldBy, Holder, HolderStop,
-    Launch, Look, Looked, Marked, Model, Models, Pick, Picked, ReadAs, Reader, ReaderPlan,
-    ReaderRead, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Said, Sampled, Say, SayMode, Start,
-    Stdin, Stop, Stopped, Stream, Terminal, TerminalCommand, Text, TurnLine, TurnRead, TurnState,
+    Act, Beyond, Door, Ended, Execution, FailureKind, Held, HeldBy, Holder, HolderStop, Launch,
+    Look, Looked, Marked, Model, Models, Pick, Picked, ReadAs, Reader, ReaderPlan, ReaderRead,
+    ReaderTools, Receipt, ReceiptFind, ReceiptMark, Said, Sampled, Say, SayMode, Start, Stdin,
+    Stop, Stopped, Stream, Terminal, TerminalCommand, Text, TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
@@ -78,7 +78,7 @@ enum Halt {
 
 impl Drive {
     /// The home a thread's rollout is filed under: `<home>/sessions/<yyyy>/<mm>/<dd>/`.
-    pub(crate) fn thread_home(&self, thread: &str) -> Result<PathBuf, Error> {
+    fn thread_home(&self, thread: &str) -> Result<PathBuf, Error> {
         let file = self.store.current(thread)?;
         let sessions = file
             .ancestors()
@@ -1168,7 +1168,7 @@ pub async fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let codex = binary()?;
     let known = features(&codex).await?;
     let off: Vec<&str> = taken(reader.tools, &known).collect();
-    let servers = servers(&codex, None, &reader.cwd, &off).await?;
+    let servers = servers(&codex, &reader.cwd, &off).await?;
     planned(&codex, &known, &servers, reader)
 }
 
@@ -1230,10 +1230,7 @@ fn planned(
 }
 
 /// The features a reader with `tools` takes away, of those this Codex knows.
-pub(crate) fn taken(
-    tools: ReaderTools,
-    known: &[String],
-) -> impl Iterator<Item = &'static str> + '_ {
+fn taken(tools: ReaderTools, known: &[String]) -> impl Iterator<Item = &'static str> + '_ {
     let taken = match tools {
         ReaderTools::None => TAKEN,
         ReaderTools::Read => LOOK_TAKEN,
@@ -1245,18 +1242,13 @@ pub(crate) fn taken(
 }
 
 /// The MCP servers the read would reach from `cwd` with the features `off` taken away, as
-/// `codex mcp list --json` names them under the home `root` where given: each is turned off
-/// for the read, since `-c mcp_servers={}` merges into them rather than replacing them
-/// (Codex 0.163). Listed without `off`, it would name a plugin's servers, which `--disable
-/// plugins` already drops, and whose override alone is no server (`invalid transport`). A
-/// name a dotted override cannot spell is refused.
-pub(crate) async fn servers(
-    codex: &Path,
-    root: Option<&Path>,
-    cwd: &Path,
-    off: &[&str],
-) -> Result<Vec<String>, Error> {
-    let listed = crate::mcp::listed(codex, root, cwd, off).await?;
+/// `codex mcp list --json` names them: each is turned off for the read, since
+/// `-c mcp_servers={}` merges into them rather than replacing them (Codex 0.163). Listed
+/// without `off`, it would name a plugin's servers, which `--disable plugins` already
+/// drops, and whose override alone is no server (`invalid transport`). A name a dotted
+/// override cannot spell is refused.
+async fn servers(codex: &Path, cwd: &Path, off: &[&str]) -> Result<Vec<String>, Error> {
+    let listed = crate::mcp::listed(codex, None, cwd, off).await?;
     let mut names = Vec::new();
     for server in &listed {
         let name = server
@@ -1279,7 +1271,7 @@ pub(crate) async fn servers(
 }
 
 /// The features this Codex knows, as `codex features list` names them, one per line.
-pub(crate) async fn features(codex: &Path) -> Result<Vec<String>, Error> {
+async fn features(codex: &Path) -> Result<Vec<String>, Error> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         steery_driver_common::program::helper(codex)
@@ -1392,7 +1384,7 @@ fn quoted(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use steery_sdk::wire::harness::{Count, Voice};
+    use steery_sdk::wire::harness::{Count, Event, Voice};
 
     fn line(stream: Stream, line: &str, delivery: Option<&str>) -> TurnLine {
         turn_line(TurnRead {
