@@ -58,12 +58,13 @@ fn now() -> u64 {
 /// `held`: the process Claude Code's registry names in the conversation holds it,
 /// through the inbox it opens where it opens one, which keeps its own model. Each is
 /// stopped exactly: a background session through Claude Code's own `claude stop`, which
-/// keeps the conversation and asks nobody (its owner token); a terminal by the runtime's
-/// stop ladder, once its person confirmed that very process. Claude Code opens its
-/// transcript only to append to it, so the kernel says nothing between writes, and the
-/// registry is what holds it. A process the registry does not name — a session with
-/// messaging off, an app with it loaded — that holds or names the transcripts is
-/// somewhere this driver cannot speak to or stop, and is never signalled.
+/// keeps the conversation and asks nobody (its owner token, while a turn runs; between its
+/// turns its owner runs none, and Steery's own words may go in through its inbox); a
+/// terminal by the runtime's stop ladder, once its person confirmed that very process.
+/// Claude Code opens its transcript only to append to it, so the kernel says nothing
+/// between writes, and the registry is what holds it. A process the registry does not
+/// name — a session with messaging off, an app with it loaded — that holds or names the
+/// transcripts is somewhere this driver cannot speak to or stop, and is never signalled.
 pub fn held(root: &Path, store: &Store, held: Held) -> HeldBy {
     let dir = registry::dir(root);
     match registry::live(&dir, &held.external_id) {
@@ -91,6 +92,7 @@ fn held_by(
     started: impl Fn(u32) -> Option<u64>,
 ) -> Holder {
     let door = live.socket.is_some().then_some(Door::Keeps);
+    let between_turns = live.status.as_deref() == Some("idle");
     let stop = match (u32::try_from(live.pid), live.job) {
         (Ok(pid), Some(job)) => match started(pid).and_then(|start| {
             Job {
@@ -101,6 +103,7 @@ fn held_by(
             }
             .token()
         }) {
+            Some(_) if between_turns => HolderStop::Owner(None),
             Some(token) => HolderStop::Owner(Some(token)),
             // A process whose start cannot be read is one ending.
             None => {
@@ -291,10 +294,22 @@ pub async fn stop(root: &Path, store: &Store, says: &Says, stop: Stop) -> Result
         return Ok(stopped);
     }
     let token = match stop.holder {
+        // An owner that ran no turn as `held` read it is the background session in it now,
+        // which a turn may have begun in since, and which a stop still ends.
         Holder::Person {
-            stop: HolderStop::Owner(Some(token)),
+            stop: HolderStop::Owner(token),
             ..
-        } => token,
+        } => match token.or_else(|| {
+            registry::job(&registry::dir(root), &stop.external_id).and_then(|job| job.token())
+        }) {
+            Some(token) => token,
+            None => {
+                return Ok(Stopped {
+                    stopped: false,
+                    proof: Some("no Claude Code background session is in it now".into()),
+                });
+            }
+        },
         _ if stop.say.is_some() => {
             return Err(Error::refused(
                 refusal::NOT_STOPPED,
@@ -887,19 +902,28 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
     }
     let (args, line) = match &terminal.holder {
         Some(Holder::Person {
-            stop: HolderStop::Owner(Some(token)),
+            stop: HolderStop::Owner(token),
             ..
-        }) => match Job::of(token).filter(|job| plain_job(&job.job)) {
-            Some(job) => (
-                format!("attach {}", job.job),
-                Some(IN_BACKGROUND.to_owned()),
-            ),
-            None => {
-                return Err(Error::invalid(
-                    "the owner token names no background session",
-                ));
+        }) => {
+            // Between its turns, the background session in it now.
+            let job = match token {
+                Some(token) => Job::of(token),
+                None => registry::job(&registry::dir(root), id),
+            };
+            match job.filter(|job| plain_job(&job.job)) {
+                Some(job) => (
+                    format!("attach {}", job.job),
+                    Some(IN_BACKGROUND.to_owned()),
+                ),
+                None if token.is_some() => {
+                    return Err(Error::invalid(
+                        "the owner token names no background session",
+                    ));
+                }
+                // Gone since: nobody holds it.
+                None => (format!("--resume {id}"), None),
             }
-        },
+        }
         Some(Holder::Person {
             stop: HolderStop::Process { pid, .. },
             ..
@@ -1028,7 +1052,8 @@ mod tests {
     /// The process Claude Code's registry names in a conversation holds it, through the
     /// inbox it opens where it opens one, which keeps its own model. Each is stopped
     /// exactly: a background session through `claude stop`, asking nobody; a terminal by
-    /// the ladder, once its person confirmed that very process.
+    /// the ladder, once its person confirmed that very process. A background session
+    /// between its turns is an owner that runs none, whatever its turn before came to.
     #[test]
     fn who_holds_a_conversation_follows_its_registry() {
         let me = std::process::id();
@@ -1065,13 +1090,43 @@ mod tests {
             panic!("a background session is stopped by Claude Code's own `claude stop`");
         };
         assert_eq!(Job::of(&token).unwrap().job, "6920e989");
-        assert!(matches!(
-            held_by("s", session(None, Some("6920e989")), |_| None),
+        for status in ["busy", "waiting"] {
+            let running = Live {
+                status: Some(status.into()),
+                ..session(Some("/tmp/cc-socks/41.sock"), Some("6920e989"))
+            };
+            assert!(
+                matches!(
+                    held_by("s", running, started),
+                    Holder::Person {
+                        stop: HolderStop::Owner(Some(_)),
+                        ..
+                    }
+                ),
+                "a turn runs while it is {status}"
+            );
+        }
+        let between = Live {
+            status: Some("idle".into()),
+            ..session(Some("/tmp/cc-socks/41.sock"), Some("6920e989"))
+        };
+        assert_eq!(
+            held_by("s", between.clone(), started),
             Holder::Person {
-                stop: HolderStop::Beyond(_),
-                ..
-            }
-        ));
+                door: Some(Door::Keeps),
+                stop: HolderStop::Owner(None),
+            },
+            "its turn ended, failed or not: Steery's words go in through its inbox"
+        );
+        for ending in [session(None, Some("6920e989")), between] {
+            assert!(matches!(
+                held_by("s", ending, |_| None),
+                Holder::Person {
+                    stop: HolderStop::Beyond(_),
+                    ..
+                }
+            ));
+        }
     }
 
     /// A listing that names nothing of a conversation nobody is registered in says it is
