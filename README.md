@@ -269,8 +269,13 @@ What each driver does:
 - **Setup** (`setup/plan`). It plans the skill, Steery's plugin and, in omp, the MCP entry
   in `mcp.json`. The plugin is a loader in `extensions/steery.ts` plus the copy of the
   extension it runs, kept in the runtime's config folder. In pi the plugin carries the MCP
-  entry and registers it for each conversation, with headers naming that conversation.
-  Where omp and pi are both installed and share one folder, neither is set up.
+  entry and registers it for each conversation (`exposure: direct`, so pi's model is given
+  each tool by name), with headers naming that conversation. A `steery` server in pi's own
+  `mcp.json`, or in the `.pi/mcp.json` of a folder pi trusts, wins over it with no headers,
+  and the plan notes each one it finds. A pi started while the runtime is down waits its
+  own 10 s for the entry and runs without Steery; the plugin connects the entry again once
+  the door is back. Where omp and pi are both installed and share one folder, neither is
+  set up.
 - **Moments** (`hook/read`). The plugin forwards each moment the harness gives it over the
   door, and the driver reads it as a Moment.
 - **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
