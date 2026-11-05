@@ -420,11 +420,7 @@ async fn follow(
                 if short_of_done
                     && let Some(error) = end.as_ref().and_then(failed_on).or_else(|| {
                         let session = entry.get("sessionId").and_then(Value::as_str)?;
-                        let transcript = crate::transcripts::Store::new(root.to_owned())
-                            .session(session)
-                            .ok()?
-                            .transcripts
-                            .pop()?;
+                        let transcript = taking.store.transcript(session).ok()?;
                         stopped_on(&transcript, 0)
                     })
                     && let Some(object) = entry.as_object_mut()
@@ -437,7 +433,7 @@ async fn follow(
                 // Each line says whether the transcript showed the words taken yet, where
                 // they carry a delivery to know them by, and a look that first shows them
                 // says the entry again.
-                let newly = taking.look(root, &entry);
+                let newly = taking.look(&entry);
                 let took = taking.delivery.is_some().then_some(taking.took);
                 if follow.settled_by(&entry, ended) {
                     return say(out, json!({ "settled": entry, "took": took }));
@@ -473,34 +469,44 @@ fn say(out: &mut impl Write, line: Value) -> Result<(), String> {
 struct Taking {
     /// The delivery the words carry; none where they carry no marker.
     delivery: Option<String>,
+    /// Claude Code's transcripts, kept from look to look: it lists a folder again only once
+    /// the folder changed, so a look for a transcript not yet written stats the folders
+    /// rather than listing every one of them each second.
+    store: crate::transcripts::Store,
     /// The transcript, once known, and where it was last read to.
     read: Option<(PathBuf, receipt::End)>,
+    /// Looks in a row that could not read on from `read`.
+    failed: u32,
     took: bool,
 }
+
+/// Looks in a row that may fail on the same part of a transcript before it is read past: a
+/// file being replaced reads again, a malformed record or a marker carried twice stays.
+const FAILED_LOOKS: u32 = 3;
 
 impl Taking {
     /// Before the launch: the delivery `words` carry, and where the transcript of the
     /// conversation `id` the launch goes on in ends now.
     fn before(words: &str, root: &Path, id: Option<&str>) -> Self {
+        let store = crate::transcripts::Store::new(root.to_owned());
         let read = id.and_then(|id| {
-            let path = crate::transcripts::Store::new(root.to_owned())
-                .session(id)
-                .ok()?
-                .transcripts
-                .pop()?;
+            let path = store.transcript(id).ok()?;
             let end = receipt::end(&path).ok()?;
             Some((path, end))
         });
         Self {
             delivery: delivery(words),
+            store,
             read,
+            failed: 0,
             took: false,
         }
     }
 
     /// Whether the transcript of the session `entry` lists newly shows the words taken.
-    /// Each look reads on from where the last one ended.
-    fn look(&mut self, root: &Path, entry: &Value) -> bool {
+    /// Each look reads on from where the last one ended; a look that could not read its
+    /// part of the transcript leaves it for the next, [`FAILED_LOOKS`] in a row at most.
+    fn look(&mut self, entry: &Value) -> bool {
         let Some(delivery) = self.delivery.as_deref().filter(|_| !self.took) else {
             return false;
         };
@@ -513,11 +519,7 @@ impl Taking {
             .filter(|(path, _)| path.file_stem().and_then(|stem| stem.to_str()) == Some(session))
             .map(|(path, end)| (path.clone(), *end));
         let Some((path, from)) = known.or_else(|| {
-            let path = crate::transcripts::Store::new(root.to_owned())
-                .session(session)
-                .ok()?
-                .transcripts
-                .pop()?;
+            let path = self.store.transcript(session).ok()?;
             // A transcript new to this look is read whole.
             Some((
                 path,
@@ -530,10 +532,23 @@ impl Taking {
         }) else {
             return false;
         };
-        let to = receipt::end(&path).ok();
-        self.took =
-            receipt::found(&path, &from, delivery, crate::drive::input_carries).unwrap_or(false);
-        self.read = Some((path, to.unwrap_or(from)));
+        let to = receipt::end(&path);
+        let (took, to) = match receipt::found(&path, &from, delivery, crate::drive::input_carries) {
+            Ok(took) => {
+                self.failed = 0;
+                (took, to.unwrap_or(from))
+            }
+            Err(_) if self.failed + 1 < FAILED_LOOKS => {
+                self.failed += 1;
+                (false, from)
+            }
+            Err(_) => {
+                self.failed = 0;
+                (false, to.unwrap_or(from))
+            }
+        };
+        self.took = took;
+        self.read = Some((path, to));
         self.took
     }
 }
@@ -1132,15 +1147,19 @@ mod tests {
         std::fs::write(&transcript, format!("{}\n", user("earlier words"))).unwrap();
         let mut taking = Taking::before("do it steery-delivery:d7", dir.path(), Some(session));
         let entry = json!({"sessionId": session});
-        assert!(!taking.look(dir.path(), &entry));
-        let mut file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap();
-        writeln!(file, "{}", user("do it steery-delivery:d7")).unwrap();
-        assert!(taking.look(dir.path(), &entry));
+        assert!(!taking.look(&entry));
+        // A look that cannot read on leaves the words for the next one: here a record not
+        // yet whole JSON when first read, the same bytes as they stand once written out.
+        let earlier = user("earlier words");
+        let between = user("work goes on");
+        let marked = user("do it steery-delivery:d7");
+        let broken = between.replacen('{', "[", 1);
+        std::fs::write(&transcript, format!("{earlier}\n{broken}\n{marked}\n")).unwrap();
+        assert!(!taking.look(&entry));
+        std::fs::write(&transcript, format!("{earlier}\n{between}\n{marked}\n")).unwrap();
+        assert!(taking.look(&entry));
         assert!(taking.took);
-        assert!(!taking.look(dir.path(), &entry), "taken is said once");
+        assert!(!taking.look(&entry), "taken is said once");
     }
 
     /// A `continue` into a conversation a background session holds never starts a turn
