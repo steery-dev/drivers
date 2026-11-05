@@ -123,7 +123,7 @@ impl Codex {
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 7"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 8"))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         let _ = self.home.set(params.home.clone());
         let _ = self.place.set(home::root(&params.home).map(|root| {
@@ -149,7 +149,7 @@ impl Program for Codex {
                 tint: Some("#2f7d66".into()),
                 mark: Some(MARK.into()),
             },
-            harness: Some(Box::new(info())),
+            harness: Some(Box::new(info(protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -217,8 +217,8 @@ impl Program for Codex {
     }
 }
 
-/// Codex as Steery reads it.
-fn info() -> wire::HarnessInfo {
+/// Codex as Steery reads it, under the protocol picked.
+fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
         levels: wire::Level::ALL.to_vec(),
         minimum: Some(wire::Minimum {
@@ -232,6 +232,15 @@ fn info() -> wire::HarnessInfo {
             executables: vec!["codex".into()],
             package: Some("@openai/codex".into()),
             session_variable: Some("CODEX_SESSION_ID".into()),
+            // One MCP client serves every thread Codex runs, so the entry sends no
+            // `Steery-External-Id`; since 0.158 each `tools/call` names the conversation in
+            // `_meta.sessionId` (a sub-agent's lead, as `CODEX_SESSION_ID` does) and the
+            // calling thread in `_meta.threadId`. A call made in code mode's `exec` runs no
+            // hook (openai/codex#23411), so this is the only word of whose it is.
+            call_meta: (protocol >= steery_sdk::CALL_META).then(|| wire::CallMeta {
+                session: "sessionId".into(),
+                sub_agent: Some("threadId".into()),
+            }),
         },
         setup: wire::SetupFacts {
             reads_skills: true,

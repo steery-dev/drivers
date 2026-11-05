@@ -149,7 +149,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 7"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 8"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             protocol,
@@ -292,6 +292,7 @@ fn info() -> wire::HarnessInfo {
             executables: vec!["claude".into()],
             package: Some("@anthropic-ai/claude-code".into()),
             session_variable: None,
+            call_meta: None,
         },
         // Claude Code 2.1.280, read in its own code: a tool's description is kept to
         // `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` characters, 2,048 when unset, then
