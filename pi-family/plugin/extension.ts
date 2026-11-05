@@ -176,9 +176,10 @@ const CACHED_HOUR_MS = 60 * 60_000;
  * comes before it and the call after wrote it to the cache again; after these it stays
  * cached, its breakpoint kept ([`unanchored`]). Through omp on 2026-10-16, the call after a
  * new summary read 22,427 tokens from the cache and wrote 1,369 with both; with either
- * missing it read 8,339, the tools alone, and wrote about 15,400.
+ * missing it read 8,339, the tools alone, and wrote about 15,400. A bare marker: the summary
+ * after it, Steery's or the harness's own, says what it is.
  */
-const OPENING = "This conversation was compacted: the next message summarises its earlier work.";
+const OPENING = "Earlier work follows.";
 const OPENED = "Understood.";
 
 /** The fields of a message and its parts whose characters a model reads. */
