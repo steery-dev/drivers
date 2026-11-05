@@ -5,7 +5,8 @@
 //! (`agentMessage`, `reasoning`, by the item's id, which is the rollout record's), its shell
 //! and MCP calls (by the item's id, which is the call's `call_id`), the thread's running
 //! total (`thread/tokenUsage/updated`, the rollout's `token_count` numbers), what it runs on
-//! (the thread's model as the app server opened it, and `model/rerouted`), and its title
+//! (the thread's model as the app server opened it, the model and thinking a turn asked
+//! for, `thread/settings/updated`, and `model/rerouted`), and its title
 //! (`thread/name/updated`). Each is stamped as the app server stamped its line
 //! (`emittedAtMs`); a line it did not stamp says no event.
 //!
@@ -108,6 +109,22 @@ impl Heard {
                 self.settings(at, out);
             }
             "turn/completed" => self.ended(params.get("turn")?, at, out),
+            // The settings a turn asked for (Codex 0.166: `turn/start`'s model and effort),
+            // said before its `turn/started`: the whole of them, so an effort of null is the
+            // model's own default, no level.
+            "thread/settings/updated" => {
+                let settings = params.get("threadSettings")?;
+                if let Some(model) = text(settings, "model").filter(|model| !model.is_empty()) {
+                    self.model = Some(model.to_owned());
+                }
+                if let Some(provider) = text(settings, "modelProvider").filter(|p| !p.is_empty()) {
+                    self.provider = Some(provider.to_owned());
+                }
+                if settings.get("effort").is_some() {
+                    self.effort = text(settings, "effort").filter(|e| !e.is_empty()).map(str::to_owned);
+                }
+                self.settings(at, out);
+            }
             "model/rerouted" => {
                 if let Some(model) = text(params, "toModel").filter(|model| !model.is_empty()) {
                     self.model = Some(model.to_owned());

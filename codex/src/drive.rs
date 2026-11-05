@@ -1542,6 +1542,41 @@ mod tests {
             r#"{"method":"thread/name/updated","params":{"threadId":"01a158a8","threadName":"Read a.txt"}}"#,
         );
         assert_eq!(named.title.as_deref(), Some("Read a.txt"));
+
+        // A turn asking for another model and thinking (Codex 0.166) says them as its
+        // settings before it begins: what it runs on from then, its tokens' model too.
+        let asked = said(
+            r#"{"method":"thread/settings/updated","params":{"threadId":"01a158a8","threadSettings":{"model":"gpt-5.6-terra","modelProvider":"openai","effort":"high"}},"emittedAtMs":1792488780000}"#,
+        );
+        assert_eq!(
+            asked.events,
+            vec![Event::Model {
+                at: 1792488780000,
+                model: "gpt-5.6-terra".into(),
+                provider: Some("openai".into()),
+                thinking: Some("high".into())
+            }]
+        );
+        let again = said(
+            r#"{"method":"turn/started","params":{"threadId":"01a158a8","turn":{"id":"01a158a8-04ef","status":"inProgress"}},"emittedAtMs":1792488780001}"#,
+        );
+        assert!(
+            matches!(again.events.as_slice(), [Event::TurnBegan { .. }]),
+            "what it runs on is said once"
+        );
+        let spent = said(
+            r#"{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"totalTokens":220000,"inputTokens":219800,"cachedInputTokens":0,"outputTokens":200,"reasoningOutputTokens":80},"last":{"totalTokens":24000},"modelContextWindow":258400}},"emittedAtMs":1792488781000}"#,
+        );
+        assert!(
+            matches!(spent.events.as_slice(), [Event::Tokens { model: Some(model), .. }] if model == "gpt-5.6-terra")
+        );
+        let plain = said(
+            r#"{"method":"thread/settings/updated","params":{"threadId":"01a158a8","threadSettings":{"model":"gpt-5.6-terra","modelProvider":"openai","effort":null}},"emittedAtMs":1792488782000}"#,
+        );
+        assert!(
+            matches!(plain.events.as_slice(), [Event::Model { thinking: None, .. }]),
+            "an effort of null is the model's default"
+        );
     }
 
     fn asked(tools: ReaderTools, model: Option<&str>) -> Reader {
