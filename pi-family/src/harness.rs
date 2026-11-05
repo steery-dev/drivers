@@ -126,6 +126,9 @@ impl Harness {
                 // pi puts `PI_SESSION_ID` only on the shells its agent runs, never on its
                 // own process, so the variable inherited by a pi names no lead.
                 session_variable: None,
+                // The extension registers the MCP entry per session with headers naming
+                // it, so a call's `_meta` is not read.
+                call_meta: None,
             },
             setup: wire::SetupFacts {
                 reads_skills: true,

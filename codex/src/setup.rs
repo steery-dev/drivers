@@ -85,7 +85,9 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
     let config = root.join("config.toml");
     let mut entries = vec![
         // Codex ends a tool call at 300 seconds unless the server's entry says otherwise.
-        // A Codex table is a URL and has nowhere to put a transport.
+        // A Codex table is a URL and has nowhere to put a transport. Its one MCP client
+        // serves every thread, so the header names the harness alone and each call's
+        // `_meta` the conversation (`identity.call_meta`).
         Entry {
             path: config.clone(),
             format: Format::Toml,
@@ -94,6 +96,7 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
                 "url": setup.mcp_url,
                 "tool_timeout_sec": setup.timeout,
                 "default_tools_approval_mode": "approve",
+                "http_headers": {"Steery-Harness": "codex"},
             }),
             carries: vec![Part::Mcp],
         },
