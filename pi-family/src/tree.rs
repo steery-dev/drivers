@@ -45,7 +45,7 @@ impl Shape for Entries {
         let head = match serde_json::from_slice::<Head>(line) {
             Ok(head) => head,
             Err(error) if !error.is_data() => return Ok(()),
-            Err(_) => return Err("that transcript has a record that is no entry".into()),
+            Err(_) => return Err("that transcript has a record that is not an entry".into()),
         };
         match head.kind.as_str() {
             "title" => return Ok(()),
@@ -54,7 +54,7 @@ impl Shape for Entries {
                     return Err("that transcript has more than one session header".into());
                 }
                 self.version = Some(Some(head.version.unwrap_or(1)).filter(|v| *v > 0).ok_or(
-                    "that transcript's session header names no version there is".to_owned(),
+                    "that transcript's session header names an invalid version".to_owned(),
                 )?);
                 return Ok(());
             }
@@ -63,7 +63,7 @@ impl Shape for Entries {
         let version = self
             .version
             .ok_or("that transcript has no session header")?;
-        let full = || "that transcript holds more entries than can be read".to_owned();
+        let full = || "that transcript holds more entries than the driver can read".to_owned();
         if version == 1 {
             tree.add(start, end, tree.last()).ok_or_else(full)?;
             return Ok(());
@@ -80,7 +80,7 @@ impl Shape for Entries {
         };
         let at = tree.add(start, end, parent).ok_or_else(full)?;
         if !tree.name(id, at) {
-            return Err("that transcript gives two entries one id".into());
+            return Err("that transcript gives one id to two entries".into());
         }
         Ok(())
     }

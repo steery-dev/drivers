@@ -67,8 +67,8 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
             refused,
             entries: Vec::new(),
             notes: vec![
-                "Not installed here: no executable found, and a configuration directory is not \
-                 evidence of one."
+                "Not installed here. The driver found no executable. A configuration directory \
+                 does not prove that an executable is installed."
                     .into(),
             ],
             install,
@@ -78,7 +78,9 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
     let mut notes = Vec::new();
     let release = release(&binary).await;
     if release.is_none() {
-        notes.push("`--version` named no release, so nothing about this build is claimed.".into());
+        notes.push(
+            "`--version` named no release, so the driver says nothing about this build.".into(),
+        );
     }
     notes.extend(crate::home::others_note(&binary));
     let hooks_file = root.join("hooks.json");
@@ -140,13 +142,14 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
             carries: vec![Part::Hooks],
         })),
         Err(why) => notes.push(format!(
-            "Codex did not list its hooks ({why}), so no trust a moved Steery hook lost is put back."
+            "Codex did not list its hooks ({why}). The driver did not restore the trust that a \
+             moved Steery hook lost."
         )),
     }
     notes.push(
-        "Codex runs no hook a person has not trusted: open `/hooks` inside Codex once and trust \
-         the Steery entries. Until then its conversations are seen from outside and it hands \
-         nothing over."
+        "Codex runs no hook that a person has not trusted. Open `/hooks` inside Codex once and \
+         trust the Steery entries. Until then, Steery reads its conversations only from outside, \
+         and Codex hands nothing over."
             .into(),
     );
     Ok(Planned {

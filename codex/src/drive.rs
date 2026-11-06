@@ -25,7 +25,8 @@ use crate::says::{self, Taken, Waiting};
 
 /// What a thread an app server has loaded with no window owning it says: the app is never
 /// quit for one thread, since it serves every other it has (decided 2026-10-06).
-const APP_LOADED: &str = "app has it loaded with no window: open it in a Codex window, or Fork";
+const APP_LOADED: &str =
+    "The Codex app has it loaded with no window. Open it in a Codex window, or use Fork.";
 /// How much of a rollout's end is read for where its conversation stands.
 pub(crate) const LATEST: u64 = 256 * 1024;
 /// The stop's graceful step must be done within the runtime's bound for `stop`.
@@ -51,7 +52,7 @@ pub(crate) fn binary() -> Result<PathBuf, Error> {
 fn uuid(id: &str) -> Result<(), Error> {
     uuid::Uuid::parse_str(id)
         .map(|_| ())
-        .map_err(|_| Error::refused(refusal::NOT_FOUND, format!("{id} is no Codex thread")))
+        .map_err(|_| Error::refused(refusal::NOT_FOUND, format!("{id} is not a Codex thread")))
 }
 
 /// The native owner of a thread now, and the turn it runs.
@@ -253,18 +254,18 @@ impl Drive {
         };
         if start.act != Act::New {
             let id = start.external_id.as_deref().ok_or_else(|| {
-                Error::invalid(format!("a {act} names the conversation it acts on"))
+                Error::invalid(format!("a {act} must name the conversation it acts on"))
             })?;
             uuid(id)?;
             self.store.current(id)?;
         }
         if !start.cwd.is_absolute() || !start.folder.is_absolute() {
-            return Err(Error::invalid("the folders are absolute paths"));
+            return Err(Error::invalid("the folders must be absolute paths"));
         }
         let program = std::env::current_exe().map_err(|e| {
             Error::refused(
                 refusal::START_FAILED,
-                format!("this driver's own path: {e}"),
+                format!("cannot find this driver's own path: {e}"),
             )
         })?;
         let asked = crate::turn::Asked {
@@ -415,12 +416,13 @@ impl Drive {
                 Taken::Turn(took) if took == turn => {}
                 Taken::Turn(took) => {
                     return Ok(Halt::Other(format!(
-                        "Codex runs turn {turn}; say {say}'s words went into turn {took}"
+                        "Codex runs turn {turn}. The words of say {say} went into turn {took}."
                     )));
                 }
                 Taken::Waiting | Taken::Unknown => {
                     return Ok(Halt::Other(format!(
-                        "Codex runs turn {turn}; which turn took say {say}'s words is not known"
+                        "Codex runs turn {turn}. The driver does not know which turn took the \
+                         words of say {say}."
                     )));
                 }
             }
@@ -560,10 +562,7 @@ impl Drive {
         if say.mode == SayMode::Immediate
             && let Some(Owned::Window(Some(_)) | Owned::Queue(Some(_))) = self.owned(thread).await
         {
-            return Err(Error::refused(
-                refusal::HARNESS_BUSY,
-                "Codex is running a turn in it",
-            ));
+            return Err(Error::refused(refusal::HARNESS_BUSY, "Codex runs a turn in it"));
         }
         let waiting = match &say.id {
             Some(id) => self.waiting(thread, &say.words, id).await,
@@ -818,7 +817,7 @@ impl Drive {
             .cwd
             .to_str()
             .filter(|_| terminal.cwd.is_absolute())
-            .ok_or_else(|| Error::invalid("the folder is no absolute UTF-8 path"))?;
+            .ok_or_else(|| Error::invalid("the folder is not an absolute UTF-8 path"))?;
         let mut command = format!("cd {} && ", quoted(cwd));
         if home != crate::home::default_root(&self.home) {
             let home = home
@@ -829,12 +828,15 @@ impl Drive {
         command.push_str(&format!("codex resume {id}"));
         let line = match &terminal.holder {
             Some(Holder::Person { door: Some(_), .. }) => Some(
-                "The Codex app has it open; a terminal beside it is refused while the app writes it."
+                "The Codex app has it open. A terminal beside it cannot resume it while the app \
+                 writes it."
                     .to_owned(),
             ),
-            Some(Holder::Person { .. }) => {
-                Some("Codex has it open already; a second one is refused while it writes.".to_owned())
-            }
+            Some(Holder::Person { .. }) => Some(
+                "Codex has it open already. A second Codex cannot resume it while the first \
+                 writes it."
+                    .to_owned(),
+            ),
             _ => None,
         };
         Ok(TerminalCommand {
@@ -963,7 +965,7 @@ fn offered(listed: &[Model], pick: &Pick, model: &str) -> Result<(), Error> {
     if pick.model.is_some() && offer.is_none() {
         return Err(Error::refused(
             refusal::MODEL_MISSING,
-            format!("Codex lists no {model} here"),
+            format!("Codex does not list {model} here"),
         ));
     }
     if let (Some(thinking), Some(offer)) = (&pick.thinking, offer)
@@ -972,7 +974,7 @@ fn offered(listed: &[Model], pick: &Pick, model: &str) -> Result<(), Error> {
     {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
-            format!("{model} takes no effort {thinking}"),
+            format!("{model} does not take the effort {thinking}"),
         ));
     }
     Ok(())
@@ -1262,7 +1264,7 @@ async fn servers(codex: &Path, cwd: &Path, off: &[&str]) -> Result<Vec<String>, 
         {
             return Err(Error::refused(
                 refusal::REFUSED,
-                format!("Codex's MCP server {name:?} cannot be turned off for one read"),
+                format!("the driver cannot disable Codex's MCP server {name:?} for one read"),
             ));
         }
         names.push(name.to_owned());
@@ -1286,7 +1288,7 @@ async fn features(codex: &Path) -> Result<Vec<String>, Error> {
             "`codex features list` did not answer in time",
         )
     })?
-    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex would not start: {e}")))?;
+    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex did not start: {e}")))?;
     if !output.status.success() {
         return Err(Error::refused(
             refusal::REFUSED,
@@ -1330,7 +1332,7 @@ pub fn reader_read(read: ReaderRead) -> Result<Text, Error> {
     said.map(|text| Text { text }).ok_or_else(|| {
         Error::refused(
             refusal::NO_ANSWER,
-            failed.unwrap_or_else(|| "the reader said nothing that reads as an answer".into()),
+            failed.unwrap_or_else(|| "the reader gave no text that is an answer".into()),
         )
     })
 }

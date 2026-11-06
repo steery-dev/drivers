@@ -130,12 +130,13 @@ impl Turn {
 
     /// The turn [`Turn::args`] says.
     pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let binary = PathBuf::from(args.next().ok_or("the turn names no claude")?);
+        let binary =
+            PathBuf::from(args.next().ok_or("the turn does not name a claude executable")?);
         let act = match args.next().as_deref() {
             Some("continue") => Act::Continue,
             Some("fork") => Act::Fork,
             Some("new") => Act::New,
-            other => return Err(format!("no act a turn runs: {other:?}")),
+            other => return Err(format!("a turn does not run the act {other:?}")),
         };
         let mut turn = Self {
             binary,
@@ -147,14 +148,14 @@ impl Turn {
             reads: Vec::new(),
         };
         while let Some(arg) = args.next() {
-            let mut value = || args.next().ok_or(format!("{arg} takes a value"));
+            let mut value = || args.next().ok_or(format!("{arg} needs a value"));
             match arg.as_str() {
                 "--worktree" => turn.worktree = true,
                 "--model" => turn.model = Some(value()?),
                 "--thinking" => turn.thinking = Some(value()?),
                 "--reads" => turn.reads.push(PathBuf::from(value()?)),
                 id if turn.id.is_none() && !id.starts_with('-') => turn.id = Some(id.to_owned()),
-                other => return Err(format!("no argument a turn takes: {other}")),
+                other => return Err(format!("a turn does not take the argument {other}")),
             }
         }
         Ok(turn)
@@ -187,9 +188,9 @@ impl Turn {
                 args.extend(["--resume".into(), id.into(), "--fork-session".into()]);
             }
             (Act::Continue | Act::Fork, None) => {
-                return Err("a continue or a fork names the conversation it acts on".into());
+                return Err("a continue or a fork must name the conversation it acts on".into());
             }
-            (Act::Hand, _) => return Err("a hand over is no turn".into()),
+            (Act::Hand, _) => return Err("a hand over is not a turn".into()),
         }
         if self.worktree && self.act != Act::Continue {
             args.push("-w".into());
@@ -257,10 +258,10 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
     let ran = (|| {
         let turn = Turn::parse(args)?;
         let words = std::io::read_to_string(std::io::stdin())
-            .map_err(|e| format!("reading the words: {e}"))?;
+            .map_err(|e| format!("cannot read the words: {e}"))?;
         let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
         let root = crate::root(Path::new(&home))?;
-        let place = std::env::current_dir().map_err(|e| format!("finding the place: {e}"))?;
+        let place = std::env::current_dir().map_err(|e| format!("cannot find the place: {e}"))?;
         let bypass = bypass_accepted(Path::new(&home), &root, &place);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -268,7 +269,7 @@ pub fn run(args: impl Iterator<Item = String>) -> std::process::ExitCode {
             .map_err(|e| e.to_string())?
             .block_on(async {
                 use tokio::signal::unix::{SignalKind, signal};
-                let hear = |kind| signal(kind).map_err(|e| format!("hearing signals: {e}"));
+                let hear = |kind| signal(kind).map_err(|e| format!("cannot hear signals: {e}"));
                 let mut term = hear(SignalKind::terminate())?;
                 let mut int = hear(SignalKind::interrupt())?;
                 let mut hup = hear(SignalKind::hangup())?;
@@ -373,8 +374,8 @@ async fn follow(
         }
         let note = said.lines().find(|line| agents::copied(line)).unwrap_or_default();
         return Err(format!(
-            "{}: the copy Claude Code started instead of going on in session {} was stopped \
-             and removed",
+            "{}: Claude Code started a copy and did not continue session {}. The driver stopped \
+             and removed the copy.",
             note.trim(),
             turn.id.as_deref().unwrap_or_default()
         ));
@@ -398,7 +399,7 @@ async fn follow(
                 let since = *unlisted_since.get_or_insert_with(tokio::time::Instant::now);
                 if since.elapsed() >= UNLISTED_FOR {
                     return Err(format!(
-                        "{error}, and for {} s no listing came",
+                        "{error}, and no listing came for {} s",
                         since.elapsed().as_secs()
                     ));
                 }
@@ -449,7 +450,7 @@ async fn follow(
                 ));
             }
             None if tokio::time::Instant::now() >= listed_by => {
-                return Err(format!("background session {short} was never listed"));
+                return Err(format!("`claude agents` never listed background session {short}"));
             }
             None => {}
         }
@@ -460,7 +461,7 @@ async fn follow(
 fn say(out: &mut impl Write, line: Value) -> Result<(), String> {
     writeln!(out, "{line}")
         .and_then(|()| out.flush())
-        .map_err(|e| format!("writing the turn's line: {e}"))
+        .map_err(|e| format!("cannot write the turn's line: {e}"))
 }
 
 /// Whether the session took the words, as its transcript shows them: the person's input
@@ -710,7 +711,9 @@ const HALT_WITHIN: Duration = Duration::from_secs(2);
 /// turn's group too. The line says what came of it.
 async fn halt(binary: &Path, root: &Path, job: Option<&String>, signal: &str) -> String {
     let Some(job) = job else {
-        return format!("stopped by {signal} before the launch named its background session");
+        return format!(
+            "{signal} stopped the turn before the launch named its background session"
+        );
     };
     let deadline = tokio::time::Instant::now() + HALT_WITHIN + crate::drive::COMMANDS_END_WITHIN;
     let running = crate::registry::living(&crate::registry::dir(root))
@@ -721,14 +724,19 @@ async fn halt(binary: &Path, root: &Path, job: Option<&String>, signal: &str) ->
     match agents::said(binary, &["stop", job], HALT_WITHIN).await {
         Ok(out) if out.status.success() => {
             let ended = crate::drive::end_left(&running, deadline).await;
-            format!("stopped by {signal}; `claude stop {job}` ended its background session{ended}")
+            format!(
+                "{signal} stopped the turn. `claude stop {job}` ended its background \
+                 session{ended}"
+            )
         }
         Ok(out) => format!(
-            "stopped by {signal}; `claude stop {job}` did not end its background session: {}",
+            "{signal} stopped the turn. `claude stop {job}` did not end its background session: \
+             {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ),
         Err(error) => format!(
-            "stopped by {signal}; `claude stop {job}` did not end its background session: {error}"
+            "{signal} stopped the turn. `claude stop {job}` did not end its background session: \
+             {error}"
         ),
     }
 }
@@ -792,7 +800,7 @@ impl Heard {
     /// The hooks that run this binary's [`HEARD`] mode on the session's turn ends
     /// ([`ENDS`]), beside every hook its person's own settings name.
     fn hooks(&self) -> Result<Value, String> {
-        let binary = std::env::current_exe().map_err(|e| format!("finding this driver: {e}"))?;
+        let binary = std::env::current_exe().map_err(|e| format!("cannot find this driver: {e}"))?;
         let command = format!(
             "{} {HEARD} {}",
             crate::drive::quoted(text(&binary)?),

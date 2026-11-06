@@ -1532,8 +1532,8 @@ export const surfaces = {
   flags:
     HARNESS === "pi"
       ? [
-          { name: "steery-model", description: "The model Steery's runtime picked", type: "string" as const },
-          { name: "steery-thinking", description: "The thinking Steery's runtime picked", type: "string" as const },
+          { name: "steery-model", description: "The model that Steery's runtime picked", type: "string" as const },
+          { name: "steery-thinking", description: "The thinking level that Steery's runtime picked", type: "string" as const },
         ]
       : [],
 };
@@ -2003,7 +2003,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const strand = (ctx: Context) => {
     if (idle(ctx) !== true || starting || compacting) return;
     for (const say of says.filter((say) => say.running && !forcing.has(say) && say.queued_at !== undefined && say.taken_at === undefined)) {
-      lost(say, "not-taken", "its turn ended and its queue let the words go");
+      lost(say, "not-taken", "its turn ended, and its queue dropped the words");
     }
   };
 
@@ -2693,7 +2693,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       // idle now, they start a turn of their own.
       if (alone) {
         if (!quiet(ctx)) {
-          one.answer({ refused: "harness-busy", error: "the conversation is working, has words waiting, or somebody is typing" });
+          one.answer({ refused: "harness-busy", error: "a turn runs, words wait, or somebody types in the conversation" });
           return;
         }
         running = false;
@@ -2773,7 +2773,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const pick = async (ctx: Context, model: unknown, thinking: unknown): Promise<Said> => {
     const session = sessionId;
     if ((model !== undefined && typeof model !== "string") || (thinking !== undefined && typeof thinking !== "string")) {
-      return { refused: "refused", error: "model and thinking are strings" };
+      return { refused: "refused", error: "model and thinking must be strings" };
     }
     let asked = false;
     let read = false;
@@ -2789,7 +2789,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       const files = HARNESS === "pi" ? "models.json" : "models.yml";
       const remedy =
         HARNESS === "pi" ? "run /reload in it when it is idle, or restart it" : `restart omp (omp --resume ${session})`;
-      return `${HARNESS} ${why}${read ? ` (${files} read again)` : ""}: ${remedy}`;
+      return `${HARNESS} ${why}${read ? ` (it read ${files} again)` : ""}: ${remedy}`;
     };
     // The harness may change sessions while the pick waits on it. What it changed in the
     // one it left cannot be taken back: neither change the new session's settings nor
@@ -2797,8 +2797,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // free of this copy, as a conversation that ended here is.
     const moved = (changed: boolean): Said =>
       changed
-        ? { refused: "no-answer", error: "the session moved while its pick was applied" }
-        : { refused: "ending", error: "the session moved before its pick was applied" };
+        ? { refused: "no-answer", error: "the session moved while the harness applied its pick" }
+        : { refused: "ending", error: "the session moved before the harness applied its pick" };
     const lookup = (spec: string): Model | undefined => {
       const slash = spec.indexOf("/");
       return (
@@ -2823,7 +2823,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         if (!inSession(session)) return moved(false);
         found = lookup(model);
       }
-      if (!found) return { refused: "model-missing", error: still(`knows no model ${model}`) };
+      if (!found) return { refused: "model-missing", error: still(`does not know the model ${model}`) };
       let switched = await set(found);
       if (!switched && inSession(session) && (await again())) {
         if (!inSession(session)) return moved(false);
@@ -2877,7 +2877,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const history = (manager.buildSessionProjection ?? manager.buildSessionContext)?.call(manager)?.messages;
     const convert = models?.convertToLlm;
     if (!Array.isArray(history) || history.length === 0 || !convert) {
-      return { refused: "selection-unsupported", error: `this ${HARNESS} lends no history to read` };
+      return { refused: "selection-unsupported", error: `this ${HARNESS} does not give an extension its history` };
     }
     const context = {
       systemPrompt: ctx.getSystemPrompt?.(),
@@ -2899,7 +2899,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         signal,
       });
     } else {
-      return { refused: "selection-unsupported", error: `this ${HARNESS} lends no model call` };
+      return { refused: "selection-unsupported", error: `this ${HARNESS} does not give an extension a model call` };
     }
     const text = (answered?.content ?? [])
       .filter((part) => part?.type === "text" && typeof part.text === "string")
@@ -2936,7 +2936,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const stop = async (ctx: Context, say: unknown): Promise<Said> => {
     const session = sessionId;
     if (say !== undefined && (typeof say !== "string" || !say)) {
-      return { refused: "refused", error: "a stop names the say whose turn it stops, or none for its person's" };
+      return { refused: "refused", error: "a stop must name the say whose turn it stops, or no say for the person's own stop" };
     }
     if (!ctx.abort) return { refused: "selection-unsupported", error: `this ${HARNESS} cannot abort` };
     const running = () => turning || ctx.isIdle?.() === false;
@@ -2947,7 +2947,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       const waiting = says.some((one) => idsOf(one).includes(say) && !one.seen);
       return {
         refused: "other-turn",
-        error: waiting ? "its words wait to go into a turn of the person's" : "the turn running is not the one its words started",
+        error: waiting ? "its words wait to go into a turn of the person" : "the turn that runs is not the turn that its words started",
       };
     }
     if (say !== undefined && ctx.hasPendingMessages?.() === true && !says.some((one) => !one.seen)) {
@@ -2960,7 +2960,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       setTimeout(resolve, 50);
       await promise;
     }
-    if (!inSession(session)) return { refused: "no-answer", error: "the session moved while its turn was stopping" };
+    if (!inSession(session)) return { refused: "no-answer", error: "the session moved before its turn stopped" };
     noteState();
     return running()
       ? { refused: "no-answer", error: "a turn still runs" }
@@ -2977,7 +2977,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    */
   const force = async (ctx: Context, say: unknown): Promise<Said> => {
     const session = sessionId;
-    if (typeof say !== "string" || !say) return { refused: "refused", error: "a force names the say whose words it forces in" };
+    if (typeof say !== "string" || !say) return { refused: "refused", error: "a force must name the say whose words it forces in" };
     if (!ctx.abort) return { refused: "selection-unsupported", error: `this ${HARNESS} cannot abort` };
     const one = says.find((one) => idsOf(one).includes(say));
     if (!one) {
@@ -3004,7 +3004,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       setTimeout(resolve, 50);
       await promise;
     }
-    if (!inSession(session)) return { refused: "no-answer", error: "the session moved while its turn was stopping" };
+    if (!inSession(session)) return { refused: "no-answer", error: "the session moved before its turn stopped" };
     if (one.taken_at === undefined && idle(ctx) === true && !one.again && says.includes(one)) {
       one.again = true;
       one.running = false;
@@ -3041,17 +3041,17 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    */
   const compact = async (ctx: Context, id: string, before: unknown, summary: unknown, least: unknown): Promise<Said> => {
     if (typeof before !== "number" || !Number.isSafeInteger(before) || before < 0) {
-      return { refused: "refused", error: "before is milliseconds since 1970" };
+      return { refused: "refused", error: "before must be milliseconds since 1970" };
     }
     if (typeof least !== "number" || !Number.isSafeInteger(least) || least < 0) {
-      return { refused: "refused", error: "least is a count of tokens" };
+      return { refused: "refused", error: "least must be a count of tokens" };
     }
     if (typeof summary !== "string" || !summary.trim()) return { refused: "refused", error: "no summary" };
     if (!ctx.compact) return { refused: "refused", error: `this ${HARNESS} cannot compact` };
     // A turn being prepared, or between the runs it goes on with, reads as idle: compacting
     // then would abort it.
     if (turning || !quiet(ctx)) {
-      return { refused: "harness-busy", error: "the conversation is working, has words waiting, or somebody is typing" };
+      return { refused: "harness-busy", error: "a turn runs, words wait, or somebody types in the conversation" };
     }
     const branch = entriesOf(ctx.sessionManager.getBranch?.());
     const rate = tokenRate(branch);
@@ -3109,7 +3109,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const ctx = live;
     const op = request.op;
     if (ending || !wanted || !ctx) return { refused: "ending" };
-    if (led(ctx) && op !== "recap") return { refused: "refused", error: "a sub-agent's conversation takes this at its lead" };
+    if (led(ctx) && op !== "recap") return { refused: "refused", error: "a sub-agent's conversation takes this only at its lead" };
     if ((op === "say" || op === "pick") && oneShot(ctx) && !turning) {
       return { refused: "refused", error: "this one-shot run takes nothing before its own turn" };
     }
@@ -3117,17 +3117,17 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       case "say": {
         const { words, mode } = request;
         if (typeof words !== "string" || !words.trim()) return { refused: "refused", error: "no words" };
-        if (mode !== "steer" && mode !== "queue") return { refused: "refused", error: "mode is steer or queue" };
-        if (typeof request.idle !== "boolean") return { refused: "refused", error: "a say says idle" };
+        if (mode !== "steer" && mode !== "queue") return { refused: "refused", error: "mode must be steer or queue" };
+        if (typeof request.idle !== "boolean") return { refused: "refused", error: "a say must give idle as true or false" };
         // The throw whose words they are, where an aim's: one throw's go in once ([`deliver`]).
         const thrown = request.throw === undefined ? undefined : typeof request.throw === "string" ? request.throw : "";
-        if (thrown === "") return { refused: "refused", error: "a say's throw is the throw's id" };
+        if (thrown === "") return { refused: "refused", error: "a say's throw must be the throw's id" };
         // Words said `idle` — Steery's own nobody asked for now, another member's, a
         // reviewed answer — go in only while nothing else would: no turn, nothing queued,
         // nobody typing at the input line, read as they arrive and again as they are
         // handed over ([`deliver`]).
         if (request.idle && !quiet(ctx)) {
-          return { refused: "harness-busy", error: "the conversation is working, has words waiting, or somebody is typing" };
+          return { refused: "harness-busy", error: "a turn runs, words wait, or somebody types in the conversation" };
         }
         return deliver(ctx, String(request.id), words, mode, thrown, request.idle);
       }
@@ -3288,7 +3288,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const summary = "summary" in ask ? ask.summary : undefined;
     const least = "least" in ask ? ask.least : undefined;
     const said: Said = led(ctx)
-      ? { refused: "refused", error: "a sub-agent's conversation takes this at its lead" }
+      ? { refused: "refused", error: "a sub-agent's conversation takes this only at its lead" }
       : await compact(ctx, id, before, summary, least).catch(
           (error: unknown): Said => ({ refused: "refused", error: String(error) }),
         );

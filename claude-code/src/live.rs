@@ -52,21 +52,21 @@ const POST_WITHIN: Duration = Duration::from_secs(8);
 pub async fn say(store: &Store, says: &Says, say: Say) -> Result<Said, Error> {
     let dir = registry::dir(store.root());
     let live = registry::live(&dir, &say.external_id)
-        .ok_or_else(|| Error::refused(refusal::NO_DOOR, "no Claude Code session is in it now"))?;
+        .ok_or_else(|| Error::refused(refusal::NO_DOOR, "no Claude Code session holds it now"))?;
     let idle = live.status.as_deref() == Some("idle");
     if say.mode == SayMode::Immediate && !idle {
         return Err(Error::refused(
             refusal::HARNESS_BUSY,
             match live.status.as_deref() {
                 Some(status) => format!("the Claude Code session in it is {status}"),
-                None => "the Claude Code session in it says nothing of a turn".to_owned(),
+                None => "the Claude Code session in it says nothing about a turn".to_owned(),
             },
         ));
     }
     let socket = live.socket.ok_or_else(|| {
         Error::refused(
             refusal::NO_DOOR,
-            "the Claude Code session in it has messaging off",
+            "the Claude Code session in it does not accept messages",
         )
     })?;
     if let Some(id) = say.id.as_deref() {
@@ -136,7 +136,7 @@ async fn post(
                 refusal::NO_DOOR
             },
             format!(
-                "Claude Code's inbox {} took no answer in time",
+                "Claude Code's inbox {} did not answer in time",
                 socket.display()
             ),
         )),

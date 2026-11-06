@@ -82,7 +82,7 @@ pub async fn listed(
             "`codex mcp list` did not answer in time",
         )
     })?
-    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex would not start: {e}")))?;
+    .map_err(|e| Error::refused(refusal::NO_BINARY, format!("codex did not start: {e}")))?;
     serde_json::from_slice::<Value>(&output.stdout)
         .ok()
         .filter(|_| output.status.success())

@@ -68,7 +68,7 @@ pub(crate) fn install() -> Result<steery_sdk::wire::harness::Install, String> {
     let line = "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh";
     Ok(steery_sdk::wire::harness::Install {
         argv: vec!["sh".into(), "-c".into(), line.into()],
-        about: format!("Codex's own installer, its release into ~/.local/bin: {line}"),
+        about: format!("Codex's own installer. It installs the release into ~/.local/bin: {line}"),
     })
 }
 

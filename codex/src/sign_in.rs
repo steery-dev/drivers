@@ -45,18 +45,24 @@ pub fn need() -> Need {
     Need {
         id: NEED.into(),
         title: "Sign Codex in?".into(),
-        line: "Codex is not logged in on this host, so it runs no turn here.".into(),
+        line: "Codex is not logged in on this host. It cannot run a turn here.".into(),
         ways: vec![
-            way(CHATGPT, "Sign in with ChatGPT", "Codex's own sign-in, kept on this host: each new host asks again."),
+            way(
+                CHATGPT,
+                "Sign in with ChatGPT",
+                "Codex's own sign-in. This host keeps it. Each new host asks again.",
+            ),
             way(
                 DEVICE,
                 "Sign in with ChatGPT using a code",
-                "Codex shows a code to type on OpenAI's page, from any device.",
+                "Codex shows a code. Type it on OpenAI's page, from any device.",
             ),
             Way {
                 id: API_KEY.into(),
                 label: "Use your OpenAI API key".into(),
-                about: Some("Billed per token to your OpenAI account; kept on this host.".into()),
+                about: Some(
+                    "Your OpenAI account pays for each token. This host keeps the key.".into(),
+                ),
                 link: Some(NeedLink {
                     label: "Create a key".into(),
                     url: KEYS_PAGE.into(),
@@ -108,7 +114,7 @@ impl SignIns {
                 self.0.give(way, value(ADDRESS), "Codex").await?;
                 Ok(done("Codex is signed in on this host"))
             }
-            way => Err(gone(format!("Codex signs in no way {way}"))),
+            way => Err(gone(format!("Codex has no sign-in way {way}"))),
         }
     }
 
@@ -125,7 +131,7 @@ impl SignIns {
             id: CHATGPT_RETURN.into(),
             label: "Sign in to ChatGPT".into(),
             about: Some(
-                "Sign in on OpenAI's page. Where it ends on an address that does not load, \
+                "Sign in on OpenAI's page. If the page ends on an address that does not load, \
                  paste that address here."
                     .into(),
             ),
@@ -138,7 +144,8 @@ impl SignIns {
                 name: ADDRESS.into(),
                 label: "Address".into(),
                 about: Some(
-                    "Where your browser ended (http://127.0.0.1:1455/…); empty once signed in"
+                    "The address where your browser ended (http://127.0.0.1:1455/…). Leave it \
+                     empty when you are signed in."
                         .into(),
                 ),
                 secret: true,
@@ -167,8 +174,8 @@ impl SignIns {
             id: DEVICE_CODE.into(),
             label: format!("Enter code {code} on OpenAI's page"),
             about: Some(format!(
-                "Open the page, sign in, and enter {code}; then continue. Never enter a code \
-                 you did not start."
+                "Open the page, sign in, and enter {code}. Then continue. Do not enter a code \
+                 that you did not start."
             )),
             link: Some(NeedLink {
                 label: "Open OpenAI's page".into(),
@@ -208,7 +215,8 @@ async fn api_key(root: &Path, key: &str) -> Result<(), Error> {
     let mut child = command
         .spawn()
         .map_err(|e| refused(format!("codex login did not start: {e}")))?;
-    let mut stdin = child.stdin.take().ok_or_else(|| refused("codex login took no input"))?;
+    let mut stdin =
+        child.stdin.take().ok_or_else(|| refused("codex login did not take the input"))?;
     let ended = tokio::time::timeout(KEY_WITHIN, async {
         stdin.write_all(format!("{key}\n").as_bytes()).await?;
         drop(stdin);

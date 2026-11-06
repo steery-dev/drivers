@@ -110,7 +110,7 @@ impl Provider {
 pub fn need(harness: Harness) -> Need {
     let label = harness.label();
     let key = anthropic::way(format!(
-        "Billed per token to your Claude Console account, on every host. {label} then runs \
+        "Your Claude Console account pays for each token, on every host. {label} then runs \
          Claude models through Anthropic's API."
     ));
     match harness {
@@ -118,7 +118,7 @@ pub fn need(harness: Harness) -> Need {
             id: NEED.into(),
             title: format!("Give {label} an Anthropic API key?"),
             line: format!(
-                "{label} has no model provider signed in on this host, so it runs no turn here."
+                "{label} has no model provider signed in on this host. It cannot run a turn here."
             ),
             ways: vec![key],
         },
@@ -126,7 +126,7 @@ pub fn need(harness: Harness) -> Need {
             id: NEED.into(),
             title: format!("Sign {label} in to a model provider?"),
             line: format!(
-                "{label} has no model provider signed in on this host, so it runs no turn here."
+                "{label} has no model provider signed in on this host. It cannot run a turn here."
             ),
             ways: PROVIDERS
                 .iter()
@@ -134,7 +134,7 @@ pub fn need(harness: Harness) -> Need {
                     id: provider.id.into(),
                     label: format!("Sign in with {}", provider.label),
                     about: Some(
-                        "omp's own sign-in, kept on this host: each new host asks again.".into(),
+                        "omp's own sign-in. This host keeps it. Each new host asks again.".into(),
                     ),
                     link: None,
                     fields: Vec::new(),
@@ -175,7 +175,7 @@ impl SignIns {
                 });
             }
         }
-        Err(gone(format!("{label} has no need {} by {} here", give.need, give.way)))
+        Err(gone(format!("{label} has no need {} with the way {} here", give.need, give.way)))
     }
 
     /// Start `omp login <provider>` and answer the step its link is. A sign-in started
@@ -197,7 +197,7 @@ impl SignIns {
                 .ok_or_else(|| unprinted(&running))?;
             running
                 .type_line("")
-                .map_err(|e| refused(format!("omp login took no answer: {e}")))?;
+                .map_err(|e| refused(format!("omp login did not take the answer: {e}")))?;
         }
         // omp prints its link on the line after this one, then what to do with it, and
         // then that it waits (GitHub Copilot's code is its last line).
@@ -218,8 +218,8 @@ impl SignIns {
                 id: provider.step(),
                 label: format!("Sign in to {name}"),
                 about: Some(
-                    "Sign in on its page. Where it ends on an address that does not load, or \
-                     shows a code, paste that here."
+                    "Sign in on its page. If the page ends on an address that does not load, \
+                     paste that address here. If the page shows a code, paste the code here."
                         .into(),
                 ),
                 link: Some(NeedLink {
@@ -231,8 +231,8 @@ impl SignIns {
                     name: ADDRESS.into(),
                     label: "Address or code".into(),
                     about: Some(
-                        "Where your browser ended, or the code its page shows; empty once \
-                         signed in"
+                        "The address where your browser ended, or the code that its page shows. \
+                         Leave it empty when you are signed in."
                             .into(),
                     ),
                     secret: true,
@@ -246,8 +246,8 @@ impl SignIns {
                     None => format!("Sign in to {name}"),
                 },
                 about: Some(match &code {
-                    Some(code) => format!("Open the page, sign in, and enter {code}; then continue."),
-                    None => "Open the page and sign in; then continue.".into(),
+                    Some(code) => format!("Open the page, sign in, and enter {code}. Then continue."),
+                    None => "Open the page and sign in. Then continue.".into(),
                 }),
                 link: Some(NeedLink {
                     label: "Open the sign-in page".into(),

@@ -90,8 +90,8 @@ pub fn others_note(label: &str, name: &str, installed: Option<&Path>, used: &Pat
     }
     let others: Vec<String> = others.iter().map(|path| path.display().to_string()).collect();
     Some(format!(
-        "{label} is installed in more than one place here: Steery runs {} (the first on PATH, \
-         else its installer's folder) and never {}.",
+        "{label} is installed in more than one place here. Steery runs {}: the first on PATH, \
+         else the one in its installer's folder. Steery never runs {}.",
         used.display(),
         others.join(", ")
     ))

@@ -67,7 +67,7 @@ impl Asked {
     pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
         let mut asked = Self::default();
         while let Some(arg) = args.next() {
-            let mut value = |flag: &str| args.next().ok_or(format!("{flag} takes a value"));
+            let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
             match arg.as_str() {
                 "--codex" => asked.codex = PathBuf::from(value("--codex")?),
                 "--worktree" => asked.worktree = true,
@@ -92,8 +92,9 @@ pub async fn run(asked: Asked) -> Result<(), String> {
     tokio::io::stdin()
         .read_to_string(&mut words)
         .await
-        .map_err(|e| format!("reading the words: {e}"))?;
-    let cwd = std::env::current_dir().map_err(|e| format!("reading where the turn runs: {e}"))?;
+        .map_err(|e| format!("cannot read the words: {e}"))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read where the turn runs: {e}"))?;
     let place = match asked.worktree && asked.act != "continue" {
         true => made(&cwd)?,
         false => None,
@@ -239,8 +240,8 @@ fn opening(act: &str, id: Option<&str>, place: &Path) -> Result<(&'static str, V
             "thread/resume",
             json!({"threadId": id, "excludeTurns": true}),
         ),
-        (act, None) => return Err(format!("a {act} names the conversation it acts on")),
-        (act, Some(_)) => return Err(format!("Codex runs no {act}")),
+        (act, None) => return Err(format!("a {act} must name the conversation it acts on")),
+        (act, Some(_)) => return Err(format!("Codex does not run a {act}")),
     })
 }
 
@@ -256,7 +257,7 @@ fn made(cwd: &Path) -> Result<Option<PathBuf>, String> {
         .filter(|home| home.is_absolute())
         .ok_or("HOME is not set")?;
     let root = crate::home::root(&home)?;
-    let name = top.file_name().ok_or("a repository has a name")?;
+    let name = top.file_name().ok_or("the repository has no name")?;
     let slot = uuid::Uuid::now_v7().simple().to_string();
     let dir = root
         .join("worktrees")
@@ -264,7 +265,7 @@ fn made(cwd: &Path) -> Result<Option<PathBuf>, String> {
         .join(name);
     let dir_arg = dir.to_string_lossy().into_owned();
     git(&top, &["worktree", "add", "--detach", &dir_arg, "HEAD"])
-        .ok_or_else(|| format!("making a worktree at {dir_arg}"))?;
+        .ok_or_else(|| format!("cannot make a worktree at {dir_arg}"))?;
     let within = cwd
         .canonicalize()
         .ok()

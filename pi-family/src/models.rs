@@ -469,7 +469,7 @@ async fn pi_catalog(binary: &Path, within: Duration) -> Result<Vec<Value>, Strin
         .spawn()
         .map_err(|e| format!("pi --mode rpc: {e}"))?;
     let asked = async {
-        let mut stdin = child.stdin.take().ok_or("pi took no input")?;
+        let mut stdin = child.stdin.take().ok_or("pi did not take the input")?;
         stdin
             .write_all(b"{\"id\":\"steery-models\",\"type\":\"get_available_models\"}\n")
             .await
@@ -551,7 +551,7 @@ fn pi_joined(rows: Option<Vec<Row>>, defined: Vec<Value>) -> Result<Vec<Model>, 
             return Ok(Vec::new());
         }
         return Err(format!(
-            "pi --list-models printed no table, while pi's RPC names {} models",
+            "pi --list-models printed no table, but pi's RPC names {} models",
             catalog.len()
         ));
     };

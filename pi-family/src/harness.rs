@@ -70,20 +70,22 @@ impl Harness {
     fn knowing(self) -> &'static str {
         match self {
             Self::Omp => {
-                "omp publishes nothing of its own: no variable in your environment carries\n\
-                 the identifier, and nothing is substituted into this text. The Steery server\n\
-                 names it instead, when the connection names the conversation: the instructions\n\
-                 it announces carry that `harness` and `external_id`. Read them there and send\n\
-                 exactly those. Instructions that named no conversation mean this connection\n\
-                 named none: describe nothing."
+                "omp gives no identifier of its own. No variable in your environment holds the\n\
+                 identifier, and omp puts nothing into this text. The Steery server names the\n\
+                 identifier when the connection names the conversation: the instructions that\n\
+                 the server announces hold that `harness` and `external_id`. Read them there and\n\
+                 send exactly those values. If the instructions name no conversation, this\n\
+                 connection named none. In that case, describe nothing."
             }
             Self::Pi => {
-                "Steery's paragraph, added each time your person writes to you, names it, as `harness` and `external_id`,\n\
-                 until this conversation is described: send exactly those. `PI_SESSION_ID`, in the\n\
-                 environment of every shell pi starts for you, holds the same `external_id` at any time —\n\
-                 pi names this conversation's own file from it. Neither there — no paragraph named one, and\n\
-                 the variable is unset or empty, which a person can turn off — is no identifier rather than\n\
-                 a different one: describe nothing."
+                "Steery's paragraph names the identifier as `harness` and `external_id`. Steery\n\
+                 adds this paragraph each time your person writes to you, until you describe this\n\
+                 conversation. Send exactly those values. Every shell that pi starts for you has\n\
+                 `PI_SESSION_ID` in its environment, and that variable always holds the same\n\
+                 `external_id` value. pi names the file of this conversation from it. A person\n\
+                 can disable the variable. If no paragraph named an identifier and the variable\n\
+                 is unset or empty, you have no identifier. Do not use a different identifier:\n\
+                 describe nothing."
             }
         }
     }
@@ -111,9 +113,9 @@ impl Harness {
             sign_in: Some(self.sign_in().into()),
             knowing: self.knowing().into(),
             transcript: Some(
-                "One JSON record per line: a `session` header, then entries with `id` and \
-                 `parentId` whose `message.role` is `user`, `assistant` or `toolResult`; the \
-                 last entry's chain of parents is the conversation."
+                "One JSON record on each line. A `session` header comes first. Then come entries \
+                 with `id` and `parentId`, and their `message.role` is `user`, `assistant` or \
+                 `toolResult`. The chain of parents of the last entry is the conversation."
                     .into(),
             ),
             identity: wire::Identity {
@@ -314,11 +316,11 @@ impl Harness {
         let (line, into) = match self {
             Self::Omp => (
                 "curl -fsSL https://omp.sh/install | sh -s -- --binary",
-                "omp's own installer, its prebuilt binary into ~/.local/bin",
+                "omp's own installer. It installs the prebuilt binary into ~/.local/bin",
             ),
             Self::Pi => (
                 "curl -fsSL https://pi.dev/install.sh | sh",
-                "pi's own installer, its npm package into a folder on PATH or \
+                "pi's own installer. It installs the npm package into a folder on PATH or \
                  ~/.pi/agent/bin",
             ),
         };

@@ -58,20 +58,21 @@ async fn main() -> std::io::Result<()> {
 }
 
 /// How an agent in Codex learns its conversation's id, as Steery's skill says it.
-const KNOWING: &str = "Your own environment holds it: `CODEX_SESSION_ID`, already a UUID. It names the\n\
-conversation your person is in, and a sub-agent Codex started for you carries that same\n\
-value — which is the one to send, because the conversation they are looking at is the one\n\
-that spawned you. `CODEX_THREAD_ID` is a different thing, this agent's own thread, and is\n\
-sent as `sub_agent` when you are a sub-agent; keep `CODEX_SESSION_ID` as `external_id`.\n\
+const KNOWING: &str = "Your own environment holds it: `CODEX_SESSION_ID`, which is already a UUID. It\n\
+names the conversation that your person is in. When Codex started you as a sub-agent, the\n\
+variable holds the same value as in the conversation that started you. Send that value, because\n\
+your person looks at that conversation. `CODEX_THREAD_ID` is a different thing: the thread of\n\
+this agent. Send it as `sub_agent` when you are a sub-agent. Keep `CODEX_SESSION_ID` as\n\
+`external_id`.\n\
 \n\
-Read it out of the environment at the moment you send it, never out of your own context. A\n\
-conversation Codex resumed or forked carries the one it came from in what you were handed,\n\
-and that identifier names a conversation your person is no longer reading.";
+Read it from the environment when you send it. Do not read it from your own context. When Codex\n\
+resumed or forked a conversation, your context holds the identifier of the conversation that it\n\
+came from. Your person does not read that conversation now.";
 
 /// How Codex's transcript file reads.
-const TRANSCRIPT: &str = "One JSON record per line: `session_meta` opens it, `response_item` records carry \
-the messages, tool calls and their output in `payload`, and `event_msg` records repeat them as the \
-terminal drew them.";
+const TRANSCRIPT: &str = "One JSON record on each line. `session_meta` opens the file. `response_item` \
+records hold the messages, the tool calls and their output in `payload`. `event_msg` records repeat \
+them as the terminal showed them.";
 
 /// The oldest Codex this driver speaks to, and the command that updates it: 0.155.1 is the
 /// first whose app server lists a running server's loaded threads and queue, and whose
@@ -108,7 +109,7 @@ impl Codex {
     fn drive(&self) -> Result<&drive::Drive, Error> {
         self.place
             .get()
-            .ok_or_else(|| Error::invalid("`initialize` came first"))?
+            .ok_or_else(|| Error::invalid("`initialize` must come first"))?
             .as_ref()
             .map_err(|why| Error::refused(refusal::REFUSED, why.clone()))
     }
@@ -116,7 +117,7 @@ impl Codex {
     fn home(&self) -> Result<&PathBuf, Error> {
         self.home
             .get()
-            .ok_or_else(|| Error::invalid("`initialize` came first"))
+            .ok_or_else(|| Error::invalid("`initialize` must come first"))
     }
 }
 
@@ -176,7 +177,7 @@ impl Program for Codex {
                 let _: harness::Fold = steery_sdk::params(params)?;
                 Err(Error::refused(
                     refusal::SELECTION_UNSUPPORTED,
-                    "Codex has no plugin door to carry its records",
+                    "Codex has no plugin door that sends its records",
                 ))
             }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),

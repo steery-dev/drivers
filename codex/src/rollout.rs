@@ -247,7 +247,7 @@ impl Store {
         if head.sub_agent() || headless(head) {
             return Err(Error::refused(
                 refusal::NOT_FOUND,
-                format!("{} is no conversation a person is in", locate.external_id),
+                format!("{} is not a conversation that a person is in", locate.external_id),
             ));
         }
         let mut session = session(&locate.external_id, filed).ok_or_else(|| {
@@ -972,7 +972,7 @@ struct Cursor {
 
 impl Cursor {
     fn parse(cursor: &str) -> Result<Self, Error> {
-        let invalid = || Error::invalid(format!("`{cursor}` is no cursor this driver gave"));
+        let invalid = || Error::invalid(format!("this driver did not give the cursor `{cursor}`"));
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(cursor)
             .map_err(|_| invalid())?;
@@ -1129,7 +1129,7 @@ fn answer(
 fn unreadable(file: &Path) -> Error {
     Error::refused(
         refusal::REFUSED,
-        format!("{} cannot be read", file.display()),
+        format!("the driver cannot read {}", file.display()),
     )
 }
 

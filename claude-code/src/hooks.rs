@@ -348,7 +348,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
         },
     } = answer;
     let event = event(&name)
-        .ok_or_else(|| Error::invalid(format!("Steery is not hooked on Claude Code's {name}")))?;
+        .ok_or_else(|| Error::invalid(format!("Steery has no hook on Claude Code's {name}")))?;
     let output = match (event.kind, decision) {
         (_, None) => say.map(|say| context(event, say)).transpose()?,
         (HookKind::BeforeCall, Some(decision)) => {
@@ -357,14 +357,14 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
         (HookKind::Permission, Some(decision)) => {
             if say.is_some() {
                 return Err(Error::invalid(
-                    "Claude Code reads no paragraph at PermissionRequest",
+                    "Claude Code does not read a paragraph at PermissionRequest",
                 ));
             }
             Some(permission(decision, &parse(&document)?)?)
         }
         (_, Some(_)) => {
             return Err(Error::invalid(format!(
-                "Claude Code reads no decision at {name}"
+                "Claude Code does not read a decision at {name}"
             )));
         }
     };
@@ -388,7 +388,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
 fn context(event: &Event, say: String) -> Result<Value, Error> {
     if event.says.is_empty() {
         return Err(Error::invalid(format!(
-            "Claude Code reads no paragraph at {}",
+            "Claude Code does not read a paragraph at {}",
             event.name
         )));
     }
@@ -418,7 +418,7 @@ fn before_call(decision: Decision, say: Option<String>, document: &Value) -> Res
             always: Some(_), ..
         } => {
             return Err(Error::invalid(
-                "Claude Code keeps no permission from PreToolUse",
+                "Claude Code does not keep a permission from PreToolUse",
             ));
         }
         Decision::Deny { reason } => ("deny", reason),

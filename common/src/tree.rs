@@ -28,7 +28,7 @@ use crate::lines::{BATCH, RECORD, bytes};
 
 /// Why a walk stopped short of a beginning. Said, rather than handing back what had been
 /// walked, which would read exactly like a whole short conversation.
-const CARRIED_ON: &str = "that conversation carries on from one this machine does not hold, so only part of it can be read";
+const CARRIED_ON: &str = "that conversation continues from one that this machine does not hold, so the driver can read only part of it";
 /// Why a transcript whose records name each other in a circle has no leaf to walk from.
 const CIRCLE: &str = "that conversation's records name each other in a circle";
 

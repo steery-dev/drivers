@@ -39,13 +39,13 @@ pub fn need() -> Need {
     Need {
         id: NEED.into(),
         title: "Sign Claude Code in?".into(),
-        line: "Claude Code is not signed in on this host, so it runs no turn here.".into(),
+        line: "Claude Code is not signed in on this host. It cannot run a turn here.".into(),
         ways: vec![
             Way {
                 id: CLAUDE_SIGN_IN.into(),
                 label: "Sign in with your Claude plan".into(),
                 about: Some(
-                    "Claude Code's own sign-in, kept on this host: each new host asks again."
+                    "Claude Code's own sign-in. This host keeps it. Each new host asks again."
                         .into(),
                 ),
                 link: None,
@@ -58,8 +58,8 @@ pub fn need() -> Need {
             // approve it. `claude auth status --json` counts it as signed in (`"authMethod":
             // "api_key"`, `"apiKeySource": "ANTHROPIC_API_KEY"`, Claude Code 2.1.310).
             anthropic::way(
-                "Billed per token to your Claude Console account, on every host. Claude Code \
-                 always uses it in non-interactive runs, over any plan it is signed in with."
+                "Your Claude Console account pays for each token, on every host. Claude Code \
+                 always uses the key in non-interactive runs, also when it is signed in to a plan."
                     .into(),
             ),
         ],
@@ -90,7 +90,7 @@ impl SignIns {
                     env: Default::default(),
                 })
             }
-            way => Err(gone(format!("Claude Code signs in no way {way}"))),
+            way => Err(gone(format!("Claude Code has no sign-in way {way}"))),
         }
     }
 
@@ -100,7 +100,8 @@ impl SignIns {
     async fn start(&self) -> Result<Given, Error> {
         self.0.end();
         let binary = crate::binary().ok_or_else(|| gone("Claude Code is not installed here"))?;
-        let browser = Browser::new().map_err(|e| refused(format!("no $BROWSER for Claude Code: {e}")))?;
+        let browser = Browser::new()
+            .map_err(|e| refused(format!("cannot make a $BROWSER for Claude Code: {e}")))?;
         let mut command = steery_driver_common::program::helper(&binary);
         command.args(["auth", "login"]).env("BROWSER", browser.program());
         let mut running = Login::start(command, CLAUDE_SIGN_IN_RETURN.into(), true)
@@ -135,8 +136,8 @@ impl SignIns {
             id: CLAUDE_SIGN_IN_RETURN.into(),
             label: "Sign in to Claude".into(),
             about: Some(
-                "Sign in on Claude's page. Where it ends on an address that does not load, or \
-                 shows a code, paste that here."
+                "Sign in on Claude's page. If the page ends on an address that does not load, \
+                 paste that address here. If the page shows a code, paste the code here."
                     .into(),
             ),
             link: Some(NeedLink {
@@ -148,8 +149,8 @@ impl SignIns {
                 name: ADDRESS.into(),
                 label: "Address or code".into(),
                 about: Some(
-                    "Where your browser ended, or the code Claude's page shows; empty once \
-                     signed in"
+                    "The address where your browser ended, or the code that Claude's page \
+                     shows. Leave it empty when you are signed in."
                         .into(),
                 ),
                 secret: true,
