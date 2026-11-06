@@ -23,9 +23,12 @@ pub fn executable(path: PathBuf) -> Option<PathBuf> {
 
 /// The program protocols the drivers speak, newest first: 5 is 4 with needs, 6 is 5 with
 /// `call_ended`'s `waited`, 7 is 6 with say ids (`say`'s `id`, `stop`'s `say`), 8 is 7 with
-/// `identity.call_meta`. Every runtime Steery supports offers 4 (it came in runtime
-/// 7.0.130; the oldest supported is later), so no driver answers an older one.
-pub const PROTOCOLS: [u32; 5] = [8, 7, 6, 5, 4];
+/// `identity.call_meta`, 9 is 8 with a harness's `lines` and `hosted` (the drivers give
+/// neither: their agents write their lines), and 10 is 9 with `sessions/list` answering
+/// only what changed since a cursor (`steery_sdk::listing::Changes`). Every runtime Steery
+/// supports offers 4 (it came in runtime 7.0.130; the oldest supported is later), so no
+/// driver answers an older one.
+pub const PROTOCOLS: [u32; 7] = [10, 9, 8, 7, 6, 5, 4];
 
 /// The first protocol with needs: `setup/plan`'s `needs` and `needs/give`.
 pub const NEEDS: u32 = 5;

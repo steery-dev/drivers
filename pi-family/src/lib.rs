@@ -35,13 +35,14 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
 }
 
 /// The driver: the harness it speaks for, where that keeps everything, from
-/// `initialize`, the models it listed last, and the sign-in it started that waits for its
-/// person.
+/// `initialize`, the models it listed last, the sign-in it started that waits for its
+/// person, and the listings it answered, to answer the next with only what changed.
 struct Driver {
     harness: Harness,
     place: OnceLock<Place>,
     catalog: models::Catalog,
     sign_ins: sign_in::SignIns,
+    changes: steery_sdk::listing::Changes,
 }
 
 /// The protocol the driver picked, the person's home, the runtime's config folder, and the
@@ -60,6 +61,7 @@ impl Driver {
             place: OnceLock::new(),
             catalog: models::Catalog::default(),
             sign_ins: sign_in::SignIns::default(),
+            changes: steery_sdk::listing::Changes::default(),
         }
     }
 
@@ -95,6 +97,7 @@ impl Program for Driver {
                 transcripts::Store::new(harness, &params.home, root, chosen)
             }),
         });
+        self.changes.picked(self.place()?.protocol);
         if let Ok(store) = self.store() {
             self.catalog.warm(harness, store.root());
         }
@@ -144,7 +147,11 @@ impl Program for Driver {
             method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => {
                 result(self.sign_ins.give(harness, steery_sdk::params(params)?).await?)
             }
-            method::SESSIONS_LIST => result(self.store()?.list(steery_sdk::params(params)?)),
+            method::SESSIONS_LIST => {
+                let asked: wire::harness::List = steery_sdk::params(params)?;
+                let after = asked.after.clone();
+                result(self.changes.answer(after.as_deref(), self.store()?.list(asked)))
+            }
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => {
                 let mut read = self.store()?.read(steery_sdk::params(params)?)?;

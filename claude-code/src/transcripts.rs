@@ -201,6 +201,9 @@ impl Store {
             sessions,
             excluded,
             complete,
+            cursor: None,
+            after: None,
+            gone: Vec::new(),
         }
     }
 
@@ -1690,12 +1693,14 @@ mod tests {
         let listing = store.list(List {
             seen_since: None,
             transcripts: vec![file.clone()],
+            after: None,
         });
         assert_eq!(listing.sessions.len(), 2);
         assert_eq!(listed(&store).sessions.len(), 2, "remembered");
         let since = store.list(List {
             seen_since: Some(u64::MAX),
             transcripts: Vec::new(),
+            after: None,
         });
         assert!(since.sessions.is_empty() && since.complete);
         std::fs::remove_dir_all(root).unwrap();

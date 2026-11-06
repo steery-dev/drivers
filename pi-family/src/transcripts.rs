@@ -130,6 +130,9 @@ impl Store {
             sessions,
             excluded: Vec::new(),
             complete,
+            cursor: None,
+            after: None,
+            gone: Vec::new(),
         }
     }
 
@@ -1278,6 +1281,7 @@ pub(crate) mod tests {
         store.list(List {
             seen_since: None,
             transcripts: transcripts.to_vec(),
+            after: None,
         })
     }
 

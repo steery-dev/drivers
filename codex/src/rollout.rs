@@ -236,6 +236,9 @@ impl Store {
             sessions,
             excluded,
             complete,
+            cursor: None,
+            after: None,
+            gone: Vec::new(),
         }
     }
 
