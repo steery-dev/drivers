@@ -81,13 +81,15 @@ const TRANSCRIPT: &str = "One JSON record on each line. `user` and `assistant` r
 
 /// The driver: where Claude Code is, from `initialize`, the last listing of its background
 /// sessions, the sign-ins it started that wait for their code, the says it gave live
-/// sessions, and where it says how live sessions stand ([`state`]).
+/// sessions, where it says how live sessions stand ([`state`]), and the listings of its
+/// conversations it answered, to answer the next with only what changed.
 struct ClaudeCode {
     place: OnceLock<Place>,
     listing: drive::Listing,
     sign_ins: sign_in::SignIns,
     says: Arc<says::Says>,
     notifier: Notifier,
+    changes: steery_sdk::listing::Changes,
 }
 
 /// The protocol the driver picked, the person's home, and Claude Code's configuration root
@@ -106,6 +108,7 @@ impl ClaudeCode {
             sign_ins: sign_in::SignIns::default(),
             says: Arc::default(),
             notifier,
+            changes: steery_sdk::listing::Changes::default(),
         }
     }
 
@@ -149,7 +152,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 8"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 10"))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             protocol,
@@ -168,6 +171,7 @@ impl Program for ClaudeCode {
                 self.notifier.clone(),
             );
         }
+        self.changes.picked(self.place()?.protocol);
         Ok(wire::Initialized {
             protocol: self.place()?.protocol,
             program: wire::ProgramInfo {
@@ -200,7 +204,11 @@ impl Program for ClaudeCode {
             method::NEEDS_GIVE if self.needs()? => {
                 result(self.sign_ins.give(given(params)?).await?)
             }
-            method::SESSIONS_LIST => result(self.store()?.list(given(params)?)),
+            method::SESSIONS_LIST => {
+                let asked: wire::harness::List = given(params)?;
+                let after = asked.after.clone();
+                result(self.changes.answer(after.as_deref(), self.store()?.list(asked)))
+            }
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),
             method::SESSIONS_READ => {
                 let mut read = self.store()?.read(given(params)?)?;
@@ -287,6 +295,8 @@ fn info() -> wire::HarnessInfo {
         // Anthropic account".
         sign_in: Some("run `claude auth login` in a terminal".into()),
         knowing: KNOWING.into(),
+        lines: wire::Lines::Agent,
+        hosted: Default::default(),
         transcript: Some(TRANSCRIPT.into()),
         identity: wire::Identity {
             executables: vec!["claude".into()],

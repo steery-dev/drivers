@@ -81,13 +81,15 @@ const MINIMUM: &str = "0.155.1";
 const UPDATE: &str = "codex update";
 
 /// The driver: the protocol it picked, Codex's home and conversations, from `initialize`,
-/// and the sign-in it started that waits for its person.
+/// the sign-in it started that waits for its person, and the listings it answered, to
+/// answer the next with only what changed.
 struct Codex {
     notifier: Notifier,
     protocol: OnceLock<u32>,
     place: OnceLock<Result<drive::Drive, String>>,
     home: OnceLock<PathBuf>,
     sign_ins: sign_in::SignIns,
+    changes: steery_sdk::listing::Changes,
 }
 
 impl Codex {
@@ -98,6 +100,7 @@ impl Codex {
             place: OnceLock::new(),
             home: OnceLock::new(),
             sign_ins: sign_in::SignIns::default(),
+            changes: steery_sdk::listing::Changes::default(),
         }
     }
 
@@ -124,8 +127,9 @@ impl Codex {
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 8"))?;
+            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 10"))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
+        self.changes.picked(protocol);
         let _ = self.home.set(params.home.clone());
         let _ = self.place.set(home::root(&params.home).map(|root| {
             let store = Arc::new(rollout::Store::new(root.clone()));
@@ -161,7 +165,11 @@ impl Program for Codex {
             method::SETUP_PLAN => result(
                 setup::plan(self.home()?, steery_sdk::params(params)?, self.needs()).await?,
             ),
-            method::SESSIONS_LIST => result(self.drive()?.store.list(steery_sdk::params(params)?)),
+            method::SESSIONS_LIST => {
+                let asked: wire::harness::List = steery_sdk::params(params)?;
+                let after = asked.after.clone();
+                result(self.changes.answer(after.as_deref(), self.drive()?.store.list(asked)))
+            }
             method::SESSIONS_LOCATE => {
                 result(self.drive()?.store.locate(steery_sdk::params(params)?)?)
             }
@@ -228,6 +236,8 @@ fn info(protocol: u32) -> wire::HarnessInfo {
         }),
         sign_in: Some("run `codex login` in a terminal".into()),
         knowing: KNOWING.into(),
+        lines: wire::Lines::Agent,
+        hosted: Default::default(),
         transcript: Some(TRANSCRIPT.into()),
         identity: wire::Identity {
             executables: vec!["codex".into()],

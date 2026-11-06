@@ -14,10 +14,11 @@ The driver decides nothing and writes nothing of its own. The runtime itself nam
 A driver tells the runtime everything that the runtime knows about a harness.
 
 Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate. A driver
-answers with the newest version of the program protocol that the runtime offers, from 7 down
+answers with the newest version of the program protocol that the runtime offers, from 10 down
 to 4. Every runtime that Steery supports offers version 4. The driver keeps the version that it
 picked. It plans needs only from version 5. It names says (`say`'s `id`, `stop`'s `say`) only in
-version 7.
+version 7. From version 10 it names each listing of `sessions/list` by a cursor, and answers a
+call that gives one as `after` with only what changed since (`steery_sdk::listing::Changes`).
 
 Steery adds the drivers below in the same way as it adds any program: from this repository's
 releases. Each release has a prebuilt executable per target. The command is
@@ -154,7 +155,7 @@ Thus the driver keeps its own list of omp's OAuth providers (`pi-family/src/sign
 
 The SDK and the protocol are in [steery-dev/sdk](https://github.com/steery-dev/sdk). Every
 crate names the SDK by git, at a tag:
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v6.0.0" }`. Every crate pins
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v10.0.0" }`. Every crate pins
 its toolchain in `rust-toolchain.toml`.
 
 ```sh

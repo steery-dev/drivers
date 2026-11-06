@@ -112,6 +112,8 @@ impl Harness {
             }),
             sign_in: Some(self.sign_in().into()),
             knowing: self.knowing().into(),
+            lines: wire::Lines::Agent,
+            hosted: Default::default(),
             transcript: Some(
                 "One JSON record on each line. A `session` header comes first. Then come entries \
                  with `id` and `parentId`, and their `message.role` is `user`, `assistant` or \
