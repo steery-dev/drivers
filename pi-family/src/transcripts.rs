@@ -141,7 +141,7 @@ impl Store {
             .ok_or_else(|| {
                 Error::refused(
                     refusal::REFUSED,
-                    format!("{} cannot be read", file.display()),
+                    format!("the driver cannot read {}", file.display()),
                 )
             })?;
         Ok(Located { session })
@@ -350,7 +350,7 @@ impl Store {
             _ => Err(Error::refused(
                 refusal::REFUSED,
                 format!(
-                    "more than one {} transcript answers to {id}",
+                    "more than one {} transcript has the id {id}",
                     self.harness.id()
                 ),
             )),
@@ -1083,7 +1083,7 @@ fn parse_cursor(cursor: &str) -> Result<Given, Error> {
             .filter(|cursor| cursor.mark <= 1)
             .map(Given::Read)
     })
-    .ok_or_else(|| Error::invalid(format!("`{cursor}` is no cursor this driver gave")))
+    .ok_or_else(|| Error::invalid(format!("this driver did not give the cursor `{cursor}`")))
 }
 
 /// The events of a transcript's active path after `cursor`, or of its entries within

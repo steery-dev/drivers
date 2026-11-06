@@ -102,7 +102,7 @@ fn same_home(server: &AppServer, home: &Path) -> Result<(), String> {
     if said.is_absolute() && canonical(said).is_some() && canonical(said) == canonical(home) {
         Ok(())
     } else {
-        Err(format!("this Codex serves {}", said.display()))
+        Err(format!("this Codex app server serves the home {}", said.display()))
     }
 }
 
@@ -126,7 +126,7 @@ async fn loaded(server: &mut AppServer) -> Result<HashSet<String>, String> {
         {
             let thread = thread
                 .as_str()
-                .ok_or("Codex's loaded thread is no string")?;
+                .ok_or("Codex's loaded thread is not a string")?;
             threads.insert(thread.to_owned());
         }
         match page.get("nextCursor") {

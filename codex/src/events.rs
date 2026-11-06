@@ -74,7 +74,8 @@ pub struct State {
 
 /// What a rollback that does not say how much went is refused with: reading on would
 /// give work somebody took back as theirs.
-pub const UNCOUNTED: &str = "that rollout records a rollback without saying how much went";
+pub const UNCOUNTED: &str =
+    "that rollout records a rollback but does not say how many turns the rollback removed";
 
 /// Where a record is, for the id of the words it carries where Codex gives none.
 pub struct Place<'a> {

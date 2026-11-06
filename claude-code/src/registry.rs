@@ -181,10 +181,11 @@ pub fn strict(
         if !exists(registered.pid).map_err(|e| format!("checking pid {pid}: {e}"))? {
             continue;
         }
-        let start = started(pid).ok_or_else(|| format!("pid {pid} has no start to read"))?;
+        let start = started(pid)
+            .ok_or_else(|| format!("the driver cannot read the start time of pid {pid}"))?;
         if found.contains_key(&registered.session_id) {
             return Err(format!(
-                "two live sessions are registered for {}",
+                "Claude Code registered two live sessions for {}",
                 registered.session_id
             ));
         }

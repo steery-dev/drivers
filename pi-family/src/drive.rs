@@ -105,7 +105,7 @@ pub async fn start(
                 return Err(Error::refused(
                     refusal::NO_PLACE,
                     format!(
-                        "{} is gone, and {} resumes a conversation only there",
+                        "{} is gone, and {} can resume the conversation only there",
                         cwd.display(),
                         harness.id()
                     ),
@@ -123,14 +123,14 @@ pub async fn start(
         }
         (Act::Continue | Act::Fork, None) => {
             return Err(Error::invalid(
-                "a continue or a fork names its conversation",
+                "a continue or a fork must name its conversation",
             ));
         }
         (Act::New, _) => None,
         (Act::Hand, _) => {
             return Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
-                format!("{} takes no handed-over conversation", harness.id()),
+                format!("{} does not take a handed-over conversation", harness.id()),
             ));
         }
     };
@@ -142,7 +142,7 @@ pub async fn start(
             Ok(false) => {
                 return Err(Error::refused(
                     refusal::MODEL_MISSING,
-                    format!("omp lists no model {model} here"),
+                    format!("omp does not list the model {model} here"),
                 ));
             }
             Err(why) => return Err(Error::refused(refusal::START_FAILED, why)),
@@ -192,7 +192,7 @@ async fn worktree(harness: Harness, home: &Path, cwd: &Path) -> Result<Option<Pa
         Some(dir) if dir.starts_with("~/") => home.join(&dir[2..]),
         _ => harness.base(home)?.join("wt"),
     };
-    let name = top.file_name().ok_or("a repository has a name")?;
+    let name = top.file_name().ok_or("the repository has no name")?;
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |now| now.subsec_nanos())
@@ -207,7 +207,7 @@ async fn worktree(harness: Harness, home: &Path, cwd: &Path) -> Result<Option<Pa
     let dir_arg = dir.to_str().ok_or("the worktree's path is not UTF-8")?;
     git(&top, &["worktree", "add", "--detach", dir_arg, "HEAD"])
         .await
-        .map_err(|why| format!("making a worktree at {dir_arg}: {why}"))?;
+        .map_err(|why| format!("cannot make a worktree at {dir_arg}: {why}"))?;
     let within = cwd
         .canonicalize()
         .ok()
@@ -230,7 +230,7 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         .kill_on_drop(true)
         .output()
         .await
-        .map_err(|e| format!("running git: {e}"))?;
+        .map_err(|e| format!("cannot run git: {e}"))?;
     let said = |bytes: &[u8]| String::from_utf8_lossy(bytes).trim().to_owned();
     match out.status.success() {
         true => Ok(said(&out.stdout)),
@@ -336,7 +336,7 @@ pub fn mark(store: &Store, mark: ReceiptMark) -> Result<Marked, Error> {
 /// records the transcript gained past the mark. Two carrying it is refused.
 pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
     let mark: Mark = serde_json::from_str(&find.mark)
-        .map_err(|_| Error::invalid("the mark is no mark of this driver's"))?;
+        .map_err(|_| Error::invalid("this driver did not make the mark"))?;
     let end = End {
         dev: mark.dev,
         ino: mark.ino,
@@ -445,7 +445,7 @@ pub fn reader(harness: Harness, reader: Reader) -> Result<ReaderPlan, Error> {
 /// [`reader`]'s plan for the harness at `binary`.
 fn planned(harness: Harness, binary: &Path, reader: Reader) -> Result<ReaderPlan, Error> {
     if !reader.cwd.is_absolute() {
-        return Err(Error::invalid("the reader's folder is no absolute path"));
+        return Err(Error::invalid("the reader's folder is not an absolute path"));
     }
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned(), "--print".into()];
     if let Some(model) = reader.model {
@@ -545,7 +545,7 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
     }
     store.find(id)?;
     if !terminal.cwd.is_absolute() {
-        return Err(Error::invalid("the folder is no absolute path"));
+        return Err(Error::invalid("the folder is not an absolute path"));
     }
     let cwd = terminal
         .cwd
@@ -566,7 +566,8 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
     // A second process on one conversation appends to its transcript beside the first.
     let line = matches!(terminal.holder, Some(Holder::Person { .. })).then(|| {
         format!(
-            "{0} has it open already; this opens a second {0} writing to the same conversation.",
+            "{0} has it open already. This command opens a second {0} that writes to the same \
+             conversation.",
             harness.id()
         )
     });

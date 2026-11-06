@@ -1,21 +1,29 @@
 # Steery drivers
 
-A driver connects [Steery](https://steery.dev) to one harness: an agent product a person
-runs conversations in. The Steery runtime starts a driver as a child process and speaks the
-program protocol to it, JSON-RPC 2.0 over standard input and output (`PROTOCOL.md` in
-[steery-dev/sdk](https://github.com/steery-dev/sdk)); the driver reads the harness's conversations, plans what setting it up
-writes, and says how to start, read and resume a turn. It decides nothing and writes nothing
-of its own. The runtime itself names no harness: everything it knows of one, a driver says.
+A driver connects [Steery](https://steery.dev) to one harness. A harness is an agent product
+in which a person runs conversations. The Steery runtime starts a driver as a child process.
+The runtime speaks the program protocol to the driver: JSON-RPC 2.0 over standard input and
+output (`PROTOCOL.md` in [steery-dev/sdk](https://github.com/steery-dev/sdk)). The driver does
+these things:
 
-Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate, and
-answers the newest version of the program protocol the runtime offers, from 7 down to 4,
-which every runtime Steery supports offers; it keeps the version it picked, plans needs
-only from 5, and names says (`say`'s `id`, `stop`'s `say`) only in 7. Steery adds the
-drivers below the way it adds any program: from this repository's
-releases, each
-a prebuilt executable per target (`steery programs add https://github.com/steery-dev/drivers`,
-which Steery's installer runs). Everything a person sees of a driver, its label, its short
-name, its tint and its mark, is what its `initialize` says.
+- reads the harness's conversations
+- plans what the setup of the harness writes
+- says how to start, read and resume a turn
+
+The driver decides nothing and writes nothing of its own. The runtime itself names no harness.
+A driver tells the runtime everything that the runtime knows about a harness.
+
+Each driver is its own program, `steery-driver-<id>`, built on the `steery-sdk` crate. A driver
+answers with the newest version of the program protocol that the runtime offers, from 7 down
+to 4. Every runtime that Steery supports offers version 4. The driver keeps the version that it
+picked. It plans needs only from version 5. It names says (`say`'s `id`, `stop`'s `say`) only in
+version 7.
+
+Steery adds the drivers below in the same way as it adds any program: from this repository's
+releases. Each release has a prebuilt executable per target. The command is
+`steery programs add https://github.com/steery-dev/drivers`, and Steery's installer runs it.
+Everything that a person sees of a driver comes from its `initialize` answer: its label, its
+short name, its tint and its mark.
 
 | Driver | Harness | Crate | Levels |
 |---|---|---|---|
@@ -24,99 +32,130 @@ name, its tint and its mark, is what its `initialize` says.
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 
-Each crate is a Cargo workspace of its own, with its own `Cargo.lock`, so it builds alone.
-What the drivers share is the [`common`](common/) crate, `steery-driver-common`, each
-driver naming it by path (`../common`): finding the harness's executable and asking its
-release under a bounded, killed probe (`program`); a transcript's lines read within
-bounds (`lines`); a file only appended to, read on from where the last read left it
-(`follow`); a transcript that is a tree of records, kept between reads and read along
-its path in batches, records off the path within the same bound (`tree`); and the
-harness's own sign-in run on a terminal of the driver's (`login`, see Signing in). Each driver
-keeps only how its harness's records name their parent and what they say.
+Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
+alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
+names it by path (`../common`). The `common` crate has these modules:
+
+- `program`: finds the harness's executable and asks its release, with a bounded probe that it kills past its bound.
+- `lines`: reads a transcript's lines within bounds.
+- `follow`: reads a file that its writer only appends to, from the point where the last read stopped.
+- `tree`: keeps a transcript that is a tree of records between reads.
+  It reads the transcript along its path in batches. Then it reads the records off the path,
+  within the same bound.
+- `login`: runs the harness's own sign-in on a terminal of the driver's (see Signing in).
+
+Each driver keeps only two things: how its harness's records name their parent, and what the
+records say.
 
 ## Finding and installing the harness
 
-A driver finds its harness's executable on `PATH`, then in the folder the harness's own
-installer writes it to, which a shell that has not read its profile since may not have on
-`PATH`; `setup/plan`'s `found.binary` is the one found, and every later start runs it.
-Where the harness is not found, `setup/plan` answers `install`: the vendor's own installer,
-which `steery setup` shows whole and runs only once the person agreed (PROTOCOL.md §4.1).
+A driver looks for its harness's executable in two places, in this order:
+
+1. On `PATH`.
+2. In the folder where the harness's own installer writes it. A shell that did not read its
+   profile after the install possibly does not have this folder on `PATH`.
+
+`setup/plan` gives the executable it found as `found.binary`. Every later start runs this
+executable. When the driver does not find the harness, `setup/plan` answers `install`. This is
+the vendor's own installer. `steery setup` shows it whole, and runs it only after the person
+agrees (PROTOCOL.md §4.1).
 
 | Driver | Installer folder | `install` (offered where its shell and `curl` are on `PATH`) |
 |---|---|---|
 | `omp` | `PI_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://omp.sh/install \| sh -s -- --binary"` |
-| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"` (offered only where npm is here and `node --version` names 22.19 or newer within 5 s; otherwise refused, saying which) |
+| `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"`. Offered only where npm is here and `node --version` names 22.19 or newer within 5 s. Else refused, with the requirement that is missing. |
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 
-Where `install` is not offered, `setup/plan` answers `refused` with why, in one line, which
-`steery setup --harness <id>` shows: "pi's installer needs Node.js 22.19 or newer and npm
-(`npm` is not on PATH)", or "omp's installer needs `sh` and `curl` on PATH: `curl` is not
-there". pi's installer exits 0 having installed nothing without them, so it is never run
-there.
+When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
+line. `steery setup --harness <id>` shows this line. Two examples:
 
-Where the harness is found in more than one place (two folders on `PATH`, or one and the
-installer's folder; a link to the same file is one place), `setup/plan` says so in a note: the
-one Steery runs (the first on `PATH`, else the installer's folder) and the others, never run. The protocol has
-no field for a list of binaries (`Found` is one `binary`), so the note is the only place.
+- "pi's installer needs Node.js 22.19 or newer and npm (`npm` is not on PATH)"
+- "omp's installer needs `sh` and `curl` on PATH: `curl` is not there"
+
+Without Node.js 22.19 or newer and npm, pi's installer exits 0 and installs nothing. Thus the
+driver does not offer it there, and Steery never runs it there.
+
+The driver can find the harness in more than one place: two folders on `PATH`, or one folder on
+`PATH` and the installer's folder. A link to the same file counts as one place. Then
+`setup/plan` says so in a note. The note names the executable that Steery runs (the first on
+`PATH`, else the one in the installer's folder). It also names the others, which Steery never
+runs. The protocol has no field for a list of binaries (`Found` has one `binary`). Thus the note
+is the only place for this list.
 
 ## Signing in
 
-`sign_in` is what a person does at the machine, read on their phone after "<harness> is not
-logged in on <machine>:". Whether it is true is `models`' `signed_in`, as the harness itself
-says.
+`sign_in` tells a person what to do at the machine. The person reads it on their phone after
+"<harness> is not logged in on <machine>:". `models`' `signed_in` tells whether the harness is
+signed in, as the harness itself says.
 
 | Driver | `sign_in` | `signed_in` |
 |---|---|---|
 | `omp` | ``run `omp login` in a terminal`` (`omp login` is the terminal counterpart of `/login`) | not told |
-| `pi` | ``run `pi` in a terminal and type /login in it`` (pi has no login command: its `auth` prints credentials and checks readiness) | not told |
+| `pi` | ``run `pi` in a terminal and type /login in it`` (pi has no login command. Its `auth` prints credentials and checks readiness.) | not told |
 | `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
-| `codex` | ``run `codex login` in a terminal`` | `codex login status`: exit 0 signed in; exit 1 with `Not logged in` not |
+| `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 
-Each probe is bounded by 5 s and killed past it. Where it gives no answer (it did not start
-or end in time, or exited otherwise: `codex login status` also exits 1 for a `config.toml`
-it cannot read, and its `Not logged in` says nothing where `config.toml` names a
-`model_provider` of its own), `signed_in` is absent and nothing is claimed. Why is written
-to standard error, the runtime's log of the driver, since `Models` has no field for a
-reason: showing it to a person needs one in the SDK (`signed_in_why?: string` beside
-`signed_in`, a protocol change).
+Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
+answer in these cases:
 
-Where it is not signed in, `setup/plan` asks the `sign-in` need (protocol 5), its ways best
-first: one whose return the Steery app catches, then a code typed on the vendor's page, then
-a key. A way that runs the harness's own login starts it unmodified on a terminal of the
-driver's ([`common/src/login.rs`](common/src/login.rs)) and answers its link as the next step,
-kept 10 minutes; one login waits at a time. Where the link returns to a loopback address, its
-`fills` names the step's `address` field (secret, never required). `needs/give` then takes:
+- It did not start.
+- It did not end in time.
+- It exited in another way. For example, `codex login status` also exits 1 for a `config.toml`
+  that it cannot read. Also, its `Not logged in` says nothing when `config.toml` names a
+  `model_provider` of its own.
+
+When the probe gives no answer, `signed_in` is absent and the driver claims nothing. The driver
+writes the reason to standard error, which is the runtime's log of the driver. `Models` has no
+field for a reason. To show the reason to a person, the SDK needs a field for it:
+`signed_in_why?: string` beside `signed_in`. This is a protocol change.
+
+When the harness is not signed in, `setup/plan` asks the `sign-in` need (protocol 5). It gives
+its ways best first:
+
+1. A way whose return the Steery app catches.
+2. A code that the person types on the vendor's page.
+3. A key.
+
+A way that runs the harness's own login starts that login unmodified on a terminal of the
+driver's ([`common/src/login.rs`](common/src/login.rs)). The driver answers with the login's
+link as the next step. The driver keeps the login for 10 minutes. Only one login waits at a
+time. When the link returns to a loopback address, the link's `fills` names the step's
+`address` field. This field is secret and never required. Then `needs/give` takes one of these:
 
 | Given | What the driver does |
 |---|---|
-| an address on the login's own port (`http://localhost:<port>/…`, `127.0.0.1`, `[::1]`) | GETs it from inside this host, so the harness's own listener completes the sign-in |
-| anything else | types it into the login's prompt, where it has one; else refused, naming the address to paste |
-| nothing | done once the login exited 0 within 20 s, else refused, saying to paste the address (or finish on the page) |
+| an address on the login's own port (`http://localhost:<port>/…`, `127.0.0.1`, `[::1]`) | GETs it from inside this host. The harness's own listener then completes the sign-in. |
+| anything else | types it into the login's prompt, where it has one. Else refused, with the address to paste. |
+| nothing | done when the login exited 0 within 20 s. Else refused, with a request to paste the address (or finish on the page). |
 
 | Driver | Ways, in order | Next step's link |
 |---|---|---|
-| `claude-code` | `claude-sign-in`, `api-key` | the link `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`), else its printed manual link |
-| `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s (`127.0.0.1:1455`); `--device-auth`'s page, its code in the step's label |
-| `omp` | one per provider below, `api-key` | the link `omp login <provider>` prints; a code it shows in the step's label |
+| `claude-code` | `claude-sign-in`, `api-key` | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
+| `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
+| `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
 | `pi` | `api-key` | none |
 
-omp lists its providers' ids and names (RPC `get_login_providers`, the `omp login` picker)
-but not how each signs in, and most only read an API key on its prompt, so the driver keeps
-its OAuth providers (`pi-family/src/sign_in.rs`, omp 18.12.6). Returning to an address:
-`openai-codex`, `google-gemini-cli`, `google-antigravity`, `openrouter`, `devin`, `stencil`,
-`gitlab-duo`, `gitlab-duo-agent` and `zai-coding-plan` (the last two return to an app's
-address, pasted). With a code on the vendor's page: `openai-codex-device`, `github-copilot`
-(its GitHub Enterprise question answered with Enter: github.com), `cursor`, `kimi-code`,
-`xai-oauth`, `muse-code`, `factory-droid` and `kilo`. Left out: `anthropic` (its terms),
-`perplexity` and `snowflake` (each asks an email or an account first).
+omp lists its providers' ids and names (RPC `get_login_providers`, the `omp login` picker). It
+does not list how each provider signs in. Most providers only read an API key on their prompt.
+Thus the driver keeps its own list of omp's OAuth providers (`pi-family/src/sign_in.rs`, omp
+18.12.6):
+
+- Return to an address: `openai-codex`, `google-gemini-cli`, `google-antigravity`,
+  `openrouter`, `devin`, `stencil`, `gitlab-duo`, `gitlab-duo-agent` and `zai-coding-plan`.
+  The last two return to an app's address, which the person pastes.
+- Code on the vendor's page: `openai-codex-device`, `github-copilot`, `cursor`, `kimi-code`,
+  `xai-oauth`, `muse-code`, `factory-droid` and `kilo`. The driver answers the GitHub
+  Enterprise question of `github-copilot` with Enter: github.com.
+- Left out: `anthropic` (its terms), `perplexity` and `snowflake` (each asks for an email or an
+  account first).
 
 ## Building
 
-The SDK and the protocol live in [steery-dev/sdk](https://github.com/steery-dev/sdk).
-Every crate names the SDK by git, at a tag,
-`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v6.0.0" }`, and pins its
-toolchain in `rust-toolchain.toml`:
+The SDK and the protocol are in [steery-dev/sdk](https://github.com/steery-dev/sdk). Every
+crate names the SDK by git, at a tag:
+`steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v6.0.0" }`. Every crate pins
+its toolchain in `rust-toolchain.toml`.
 
 ```sh
 git clone https://github.com/steery-dev/drivers
@@ -124,20 +163,30 @@ cd drivers/pi-family && cargo build
 cargo test
 ```
 
-Every build goes through [Kache](https://github.com/kunobi-ninja/kache), the compiler cache
-`.cargo/config.toml` names. Install it once per machine:
-`brew install kunobi-ninja/kunobi/kache && kache daemon install` on a Mac, its
-[APT package](https://kunobi.ninja/docs/kache/getting-started/installation) on Linux.
+Every build goes through [Kache](https://github.com/kunobi-ninja/kache), the compiler cache that
+`.cargo/config.toml` names. Install Kache once on each machine:
 
-`./release.sh <tag>` builds every driver with `--release --locked` for each target Steery
-runs on, `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` and
-`aarch64-unknown-linux-gnu` (the Linux builds linking glibc 2.30 at most), with
-`cargo zigbuild`, into `dist/<target>/`. It then packs them into `dist/release/` with
-`steery programs pack --release <tag> --out dist/release <target>=dist/<target>…`: one
-archive per driver and target and the manifest, `steery-programs.json` (PROTOCOL.md §7.1).
-With `--publish` it makes the GitHub release `<tag>` of those files (`gh release create`);
-with `--no-pack` it stops after building. It needs `cargo-zigbuild`, `zig`, the four targets
-(`rustup target add`), and `steery` on `PATH` or named by `STEERY`.
+- Mac: `brew install kunobi-ninja/kunobi/kache && kache daemon install`
+- Linux: its [APT package](https://kunobi.ninja/docs/kache/getting-started/installation)
+
+`./release.sh <tag>` does these steps:
+
+1. It builds every driver with `--release --locked` and `cargo zigbuild`, for each target that
+   Steery runs on, into `dist/<target>/`. The targets are `aarch64-apple-darwin`,
+   `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. The Linux
+   builds link glibc 2.30 at most.
+2. It packs them into `dist/release/` with
+   `steery programs pack --release <tag> --out dist/release <target>=dist/<target>…`. The
+   result is one archive per driver and target, and the manifest, `steery-programs.json`
+   (PROTOCOL.md §7.1).
+3. With `--publish`, it makes the GitHub release `<tag>` of those files (`gh release create`).
+
+With `--no-pack`, it stops after the build. It needs these:
+
+- `cargo-zigbuild`
+- `zig`
+- the four targets (`rustup target add`)
+- `steery` on `PATH`, or named by `STEERY`
 
 ## Checking a driver
 
@@ -146,179 +195,245 @@ steery programs test target/debug/steery-driver-omp
 steery programs test target/debug/steery-driver-pi
 ```
 
-`steery programs test [--setting NAME[=VALUE]]… <command> [args…]` starts the driver and
-checks what it says it is, the methods that read and change nothing, an id sent twice, a
-method it does not have, and its shutdown, one line per check; it exits 0 only when every
-one passes. A read answered with a refusal word its method lists is an answer.
-`--setting NAME=VALUE` passes a setting to `initialize`, and `--setting NAME` takes its value
-from the environment, keeping a secret off the command line; a method that needs a required
-setting not given is skipped. `models` asks the harness itself, so the harness must be on
-`PATH` for that check to pass. Each crate's own `cargo test` covers what it reads and writes.
+`steery programs test [--setting NAME[=VALUE]]… <command> [args…]` starts the driver. It checks
+these things, one line per check:
+
+- what the driver says it is
+- the methods that read and change nothing
+- an id sent twice
+- a method that the driver does not have
+- its shutdown
+
+The command exits 0 only when every check passes. A read that gets a refusal word that its
+method lists counts as an answer. `--setting NAME=VALUE` passes a setting to `initialize`.
+`--setting NAME` takes the value from the environment, so a secret stays off the command line.
+The command skips a method that needs a required setting which is not given. `models` asks the
+harness itself, so the harness must be on `PATH` for that check to pass. Each crate's own
+`cargo test` covers what the crate reads and writes.
 
 ## Writing a driver
 
-A driver for a harness Steery does not ship is a program like these. `pi-family/` is the
-worked example; copy it and keep its shape (the layout is below, under omp and pi).
+A driver for a harness that Steery does not ship is a program like these drivers. `pi-family/`
+is the worked example. Copy it and keep its shape (the layout is below, under omp and pi).
 
-- **Its crate** depends on `steery-sdk` by git as above, and on `steery-driver-common` by
-  path where it keeps a tree, follows a file or reads a receipt (in this repository
-  `../common`; copied elsewhere, beside it), with `tokio` for its runtime and `serde_json`
-  for the parameters, and declares an empty `[workspace]` so it builds alone.
-  Its binary is named `steery-driver-<id>`; `src/bin/omp.rs` is one line,
-  `steery_driver_pi_family::serve(Harness::Omp)`, which calls
-  `steery_sdk::serve(|_notifier| Driver::new(harness))`. The SDK reads requests, answers
-  each one, and gives the notifier for what the driver says unasked.
-- **`initialize`** (`Program::initialize` in `src/lib.rs`) answers the newest protocol
-  the runtime offers that it speaks (`steery_sdk::pick`), refusing a runtime that offers
-  none, keeps the `home` and `config` it is given, and answers
-  `wire::Initialized`: `program` (`id`, `kind: Harness`, `release`, `label`, `short`, and
-  optionally `tint` and `mark`, what a person sees of it),
-  `harness` (`HarnessInfo` from `src/harness.rs`: its levels, the harness's minimum release,
-  how it signs in, its facts, its hooks and its door; PROTOCOL.md §3.1), no `machine`, and
-  the settings it needs (none here; §3.4).
+- **Its crate** depends on `steery-sdk` by git, as above. It depends on `steery-driver-common`
+  by path where it keeps a tree, follows a file or reads a receipt. In this repository this
+  path is `../common`. In a copy elsewhere, the `common` crate goes beside the driver's crate.
+  The crate uses `tokio` for its runtime and `serde_json` for the parameters. It declares an
+  empty `[workspace]`, so it builds alone. Its binary has the name `steery-driver-<id>`.
+  `src/bin/omp.rs` is one line, `steery_driver_pi_family::serve(Harness::Omp)`. This line calls
+  `steery_sdk::serve(|_notifier| Driver::new(harness))`. The SDK reads requests and answers
+  each one. It also gives the notifier, which the driver uses for what it says unasked.
+- **`initialize`** (`Program::initialize` in `src/lib.rs`) answers with the newest protocol that
+  the runtime offers and that the driver speaks (`steery_sdk::pick`). It refuses a runtime that
+  offers none of them. It keeps the `home` and `config` that it gets. Its answer is
+  `wire::Initialized`, with these fields:
+  - `program`: `id`, `kind: Harness`, `release`, `label`, `short`, and optionally `tint` and
+    `mark`. This is what a person sees of the driver.
+  - `harness`: `HarnessInfo` from `src/harness.rs` (PROTOCOL.md §3.1). It holds the levels, the
+    harness's minimum release, how the harness signs in, its facts, its hooks and its door.
+  - no `machine`.
+  - the settings that the driver needs (none here; §3.4).
 - **The methods** (`Program::call`) are one match from each `steery_sdk::method` name to the
-  module that answers it, its parameters read with `steery_sdk::params` and its answer
-  given with `steery_sdk::result`: observe (`setup/plan`, `sessions/list`,
-  `sessions/locate`, `sessions/read`, `hook/read`, `mcp/list`; §4.1), drive (`held`,
-  `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`, `terminal`; §4.2), and
-  any other answers
-  `Error::Unknown`. A refusal is `Error::refused` with one of the protocol's words
-  (`steery_sdk::refusal`).
-- **Live** (§4.3) is a door. A harness with its own (`picks`, `keeps`) answers `say`,
-  `pick`, `stop` and `recap` in its driver, as `claude-code` and `codex` do. omp and pi have
-  none, so their door is `plugin`: Steery's plugin, which this repository keeps in
-  `pi-family/plugin/` and `setup/plan` installs, speaks the plugin door, version 1 (§4.4),
-  to the runtime itself, and the driver has no live methods. The runtime uses the live
-  methods only on conversations Steery started; a conversation a person started is never
-  steered.
+  module that answers it. The module reads its parameters with `steery_sdk::params`. It gives
+  its answer with `steery_sdk::result`. The methods are:
+  - observe (§4.1): `setup/plan`, `sessions/list`, `sessions/locate`, `sessions/read`,
+    `hook/read`, `mcp/list`.
+  - drive (§4.2): `held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
+    `terminal`.
+  - any other method answers `Error::Unknown`.
+
+  A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
+- **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
+  `pick`, `stop` and `recap` in its driver. `claude-code` and `codex` do this. omp and pi have
+  no door of their own, so their door is `plugin`. This repository keeps Steery's plugin in
+  `pi-family/plugin/`, and `setup/plan` installs it. The plugin speaks the plugin door,
+  version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
+  uses the live methods only on conversations that Steery started. The runtime never steers a
+  conversation that a person started.
 
 ## MCP servers
 
-`mcp/list` (protocol 4) answers the MCP servers a conversation loads: without `cwd`, the
-person's own; with `cwd`, those a conversation started there loads, as the harness itself
-decides. Of each server only its name and, for a URL server, the URL's scheme, host, port
-and path leave the machine; [`common/src/mcp.rs`](common/src/mcp.rs) reads the
-`mcpServers` files omp, pi and Claude Code share.
+`mcp/list` (protocol 4) answers with the MCP servers that a conversation loads:
+
+- Without `cwd`: the person's own servers.
+- With `cwd`: the servers that a conversation started in that folder loads, as the harness
+  itself decides.
+
+For each server, only its name leaves the machine. For a URL server, the URL's scheme, host,
+port and path also leave the machine. The file [`common/src/mcp.rs`](common/src/mcp.rs) reads
+the `mcpServers` files that omp, pi and Claude Code share.
 
 | Driver | Everywhere | In a folder, ahead of those | `complete` |
 |---|---|---|---|
-| `omp` | agent folder's `mcp.json`, `.mcp.json`; `enabled: false` off unless `enabledServers`; `disabledServers` off | `.omp/mcp.json`, `.omp/.mcp.json`; the folder's `mcp.json`, `.mcp.json` last; none where `config.yml` says `mcp.enableProjectConfig: false` | never: other tools' files, plugins, extensions |
+| `omp` | agent folder's `mcp.json`, `.mcp.json`. `enabled: false` off unless in `enabledServers`. `disabledServers` off. | `.omp/mcp.json`, `.omp/.mcp.json`. The folder's `mcp.json`, `.mcp.json` last. None where `config.yml` says `mcp.enableProjectConfig: false`. | never: other tools' files, plugins, extensions |
 | `pi` | agent folder's `mcp.json` | `.pi/mcp.json`, where `trust.json` trusts exactly that folder | never: extensions register servers |
-| `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`; `.mcp.json` where the folder is trusted and the server approved, not rejected (`start` runs `claude --bg`, an interactive background session that waits on approval, not `-p`); `disabledMcpServers` off | not with managed configuration, a plugin on, or a claude.ai sign-in |
+| `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`. `.mcp.json` where the folder is trusted and the server approved, not rejected. (`start` runs `claude --bg`, not `-p`. `claude --bg` is an interactive background session that waits on approval.) `disabledMcpServers` off. | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 
 ## Adding a driver
 
-A driver is added as every program is, Steery's own included (PROTOCOL.md §7.2):
+Steery adds a driver in the same way as every program, Steery's own included (PROTOCOL.md §7.2):
 
 ```sh
 steery programs add https://github.com/steery-dev/drivers
 steery programs add https://github.com/me/my-harness@v0.1.0 --setting MY_HARNESS_TOKEN
 ```
 
-`<source>` is a GitHub repository (its latest release, followed by `steery programs
-update`, or `@<tag>` for that one), a release's manifest, `steery-programs.json`, by URL or
-path, one program's archive, or a built `steery-driver-<id>` itself. Publish your own
-driver the way this repository does: build it for each target, pack it with
-`steery programs pack`, and make the release of those files. Nothing is built on the
-computer it is added to.
+`<source>` is one of these:
 
-Each program's build for this computer is fetched, checked against its sha256, copied into
-Steery's programs folder, started and checked as `steery programs test` checks it, with the
-settings given. A driver's settings (PROTOCOL.md §3.4), an API key or the account it acts
-as, are given here once: `--setting NAME=VALUE`, or `--setting NAME` to take the value from
-the environment; a secret one not given is typed at the terminal, unechoed. Steery prints
-what it will add and asks once at the terminal; `--yes` is that answer anywhere else. The
-runtime sends the settings in each `initialize` it sends the driver: it runs as a service
-(launchd, systemd) whose environment holds none of the person's shell variables, so a
-driver reads nothing it needs from its environment.
+- a GitHub repository: its latest release, which `steery programs update` follows, or
+  `@<tag>` for that release
+- a release's manifest, `steery-programs.json`, by URL or path
+- one program's archive
+- a built `steery-driver-<id>` itself
+
+To publish your own driver, do what this repository does:
+
+1. Build the driver for each target.
+2. Pack it with `steery programs pack`.
+3. Make the release of those files.
+
+Steery builds nothing on the computer that it adds the driver to.
+
+For each program, Steery does these steps with the build for this computer:
+
+1. It fetches the build.
+2. It checks the build against its sha256.
+3. It copies the build into Steery's programs folder.
+4. It starts the build and checks it as `steery programs test` checks it, with the settings
+   given.
+
+A driver's settings (PROTOCOL.md §3.4) are, for example, an API key or the account that the
+driver acts as. The person gives them here once: `--setting NAME=VALUE`, or `--setting NAME` to
+take the value from the environment. When the person does not give a secret setting, they type
+it at the terminal, with no echo. Steery prints what it will add and asks once at the terminal.
+`--yes` gives that answer in all other places. The runtime sends the settings in each
+`initialize` that it sends the driver. The runtime runs as a service (launchd, systemd), and
+the environment of this service holds none of the person's shell variables. Thus a driver reads
+nothing that it needs from its environment.
 
 `steery programs remove <id>` removes it.
 
 ## omp and pi: `pi-family/`
 
-omp is a fork of pi. Both write the same transcript, load the same plugin, read the same
-`PI_*` variables for their folders and run kept in their RPC mode, so one
-crate holds both drivers: a library, and two binaries, `steery-driver-omp` and
-`steery-driver-pi`, each one line that serves the library for its harness. Neither driver
-has settings.
+omp is a fork of pi. Both harnesses do these things:
 
-**Needs** (protocol 5; a driver that picked 4 plans none). Where the harness lists no model
-(`omp models --json` prints `{"models":[]}`, `pi --list-models` "No models available"), the
-plan asks `sign-in`. In omp, first one way per OAuth provider `omp login <provider>` signs in
-to, by its id (Signing in); then, in both, `api-key`: an Anthropic API key, checked for its
-`sk-ant-api` start and given back as `ANTHROPIC_API_KEY`, which both read. omp's and pi's own
-Claude login is never offered: it signs a third-party app in to a Claude plan, which
-Anthropic's terms forbid. pi has no login command, so it has the key alone.
+- write the same transcript
+- load the same plugin
+- read the same `PI_*` variables for their folders
+- run as kept processes in their RPC mode
+
+Thus one crate holds both drivers: a library, and two binaries, `steery-driver-omp` and
+`steery-driver-pi`. Each binary is one line that serves the library for its harness. Neither
+driver has settings.
+
+**Needs** (protocol 5: a driver that picked version 4 plans no needs). When the harness lists
+no model, the plan asks `sign-in`. For omp, this is when `omp models --json` prints
+`{"models":[]}`. For pi, this is when `pi --list-models` prints "No models available". The
+ways are:
+
+1. In omp only: one way per OAuth provider that `omp login <provider>` signs in to, by its id
+   (see Signing in).
+2. In both: `api-key`. This is an Anthropic API key. The driver checks that it starts with
+   `sk-ant-api`. The driver returns it as `ANTHROPIC_API_KEY`, which both harnesses read.
+
+The driver never offers omp's and pi's own Claude login. That login signs a third-party app in
+to a Claude plan, and Anthropic's terms forbid this. Because pi has no login command, pi has only
+the key.
 
 What each driver does:
 
-- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). They are read
-  from the transcripts under the agent folder (`~/.omp/agent`, `~/.pi/agent`, or
-  `PI_CODING_AGENT_DIR`; omp also `PI_CONFIG_DIR` and `OMP_PROFILE`), in
-  `sessions/<folder>/<started-at>_<id>.jsonl`. They are also read from the folder
-  `PI_CODING_AGENT_SESSION_DIR` names, from pi's `sessionDir` setting, and from the folders
-  of the transcripts the harness's moments named. A transcript is a tree: each entry names
-  its parent. The conversation is the path from the last entry back to a root, and only
-  that path is read. Where the conversation went back to an earlier entry and on from
-  there, the next read starts again from the beginning (`reset`). Events are turns and how
-  they ended, words, calls grouped as Steery groups them, tokens per response, models (in
-  pi with their thinking level), forks and omp's sub-agents. A failed model call ends its
-  turn only once the harness went no further. What a branch left behind spent is still
-  given, as each of its responses' `tokens`, once.
-- **Setup** (`setup/plan`). It plans the skill, Steery's plugin and, in omp, the MCP entry
-  in `mcp.json`. The plugin is a loader in `extensions/steery.ts` plus the copy of the
-  extension it runs, kept in the runtime's config folder. In pi the plugin carries the MCP
-  entry and registers it for each conversation (`exposure: direct`, so pi's model is given
-  each tool by name), with headers naming that conversation. A `steery` server in pi's own
-  `mcp.json`, or in the `.pi/mcp.json` of a folder pi trusts, wins over it with no headers,
-  and the plan notes each one it finds. A pi started while the runtime is down waits its
-  own 10 s for the entry and runs without Steery; the plugin connects the entry again once
-  the door is back. Where omp and pi are both installed and share one folder, neither is
-  set up.
-- **Moments** (`hook/read`). The plugin forwards each moment the harness gives it over the
-  door, and the driver reads it as a Moment.
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads them
+  from the transcripts under the agent folder, in `sessions/<folder>/<started-at>_<id>.jsonl`.
+  The agent folder is `~/.omp/agent`, `~/.pi/agent`, or `PI_CODING_AGENT_DIR`. For omp,
+  `PI_CONFIG_DIR` and `OMP_PROFILE` also change the agent folder. The driver also reads
+  transcripts from these folders:
+  - the folder that `PI_CODING_AGENT_SESSION_DIR` names
+  - the folder in pi's `sessionDir` setting
+  - the folders of the transcripts that the harness's moments named
+
+  A transcript is a tree: each entry names its parent. The conversation is the path from the
+  last entry back to a root. The driver reads only that path. A conversation can go back to an
+  earlier entry and continue from there. Then the next read starts again from the beginning
+  (`reset`). The events are these:
+  - turns and how they ended
+  - words
+  - calls, grouped as Steery groups them
+  - tokens per response
+  - models (in pi with their thinking level)
+  - forks
+  - omp's sub-agents
+
+  A failed model call ends its turn only when the harness does not continue after it. The
+  driver still gives the tokens that an abandoned branch used, once, as the `tokens` of each of
+  its responses.
+- **Setup** (`setup/plan`). The plan has these entries:
+  - the skill
+  - Steery's plugin
+  - in omp, the MCP entry in `mcp.json`
+
+  The plugin is a loader in `extensions/steery.ts`, plus the copy of the extension that the
+  loader runs. The runtime's config folder keeps this copy. In pi, the plugin carries the MCP
+  entry and registers it for each conversation, with headers that name that conversation. The
+  entry has `exposure: direct`, so pi gives its model each tool by name. A `steery` server in
+  pi's own `mcp.json`, or in the `.pi/mcp.json` of a folder that pi trusts, wins over the
+  plugin's entry, with no headers. The plan notes each such server that it finds. A pi process
+  that starts while the runtime is down waits its own 10 s for the entry. Then it runs without
+  Steery. The plugin connects the entry again when the door is back. When omp and pi are both
+  installed and share one folder, the plan writes no setup for either harness.
+- **Moments** (`hook/read`). The plugin forwards each moment that the harness gives it over the
+  door. The driver reads it as a Moment.
 - **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
   `terminal`).
-  - `held`: no registry, so the runtime looks for processes. In pi it also looks for a
-    stray process, since a pi without the plugin holds no file open.
-  - `models`: omp's comes from `omp models --json`, only those its `enabledModels` names
-    where it names any, with its default from `config.yml`, or `config.yaml` where that is
-    the only one there (omp itself reads both, in that order, and writes the one it read;
-    omp's code names `config.yaml` its legacy-compatible fallback).
-    pi's comes from `pi --list-models` and its RPC mode's `get_available_models`.
-  - `start`: a turn is a kept process, `--mode rpc` (omp's with `--no-ui`) with its
-    standard input held: it stays up between turns and takes every turn's words, the first
-    included, through the plugin door. omp continues by id (`--resume`) and checks a model
-    against its catalog first. pi continues by transcript (`--session <file>`) and passes a
-    model to the plugin as well (`--steery-model`), which ends the process with a refusal
-    where pi does not run it exactly. Neither harness makes a worktree for a turn, so a
-    fork or a new conversation asked for in one (`facts.worktrees`) starts in one the
-    driver makes, detached at `HEAD`, where omp keeps its own: under `OMP_WORKTREE_DIR`,
-    else `~/.omp/wt` (pi's `~/.pi/wt`), as `<4 hex>/<repository>`. A folder in no
-    repository is run in itself.
-  - `turn/read`: the harness's own refusals on standard error; its standard output is
-    discarded, and its door says what it does.
-  - `receipt/mark`, `receipt/find`: the person's message carrying the delivery marker, in
-    the transcript past a mark, or in all of it where the harness rewrote the file since
-    (some omp compactions do); words the door hands over mid-turn go in at the next tool.
-  - `reader`: a one-shot `--print` reader with everything closed that a flag closes.
+  - `held`: there is no registry, so the runtime looks for processes. In pi, the runtime also
+    looks for a stray process, because a pi process without the plugin does not hold a file
+    open.
+  - `models`: omp's models come from `omp models --json`. When omp's `enabledModels` names
+    models, the driver gives only those. The default comes from `config.yml`, or from
+    `config.yaml` when that is the only file there. The omp harness itself reads both, in that
+    order, and writes the one that it read. The code of omp names `config.yaml` its
+    legacy-compatible fallback. For pi, the models come from `pi --list-models` and its RPC
+    mode's `get_available_models`.
+  - `start`: a turn is a kept process, `--mode rpc` (omp's with `--no-ui`), with its standard
+    input held. The process stays alive between turns. It takes the words of every turn, the
+    first turn included, through the plugin door. For omp, a turn continues by id
+    (`--resume`). Before the launch, the driver checks a model against omp's catalog. For pi,
+    a turn continues by transcript (`--session <file>`). The pi command also passes a model to
+    the plugin (`--steery-model`). The plugin then ends the process with a refusal when pi
+    does not run that model exactly. Neither harness makes a worktree for a turn. Thus a fork
+    or a new conversation that asks for a worktree (`facts.worktrees`) starts in a worktree
+    that the driver makes, detached at `HEAD`. The driver makes it where omp keeps its own
+    worktrees: under `OMP_WORKTREE_DIR`, else `~/.omp/wt` (for pi, `~/.pi/wt`), as
+    `<4 hex>/<repository>`. A turn in a folder that is in no repository runs in that folder.
+  - `turn/read`: the harness's own refusals on standard error. The runtime discards the
+    harness's standard output. The door says what the harness does.
+  - `receipt/mark`, `receipt/find`: the person's message that carries the delivery marker. They
+    look in the transcript after a mark. When the harness rewrote the file after the mark, they
+    look in all of it (some omp compactions do this). Words that the door gives during a turn go
+    in at the next tool.
+  - `reader`: a one-shot `--print` reader. It closes everything that a flag can close.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
-The live methods (`say`, `pick`, `stop`, `force`, `recap`, `compact`) are the plugin door's
-(PROTOCOL.md §4.4), which the runtime speaks itself, so the drivers have none. A `say` is
-answered once the harness holds the words, dated `queued_at`, and asked again, once it
-took them into its turn (`taken_at`): omp and pi take a steer only between tool calls.
-`force` aborts the turn running so the held words go in next, in the same process: omp
-drains words left queued at an abort into a turn of their own.
+The live methods (`say`, `pick`, `stop`, `force`, `recap`, `compact`) belong to the plugin door
+(PROTOCOL.md §4.4). The runtime speaks this door itself, so the drivers have no live methods.
+The door answers a `say` when the harness holds the words, with the time in `queued_at`. When
+the runtime asks the same `say` again, the door answers when the harness took the words into
+its turn (`taken_at`). Both omp and pi take a steer only between tool calls. `force` aborts the
+running turn, so the held words go in next, in the same process. At an abort, omp puts the words
+that are still queued into a turn of their own.
 
-The door's `state` says `compacting` for every compaction the harness runs: pi's from its
-`session_before_compact` to its `session_compact` (or `session_compact_failed`); omp's own
-from `auto_compaction_start` to `auto_compaction_end`, and one asked of it (`/compact`, an
-extension's) from `session_before_compact` to `session_compact`, or to its next run where
-it failed, which omp tells an extension nothing of. Its `model` and `thinking` are pi's
-from `model_select` and `thinking_level_select`; omp says neither, so the door reads omp's
-own every second while it is open.
+The door's `state` says `compacting` for every compaction that the harness runs:
+
+- pi: from its `session_before_compact` to its `session_compact` (or `session_compact_failed`).
+- omp's own compaction: from `auto_compaction_start` to `auto_compaction_end`.
+- a compaction that something asks of omp (`/compact`, an extension's): from
+  `session_before_compact` to `session_compact`. When this compaction fails, `compacting` ends
+  at omp's next run. omp tells an extension nothing about the failure.
+
+The door's `model` and `thinking` come, in pi, from `model_select` and `thinking_level_select`.
+omp says neither. Thus the door reads omp's own model and thinking every second while the door
+is open.
 
 ### Layout: a template for a harness Steery does not ship
 
@@ -327,27 +442,29 @@ To connect another harness, copy `pi-family/` and keep its shape:
 | File | What it holds |
 |---|---|
 | `src/bin/<id>.rs` | The binary: `serve(Harness::…)`. |
-| `src/lib.rs` | `initialize`, and one match from each method to the module that answers it. Methods the harness cannot do answer `Error::Unknown`. |
-| `src/harness.rs` | Everything about the harness as Steery reads it: id, `HarnessInfo` (levels, minimum, identity, facts, hooks), its folders, its executable. Every other module asks here and never names a harness itself. |
-| `src/transcripts.rs` | Where the harness files conversations; `sessions/list`, `locate`, `read`, and the cursor's `mark`: the rest of the cursor and the batched read are `steery_driver_common::tree`'s. |
+| `src/lib.rs` | `initialize`, and one match from each method to the module that answers it. Methods that the harness cannot do answer `Error::Unknown`. |
+| `src/harness.rs` | Everything about the harness as Steery reads it: id, `HarnessInfo` (levels, minimum, identity, facts, hooks), its folders, its executable. Every other module asks here, and never names a harness itself. |
+| `src/transcripts.rs` | Where the harness files conversations. `sessions/list`, `locate`, `read`, and the cursor's `mark`. `steery_driver_common::tree` holds the rest of the cursor and the batched read. |
 | `src/tree.rs` | The transcript's format: here, how pi's entries name their parent, as a `steery_driver_common::tree::Shape`. |
 | `src/events.rs` | One record → the protocol's events. |
 | `src/calls.rs` | A tool call → `Call`: its group, MCP server, Steery's own tool, the questions it asks. |
 | `src/hooks.rs` | `hook/read`: a hook's document → `Moment`. |
-| `src/models.rs` | `models`: what the harness lists and the files whose change changes it. |
+| `src/models.rs` | `models`: what the harness lists, and the files whose change changes it. |
 | `src/drive.rs` | `held`, `idle`, `start`, `turn/read`, `receipt/*`, `reader`, `terminal`. |
 | `src/setup.rs` | `setup/plan`: the entries, each with what it carries. |
-| `plugin/` | Steery's plugin for harnesses whose door is `plugin`: the extension and its loader, embedded in the binary at build time. |
+| `plugin/` | Steery's plugin for harnesses whose door is `plugin`: the extension and its loader. The build embeds them in the binary. |
 
-A harness with its own door (`picks`, `keeps`) has no `plugin/` and answers `say`, `pick`
-and `recap` instead. One whose moments are hook commands answers `hook/answer` too.
+A harness with its own door (`picks`, `keeps`) has no `plugin/`. Its driver answers `say`,
+`pick` and `recap` itself. A driver whose harness has hook commands as moments also answers
+`hook/answer`.
 
 ### The plugin
 
 `pi-family/plugin/extension.ts` speaks the plugin door, version 1. It draws nothing in the
-harness and takes no answer there. `loader.ts` is the file the harness loads: it runs the
-copy of the extension the runtime's config folder names, and moves every session onto a
-newer copy once one is named. Typecheck them against pi's published types:
+harness and takes no answer there. `loader.ts` is the file that the harness loads. It runs the
+copy of the extension that the runtime's config folder names. When the config folder names a
+newer copy, the loader moves every session onto it. Typecheck the two files against pi's
+published types:
 
 ```sh
 cd pi-family/plugin && npm i && npm run check
@@ -355,125 +472,156 @@ cd pi-family/plugin && npm i && npm run check
 
 ## Claude Code: `claude-code/`
 
-One crate, one binary, `steery-driver-claude-code`. It has no settings. Claude Code keeps
+One crate, one binary: `steery-driver-claude-code`. It has no settings. Claude Code keeps
 everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
 
-**Needs** (protocol 5; a driver that picked 4 plans none). Where `claude auth status --json`
-says `"loggedIn": false` (an `ANTHROPIC_API_KEY` in its environment counts as signed in), the
-plan asks `sign-in` two ways. `api-key`: an Anthropic API key, checked for its `sk-ant-api`
-start and given back as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
-`-p` (the reader); a `--bg` session uses it only once approved, so a turn holding it passes
-`--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, writing nothing.
-`claude-sign-in`, offered first: the driver runs the unmodified `claude auth login` on a
-terminal of its own with `BROWSER` naming a script of the driver's, which records the link
-Claude Code opens (`redirect_uri=http://localhost:<port>/callback`), and answers that link as
-the step `claude-sign-in-return`, the address filling its field; where no `$BROWSER` call came
-within 3 s of the printed manual link, the manual link is the step's (its page shows a code,
-and nothing fills the field). Claude Code keeps the sign-in on this host, and the driver keeps
-no token. A driver started again has no sign-in waiting, so a step then is `not-found`.
+**Needs** (protocol 5: a driver that picked version 4 plans no needs). When
+`claude auth status --json` says `"loggedIn": false`, the plan asks `sign-in` in two ways. An
+`ANTHROPIC_API_KEY` in Claude Code's environment counts as signed in. The ways are:
 
-- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). They are read
-  from `projects/<folder>/<id>.jsonl` under the root, and from the `projects` folder of any
-  transcript the harness's moments named. A conversation resumed goes on in its own file.
-  A sub-agent's transcript is filed under its conversation's,
-  `<id>/subagents/agent-<agent>.jsonl`, with the `.meta.json` beside it naming its type,
-  task and the call that started it. A run a program started (`entrypoint: sdk-cli`) is
-  no conversation until a person carries it on; one the Claude app started
-  (`entrypoint: claude-desktop`) is `app`. Events are turns and how they ended (an API
-  error with its status and code, and when a limit lifts where it says so), words, calls
-  grouped as Steery groups them, tokens per response, models and sub-agents: those its
-  lead started, and how each ended as Claude Code's `<task-notification>` told it,
-  whether it came as a person's message or as a queued attachment. A sub-agent's own
-  turn ends where it hands its report back (`SubagentHandback`). An API error is its
-  turn's end only once Claude Code went no further: while the transcript may still gain a
-  retry's answer, the error and what follows it wait for the next read, as in omp.
-- **Setup** (`setup/plan`). Steery's MCP entry in `.claude.json` (beside the root where
-  it is `~/.claude`), the skill in `skills/steery/SKILL.md`, and one hook per event in
-  `settings.json`, at `/hooks/<event>/-`: one group beside the person's own that runs
-  `steery hook claude-code <event>`. `found.release` is what `claude --version` says.
-- **Moments** (`hook/read`, `hook/answer`). A hook's document becomes a Moment, with the
-  state Claude Code's documents carry: the model (`SessionStart`'s `model`,
-  `PostModelSwitch`'s `to_model`), the effort (`effort.level`) and, at `StopFailure`, the
-  failure (`error`, its words in `last_assistant_message`). They carry no time, and
-  `PreCompact`/`PostCompact` carry no compaction's id or tokens, so compactions stay the
-  transcript's. Steery's answer becomes what Claude Code reads:
-  `hookSpecificOutput.additionalContext`, a `Stop` that keeps the turn going (`decision:
-  block`), a `PreToolUse` or `PermissionRequest` decision, and the conversation's lead
-  written to `CLAUDE_ENV_FILE` (`append`).
+1. `claude-sign-in`, offered first. The driver runs the unmodified `claude auth login` on a
+   terminal of its own, with `BROWSER` naming a script of the driver's. This script records the
+   link that Claude Code opens (`redirect_uri=http://localhost:<port>/callback`). The driver
+   answers this link as the step `claude-sign-in-return`, and the address fills the step's
+   field. Sometimes no `$BROWSER` call comes within 3 s of the printed manual link. Then the
+   step has the manual link. Its page shows a code, and nothing fills the field.
+2. `api-key`: an Anthropic API key. The driver checks that it starts with `sk-ant-api`. The
+   driver returns it as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
+   `-p` (the reader). A `--bg` session uses it only after approval. Thus a turn that holds the
+   key passes `--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, and writes
+   nothing.
+
+Claude Code keeps the sign-in on this host. The driver keeps no token. A driver that started
+again has no sign-in that waits. Thus a step at that time is `not-found`.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads them
+  from `projects/<folder>/<id>.jsonl` under the root. It also reads them from the `projects`
+  folder of any transcript that the harness's moments named. A resumed conversation continues
+  in its own file. Claude Code files a sub-agent's transcript under the transcript of its
+  conversation, as `<id>/subagents/agent-<agent>.jsonl`. The `.meta.json` beside it names its
+  type, its task and the call that started it. A run that a program started
+  (`entrypoint: sdk-cli`) is not a conversation until a person continues it. A run that the
+  Claude app started (`entrypoint: claude-desktop`) is `app`. The events are these:
+  - turns and how they ended: an API error with its status and code, and the time when a limit
+    ends, where the error says so
+  - words
+  - calls, grouped as Steery groups them
+  - tokens per response
+  - models
+  - sub-agents that its lead started, and how each ended, as Claude Code's
+    `<task-notification>` told it. The notification can come as a person's message or as a
+    queued attachment.
+
+  A sub-agent's own turn ends where it returns its report (`SubagentHandback`). An API error
+  ends its turn only when Claude Code does not continue after it. The transcript can still get
+  the answer of a retry. While it can, the error and the records after it wait for the next
+  read, as in omp.
+- **Setup** (`setup/plan`). The plan has these entries:
+  - Steery's MCP entry in `.claude.json` (beside the root, when the root is `~/.claude`)
+  - the skill in `skills/steery/SKILL.md`
+  - one hook group per event in `settings.json`, at `/hooks/<event>/-`, beside the person's
+    own groups. Steery's group runs `steery hook claude-code <event>`
+
+  `found.release` is what `claude --version` says.
+- **Moments** (`hook/read`, `hook/answer`). A hook's document becomes a Moment, with the state
+  that Claude Code's documents carry:
+  - the model (`SessionStart`'s `model`, `PostModelSwitch`'s `to_model`)
+  - the effort (`effort.level`)
+  - at `StopFailure`, the failure (`error`, with its words in `last_assistant_message`)
+
+  The documents carry no time. `PreCompact`/`PostCompact` carry no compaction id or tokens. Thus
+  compactions come only from the transcript. Steery's answer becomes what Claude Code reads:
+  - `hookSpecificOutput.additionalContext`
+  - a `Stop` that keeps the turn running (`decision: block`)
+  - a `PreToolUse` or `PermissionRequest` decision
+  - the conversation's lead, written to `CLAUDE_ENV_FILE` (`append`)
 - **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
   `reader`, `terminal`).
   - `held`: Claude Code's registry, `sessions/<pid>.json`, names the live session in a
-    conversation. A background session is its owner's to stop, by `claude stop`, through
-    an owner token; a terminal is a process the runtime stops. Without a registered
-    session, the runtime looks for processes holding the transcript.
+    conversation. Only its owner can stop a background session: the driver runs `claude stop`
+    with the session's owner token. A terminal is a process that the runtime stops. When no
+    session is registered, the runtime looks for processes that hold the transcript.
   - `idle`: what `claude agents --json --all` lists, with the registry.
-  - `stop`: a background session through `claude stop <job>`, which keeps the
-    conversation, then every command its process had started and that outlived it (its
-    tools' shells run in process groups of their own, which `claude stop` leaves running):
-    SIGTERM to each and the group it leads, SIGKILL to what is still there 500 ms on. A
-    stop naming a say (protocol 7) ends the session only where the turn running took that
-    say's words; where another turn runs, or the words still wait in the inbox, it is
-    refused `other-turn`, and where no turn runs it is `stopped: false`.
+  - `stop`: for a background session, the driver first runs `claude stop <job>`, which keeps
+    the conversation. Then it stops every command that the session's process started and that
+    outlived it. The shells of its tools run in their own process groups, and `claude stop`
+    leaves them running. The driver sends SIGTERM to each command and to the group that the
+    command leads. After 500 ms, it sends SIGKILL to what is still there. A stop that names a
+    say (protocol 7) ends the session only when the running turn took that say's words. When
+    another turn runs, or the words still wait in the inbox, the stop is refused
+    `other-turn`. When no turn runs, the answer is `stopped: false`.
   - `start`: a turn is a background session (`claude --bg`, `--resume`, `--fork-session`,
     `-w`, `--model`, `--effort`). The plan runs this driver's own binary in its turn mode
-    (`steery-driver-claude-code turn …`), which starts the session and follows it through
-    `claude agents` to where its turn stopped; `turn/read` reads those lines and Claude
-    Code's own refusals (`untrusted`, `not-found`, `harness-busy`, `selection-unsupported`).
-    The launch gives that session its own `Stop` and `StopFailure` hooks (`--settings`),
-    which run the binary's `heard` mode into a file the follower reads: whether a stop the
-    listing shows is this turn's, and Claude Code's words for an API error. Each line the
-    turn mode writes says whether the session's transcript, past where it ended before the
-    launch, holds the person's input carrying the words' delivery marker yet; `turn/read`
-    gives that as `took` (none for words carrying no marker). Steery's own variables
-    (`STEERY_STARTED`) reach the session in the same settings, as `env`, and never through
-    the launch's environment: Claude Code's supervisor keeps the environment of the launch
-    that started it for every session after
-    it. A continue of a conversation whose background job Claude Code keeps
-    (`jobs/<id>/state.json`) wakes that job with `claude --bg --resume <id>` and no other
-    flag, since any flag beside it starts a copy: the job goes on with the settings its
-    first launch gave it, and a model or effort it would not run is refused first
-    (`selection-unsupported`). A copy Claude Code starts anyway is stopped and removed, and
-    the turn refused in its words. A turn the runtime stops (a signal to the turn mode)
-    ends its session through `claude stop`, which keeps the conversation, and then the
-    commands it left running, as `stop` does: no signal of the runtime's reaches a process
-    of the supervisor's.
-  - `receipt/mark`, `receipt/find`: the person's input carrying the delivery marker, in
-    the transcript past a mark.
+    (`steery-driver-claude-code turn …`). The turn mode starts the session. It follows the
+    session through `claude agents` to the point where its turn stopped. `turn/read` reads
+    those lines and Claude Code's own refusals (`untrusted`, `not-found`, `harness-busy`,
+    `selection-unsupported`). The launch gives that session its own `Stop` and `StopFailure`
+    hooks (`--settings`). These hooks run the binary's `heard` mode into a file that the
+    follower reads. The file tells whether a stop that the listing shows belongs to this turn.
+    It also holds Claude Code's words for an API error. Each line that the turn mode writes
+    also tells whether the session's transcript holds the person's input with the words'
+    delivery marker yet. The turn mode looks only after the point where the transcript ended
+    before the launch. `turn/read` gives that as `took` (none for words with no marker).
+    Steery's own variables (`STEERY_STARTED`) reach the session in the same settings, as
+    `env`. They never go through the launch's environment. Claude Code's supervisor keeps the
+    environment of the launch that started it, for every later session.
+
+    Claude Code can keep the background job of a conversation (`jobs/<id>/state.json`). A
+    continue of that conversation wakes the job with `claude --bg --resume <id>` and no other
+    flag, because any flag beside it starts a copy. The job continues with the settings that
+    its first launch gave it. The driver first refuses a model or an effort that the job would
+    not run (`selection-unsupported`). When Claude Code starts a copy anyway, the driver stops
+    and removes the copy. It refuses the turn in Claude Code's words. When the runtime stops a
+    turn (a signal to the turn mode), the turn mode ends its session through `claude stop`.
+    This keeps the conversation. Then it stops the commands that the session left running, as
+    `stop` does. It does this because no signal of the runtime reaches a process of the
+    supervisor.
+  - `receipt/mark`, `receipt/find`: the person's input that carries the delivery marker, in the
+    transcript after a mark.
   - `models`: Claude Code's documented aliases (`opus`, `sonnet`, `haiku`, `fable`, `best`,
-    `opusplan`, `opus[1m]`, `sonnet[1m]`), the model in `settings.json` first, only those
-    `availableModels` allows (the managed list where one is set, else the user's
-    `settings.json`; an alias only where every model it may run is allowed), each with
-    Claude Code's effort levels, as any other it runs; and `signed_in` from
-    `claude auth status`, watching the files a login rewrites (`.claude.json`,
-    `.credentials.json`).
-  - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode` and no session
+    `opusplan`, `opus[1m]`, `sonnet[1m]`). The model in `settings.json` comes first. The list
+    holds only the models that `availableModels` allows. This is the managed list where one is
+    set, else the user's `settings.json`. An alias is in the list only when every model that it
+    can run is allowed. Each model in the list has Claude Code's effort levels. `signed_in`
+    comes from `claude auth status`. The driver watches the files that a login rewrites
+    (`.claude.json`, `.credentials.json`).
+  - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode`, and no session
     kept.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session
-    holds it, and the Claude app's link for a conversation it started.
-- **Live** (`say`, `session/changed`), for a conversation Steery started that a Claude Code
-  session holds. Words go into the inbox socket the registered session opens, after its
-  peer token; the socket says nothing back, so they are unconfirmed (`took: false`) and the
-  runtime finds them with `receipt/find`. A say with an `id` (protocol 7) is kept with where
-  the transcript ended as its words went in; the transcript then names the turn that took
-  them (a `user` record that begins it, or a queued prompt a running turn reads between its
-  calls), and `session/changed` names the say in that turn's `says`, and in `settled` once
-  it ended. The transcript, read on as it grows, also says: `retrying` while a running
-  turn waits out the `retryInMs` of its newest `api_error` record that no answer followed,
-  with `retry` its `retryAttempt`, `maxRetries` plus one and the error's `formatted` words
-  (the next try's time has no field in `LiveRetry`); `jobs`, the shells, monitors and
-  sub-agents the main thread's calls left running (`backgroundTaskId`, a monitor's
-  `taskId`, an `async_launched` `agentId`) since the process holding the session took it
-  (its registry entry's `startedAt`: work ends with the process that ran it, telling
-  nothing), until a `<task-notification>` tells their end, by a final `status` or a
-  monitor's `event` saying it expired, timed out or was stopped, filed as a queued command
-  in a running turn or as the words of a turn of its own, or a `TaskStop`/`KillShell`
-  call stops them; and a `permission prompt` dialog's title, `Allow <tool>: <command or
-  path>?`, from the newest answer's first call with no result (Claude Code asks about an
-  answer's calls in its order), unless that is a sub-agent's. Work started before the
-  newest answer a newly started driver reads back to is not counted. Nothing Claude Code
-  writes shows a compaction while it runs (its `compact_boundary` comes once it is done),
-  so `compacting` stays false. The session keeps its own model, so `pick` is unsupported,
-  and there is no `recap`.
+    holds the conversation. Also the Claude app's link for a conversation that the app started.
+- **Live** (`say`, `session/changed`) is for a conversation that Steery started and that a
+  Claude Code session holds.
+  - Words go into the inbox socket that the registered session opens, after its peer token.
+    The socket says nothing back. Thus the words are unconfirmed (`took: false`), and the
+    runtime finds them with `receipt/find`.
+  - The driver keeps a say with an `id` (protocol 7) together with the point where the
+    transcript ended when its words went in. The transcript then names the turn that took the
+    words. This is a `user` record that begins the turn, or a queued prompt that a running turn
+    reads between its calls. `session/changed` names the say in that turn's `says`, and in
+    `settled` after the turn ended.
+  - The driver reads the transcript as it grows. The transcript also gives `retrying`, `jobs`
+    and a dialog's title.
+  - `retrying`: true while a running turn waits for the `retryInMs` of its newest `api_error`
+    record that no answer followed. `retry` holds the record's `retryAttempt`, `maxRetries`
+    plus one, and the error's `formatted` words. `LiveRetry` has no field for the time of the
+    next try.
+  - `jobs`: the shells, monitors and sub-agents that the main thread's calls left running
+    (`backgroundTaskId`, a monitor's `taskId`, an `async_launched` `agentId`). The driver
+    counts only jobs from the time when the process that holds the session took it (its
+    registry entry's `startedAt`). Work ends with the process that ran it, and that end tells
+    nothing. A job stays in `jobs` until a `<task-notification>` tells its end, or until a
+    `TaskStop`/`KillShell` call stops it. The notification tells the end by a final `status`.
+    For a monitor, it tells the end by an `event` that says the monitor expired, timed out or
+    was stopped. Claude Code files the notification as a queued command in a running turn, or
+    as the words of a turn of its own.
+  - A `permission prompt` dialog's title, `Allow <tool>: <command or path>?`. It comes from the
+    first call with no result in the newest answer. Claude Code asks about an answer's calls in
+    its order. When that call is a sub-agent's, the title does not name the call.
+  - The driver does not count work that started before the newest answer to which a newly
+    started driver reads back.
+  - Nothing that Claude Code writes shows a compaction while it runs. Its `compact_boundary`
+    comes only after the compaction is done. Thus `compacting` stays false.
+  - The session keeps its own model, so `pick` is unsupported. There is no `recap`.
 
 ```sh
 cd claude-code && cargo build
@@ -481,108 +629,153 @@ steery programs test target/debug/steery-driver-claude-code
 cargo test
 ```
 
-`cargo test` needs no Claude Code; the reader's test runs only where `claude` is on `PATH`.
+`cargo test` needs no Claude Code. The reader's test runs only where `claude` is on `PATH`.
 
 ## Codex: `codex/`
 
-One binary, `steery-driver-codex`, with no settings. It speaks to Codex only through what
-Codex publishes: its rollout files, `hooks.json` and `config.toml`, `codex app-server` (its
-JSON-RPC over standard input and output), `codex app-server proxy` (the bytes of a running
-app server's control socket), the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`, `codex exec`,
-`codex mcp list` and `codex features list`. Codex's home is `CODEX_HOME`, else `~/.codex`.
+One binary, `steery-driver-codex`, with no settings. It speaks to Codex only through what Codex
+publishes:
 
-**Needs** (protocol 5; a driver that picked 4 plans none). Where `codex login status` says
-not logged in (see Signing in), the plan asks `sign-in` three ways, run on a terminal of the
-driver's in Codex's home. `chatgpt`: `codex login`, its printed loopback link
-(`127.0.0.1:1455`) the step `chatgpt-return`, which the address fills. `device`:
-`codex login --device-auth`, its page and one-time code the step `device-code`, with no field.
-`api-key`: an OpenAI API key, read by `codex login --with-api-key` on standard input and kept
-by Codex.
+- its rollout files
+- `hooks.json` and `config.toml`
+- `codex app-server` (its JSON-RPC over standard input and output)
+- `codex app-server proxy` (the bytes of a running app server's control socket)
+- the Codex app's router `<CODEX_HOME>/ipc/ipc.sock`
+- `codex exec`
+- `codex mcp list` and `codex features list`
 
-- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). Rollouts are read
-  from `sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl`. A thread continued in
-  more than one rollout is one conversation, its newest rollout the current one; two
-  equally current ones name it ambiguously (`complete: false`). A sub-agent's rollout (its
-  `session_id` names another thread) is listed under its lead, never as a conversation, and
-  so is not a `codex exec` run. A fork's history (`history_base`) is read from its parent's
-  rollout up to where the fork took it, then a `fork` event, then its own. Events are turns
-  and how they ended (a failure classified by its status or Codex's own code), the
-  person's words with the files and pictures they attached (Codex's own fragments left
-  out), the agent's words and reasoning, calls and their results, each response's own
-  tokens (`token_usage_record`, by its response id, cache writes included) and the running
-  total with the context left, compactions with the context before and after them (the
-  count Codex makes right after; it records no reason), models and efforts, sub-agents
-  started and how they ended, and rollbacks; a rollback that does not say how many turns
-  went is refused.
-- **Setup** (`setup/plan`). The MCP entry in `config.toml` (`mcp_servers.steery`, its
-  `tool_timeout_sec` the runtime's bound, `default_tools_approval_mode = "approve"`: under
-  `approval_policy = "never"` a tool Codex would ask about is refused), the rule
-  `rules/steery.rules` that runs `steery` outside Codex's sandbox (the macOS sandbox denies
-  the Keychain, so the CLI cannot reach this machine's key inside it), the skill in
-  `skills/steery/SKILL.md`, and one hook group per moment in `hooks.json`, beside the
-  person's own (`/hooks/<Event>/-`).
-  Codex runs a hook only once its person trusted it, and keys that trust by the hook's
-  place: where a Steery hook its person trusted moved because another tool put a group
-  ahead of it, the plan writes the same trust again where it now stands (asked of Codex's
-  own `hooks/list`, never computed here).
-- **Hooks** (`hook/read`, `hook/answer`). Codex's documents become Moments, the model
-  each names kept as state; an answer
-  becomes what Codex parses: `additionalContext` on `SessionStart` and `UserPromptSubmit`,
-  `decision: "block"` at `Stop`, a `permissionDecision` on `PreToolUse`, and a `decision`
-  with its `behavior` (and the standing permission chosen) on `PermissionRequest`.
+Codex's home is `CODEX_HOME`, else `~/.codex`.
+
+**Needs** (protocol 5: a driver that picked version 4 plans no needs). When
+`codex login status` says not logged in (see Signing in), the plan asks `sign-in` in three
+ways. The driver runs each way on a terminal of its own, in Codex's home.
+
+1. `chatgpt`: `codex login`. Its printed loopback link (`127.0.0.1:1455`) is the step
+   `chatgpt-return`. The address fills this step.
+2. `device`: `codex login --device-auth`. Its page and one-time code are the step
+   `device-code`, with no field.
+3. `api-key`: an OpenAI API key. `codex login --with-api-key` reads it on standard input, and
+   Codex keeps it.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads
+  rollouts from `sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl`. A thread that
+  continues in more than one rollout is one conversation. Its newest rollout is the current
+  one. When two rollouts are equally current, they name the conversation ambiguously
+  (`complete: false`). The driver lists a sub-agent's rollout under its lead, never as a
+  conversation. (The `session_id` of that rollout names another thread.) The driver also does
+  not list a `codex exec` run as a conversation. The driver reads a fork's history
+  (`history_base`) from its parent's rollout, up to the point where the fork took it. Then comes
+  a `fork` event, then the fork's own rollout. The events are these:
+  - turns and how they ended (a failure is classified by its status or by Codex's own code)
+  - the person's words, with the files and pictures that the person attached (with no
+    fragments of Codex's own)
+  - the agent's words and reasoning
+  - calls and their results
+  - each response's own tokens (`token_usage_record`, by its response id, cache writes
+    included)
+  - the running total, with the context left
+  - compactions, with the context before and after them. The context after is the count that
+    Codex makes right after the compaction. Codex records no reason.
+  - models and efforts
+  - sub-agents that started, and how they ended
+  - rollbacks
+
+  The driver refuses a rollback that does not say how many turns went.
+- **Setup** (`setup/plan`). The plan has these entries:
+  - The MCP entry in `config.toml` (`mcp_servers.steery`). Its `tool_timeout_sec` is the
+    runtime's bound. It has `default_tools_approval_mode = "approve"`, because under
+    `approval_policy = "never"` Codex refuses a tool that it would ask about.
+  - The rule `rules/steery.rules`, which runs `steery` outside Codex's sandbox. The macOS
+    sandbox denies the Keychain, so inside the sandbox the CLI cannot reach this machine's key.
+  - The skill in `skills/steery/SKILL.md`.
+  - One hook group per moment in `hooks.json`, beside the person's own (`/hooks/<Event>/-`).
+
+  Codex runs a hook only after its person trusted it. Codex keys that trust by the hook's
+  place. Another tool can put a group ahead of a Steery hook that the person trusted, and so
+  move it. Then the plan writes the same trust again at the hook's new place. The plan asks
+  Codex's own `hooks/list` where the hook now stands, and never computes it here.
+- **Hooks** (`hook/read`, `hook/answer`). Codex's documents become Moments. The driver keeps the
+  model that each document names as state. An answer becomes what Codex parses:
+  - `additionalContext` on `SessionStart` and `UserPromptSubmit`
+  - `decision: "block"` at `Stop`
+  - a `permissionDecision` on `PreToolUse`
+  - a `decision` with its `behavior` (and the standing permission chosen) on
+    `PermissionRequest`
 - **Drive.**
-  - `held`: a native owner where one takes the thread's words: the window of the Codex app
-    that owns it, or a running app server of its home that has it loaded with nothing
-    queued. Else the runtime looks, an app server holding it being beyond reach.
-  - `idle`: the owner's own state, else where the rollout's newest turn stands, while
-    nothing holds the rollout; with the model and thinking the thread runs on (its running
-    app server's `thread/read` where one has it loaded, else the rollout's newest
-    `turn_context`) and when its newest turn began and ended.
-  - `start`: this binary in its turn mode, `steery-driver-codex turn --codex <codex>
-    <continue|fork|new> [<thread>] [--worktree] [--model m] [--thinking t] --inbox <socket>`.
-    It opens the thread (`thread/resume`, `thread/fork`, `thread/start`), starts the turn,
-    writes every message of the app server to standard output, takes more words on the
-    inbox (`turn/steer`, or `turn/start` once the turn ended) and ends with the last turn.
-    A worktree is made where Codex makes its own, `<CODEX_HOME>/worktrees/<4 hex>/<repo>`.
-  - `turn/read`: the thread named, the words taken (by their delivery marker), how each turn
-    completed, and the app server's refusals (`harness-busy` beside a live writer). Its
-    lines' events go to the runtime before the rollout is read, each under the rollout's
-    own id: turns begun and ended, the agent's words and reasoning, shell and MCP calls
-    and their results, the running token total, the model (rerouted included), and the
-    thread's title (`thread/name/updated`). A person's words and a compaction are left to
-    the rollout: the app server names them by ids the rollout does not keep.
-  - `stop`: the owner interrupts its own turn and it is seen to end. A stop naming a say
-    (protocol 7) interrupts only the turn that say's words went into, through the window or
-    app server that owns the thread now, a terminal Codex's thread too; where another turn
-    runs, or which one runs cannot be told, it is refused `other-turn`, and where none runs
-    it is `stopped: false`.
-  - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn
-    after them carrying the delivery marker.
-  - `models`: the app server's `model/list`, the default first; and `signed_in` from `codex
-    login status` (see Signing in), watching `auth.json` so a login is seen at once.
-  - `reader`: `codex exec --json --ephemeral` with every MCP server turned off, every tool
-    and feature it can do without taken away, and a read-only sandbox; `reader/read` takes
-    its last agent message.
+  - `held`: a native owner, where one takes the thread's words. The owner is the window of the
+    Codex app that owns the thread. Or it is a running app server of its home that has the
+    thread loaded with nothing queued. Else the runtime looks, because an app server that holds
+    the thread is out of reach.
+  - `idle`: the owner's own state. Else, while nothing holds the rollout, the state of the
+    rollout's newest turn. It gives the model and thinking that the thread runs on, and when its
+    newest turn began and ended. The model and thinking come from the running app server's
+    `thread/read` where one has the thread loaded. Else they come from the rollout's newest
+    `turn_context`.
+  - `start`: this binary in its turn mode,
+    `steery-driver-codex turn --codex <codex> <continue|fork|new> [<thread>] [--worktree] [--model m] [--thinking t] --inbox <socket>`.
+    The turn mode does these steps:
+    1. It opens the thread (`thread/resume`, `thread/fork`, `thread/start`).
+    2. It starts the turn.
+    3. It writes every message of the app server to standard output.
+    4. It takes more words on the inbox (`turn/steer`, or `turn/start` after the turn ended).
+    5. It ends with the last turn.
+
+    A worktree goes where Codex makes its own, `<CODEX_HOME>/worktrees/<4 hex>/<repo>`.
+  - `turn/read`: the thread named, the words taken (by their delivery marker), and how each
+    turn completed. Also the app server's refusals (`harness-busy` beside a live writer). The
+    events of its lines go to the runtime before the driver reads the rollout. Each event has
+    the rollout's own id. The events are these:
+    - turns that began and ended
+    - the agent's words and reasoning
+    - shell and MCP calls and their results
+    - the running token total
+    - the model (rerouted included)
+    - the thread's title (`thread/name/updated`)
+
+    The driver leaves a person's words and a compaction to the rollout. The app server names
+    them by ids that the rollout does not keep.
+  - `stop`: the owner interrupts its own turn, and the driver sees the turn end. A stop that
+    names a say (protocol 7) interrupts only the turn that the say's words went into. It goes
+    through the window or app server that owns the thread now, also for a terminal Codex's
+    thread. When another turn runs, or the driver cannot tell which turn runs, the stop is
+    refused `other-turn`. When no turn runs, the answer is `stopped: false`.
+  - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn after
+    them that carries the delivery marker.
+  - `models`: the app server's `model/list`, the default first. `signed_in` comes from
+    `codex login status` (see Signing in). The driver watches `auth.json`, so it sees a login
+    at once.
+  - `reader`: `codex exec --json --ephemeral` with every MCP server off, no tool or feature
+    that it does not need, and a read-only sandbox. `reader/read` takes its last agent
+    message.
   - `terminal`: `codex resume <thread>`, and the app's `codex://threads/<thread>`.
-- **Live** (`say`, `pick`, and `session/changed`), for a conversation Steery started. Words
-  go to the window that owns the thread, as typed in its composer, else into the running
-  app server's queue, whose acknowledgement is not delivery (`took: false`). A say with an
-  `id` (protocol 7) is tied to the turn that took its words: the one Codex named as it took
-  them, else the turn whose person input carries its delivery marker once the thread's
-  history has it; `session/changed` names it in that turn's `says`, and in `settled` once it
-  ended. A pick is checked against the list of an app server of the driver's own: for a
-  thread a running app server has loaded it is set as the thread's settings
-  (`thread/settings/update`); for a thread a window owns it is kept and sent with the next
-  words Steery says there (`thread-follower-start-turn` carries model and effort), and read
-  back as picked. Each thread the runtime asks about is followed and said as
-  `session/changed`: a window's own state of it through the router, and a thread a running
-  app server has loaded (the window's own or one with nothing but its queue) through that
-  app server, looked at every second and at once on `thread/status/changed`, never
-  subscribed to (an app server sends a thread's approvals to every client subscribed to
-  it, and this client refuses them). The live state carries the turn, `pending` (the
-  queue, `thread/queue/list`), the model and thinking, the context left, the calls running
-  and lately ended (from the rollout's newest records), and `settled`. Codex has no recap
-  short of a turn, so `recap` is unknown.
+- **Live** (`say`, `pick`, and `session/changed`) is for a conversation that Steery started.
+  - Words go to the window that owns the thread. The window takes them as words typed into its
+    composer. Else they go into the running app server's queue. The queue's acknowledgement is
+    not delivery (`took: false`).
+  - The driver ties a say with an `id` (protocol 7) to the turn that took its words. This is
+    the turn that Codex named when it took them. Else it is the turn whose person input carries
+    the say's delivery marker, once the thread's history has it. `session/changed` names the say
+    in that turn's `says`, and in `settled` after the turn ended.
+  - The driver checks a pick against the list of an app server of its own. For a thread that a
+    running app server has loaded, the driver sets the pick as the thread's settings
+    (`thread/settings/update`). For a thread that a window owns, the driver keeps the pick. It
+    sends the pick with the next words that Steery says there (`thread-follower-start-turn`
+    carries model and effort). The driver reads it back as picked.
+  - The driver follows each thread that the runtime asks about, and says it as
+    `session/changed`. For a window, it follows the window's own state of the thread through
+    the router. A running app server can have a thread loaded: the window's own, or one with
+    nothing but its queue. The driver follows that thread through that app server. It looks at the
+    thread every second, and at once on `thread/status/changed`. It never subscribes to the
+    thread. An app server sends a thread's approvals to every client subscribed to it, and this
+    client refuses them.
+  - The live state carries these:
+    - the turn
+    - `pending` (the queue, `thread/queue/list`)
+    - the model and thinking
+    - the context left
+    - the calls that run, and the calls that ended lately (from the rollout's newest records)
+    - `settled`
+  - Codex has no recap other than a turn, so `recap` is unknown.
 
 Build and check it, with Codex on `PATH`:
 

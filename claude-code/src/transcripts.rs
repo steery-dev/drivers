@@ -341,12 +341,12 @@ impl Store {
         match people.len() {
             0 => Err(Error::refused(
                 refusal::NOT_FOUND,
-                format!("Claude Code's {id} is a run no person is in"),
+                format!("Claude Code's {id} is a run that no person is in"),
             )),
             1 => Ok(people.remove(0)),
             _ => Err(Error::refused(
                 refusal::REFUSED,
-                format!("more than one Claude Code transcript answers to {id}"),
+                format!("more than one Claude Code transcript has the id {id}"),
             )),
         }
     }
@@ -1044,7 +1044,7 @@ fn turn_mark(turn: Turn) -> u64 {
 fn parse_cursor(cursor: &str) -> Result<Cursor, Error> {
     Cursor::parse(CURSOR, cursor)
         .filter(|cursor| cursor.mark <= 2)
-        .ok_or_else(|| Error::invalid(format!("`{cursor}` is no cursor this driver gave")))
+        .ok_or_else(|| Error::invalid(format!("this driver did not give the cursor `{cursor}`")))
 }
 
 /// The events of a transcript's path after `cursor`, or of its records within `tail`

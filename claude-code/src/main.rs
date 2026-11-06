@@ -68,16 +68,16 @@ pub(crate) const STEERY: &str = "steery";
 /// UUID was written under the project. No variable in the agent's environment carries it;
 /// the only other place it appears is the hook document, which a hook reads and an agent
 /// cannot.
-const KNOWING: &str = "Claude Code substitutes the identifier into this text as it loads it, so it is already\n\
-                       here: `${CLAUDE_SESSION_ID}`. Send what you are reading there, if what you are reading is\n\
-                       a UUID. If it still reads as that name in braces then nothing replaced it, and nothing\n\
-                       else on this machine reaches the identifier — no variable in your environment carries it\n\
-                       — so describe nothing.";
+const KNOWING: &str = "Claude Code puts the identifier into this text when it loads the text, so the\n\
+                       identifier is already here: `${CLAUDE_SESSION_ID}`. If you read a UUID there, send it.\n\
+                       If you still read that name in braces, nothing replaced it. Then nothing else on this\n\
+                       machine gives the identifier, and no variable in your environment holds it. In that\n\
+                       case, describe nothing.";
 
 /// How Claude Code's transcript file reads.
-const TRANSCRIPT: &str = "One JSON record per line: `user` and `assistant` records carry `message.content`, \
-                          and each names the one before it in `parentUuid`, so the last record's chain is \
-                          the conversation.";
+const TRANSCRIPT: &str = "One JSON record on each line. `user` and `assistant` records hold `message.content`. \
+                          Each record names the record before it in `parentUuid`. The chain of the last record \
+                          is the conversation.";
 
 /// The driver: where Claude Code is, from `initialize`, the last listing of its background
 /// sessions, the sign-ins it started that wait for their code, the says it gave live
@@ -117,7 +117,7 @@ impl ClaudeCode {
     fn place(&self) -> Result<&Place, Error> {
         self.place
             .get()
-            .ok_or_else(|| Error::invalid("`initialize` came first"))
+            .ok_or_else(|| Error::invalid("`initialize` must come first"))
     }
 
     fn store(&self) -> Result<&transcripts::Store, Error> {
@@ -218,7 +218,7 @@ impl Program for ClaudeCode {
                 let _: harness::Fold = given(params)?;
                 Err(Error::refused(
                     refusal::SELECTION_UNSUPPORTED,
-                    "Claude Code has no plugin door to carry its records",
+                    "Claude Code has no plugin door that sends its records",
                 ))
             }
             method::MCP_LIST => result(mcp::list(
@@ -260,7 +260,7 @@ impl Program for ClaudeCode {
                 let _: harness::Pick = given(params)?;
                 Err(Error::refused(
                     refusal::SELECTION_UNSUPPORTED,
-                    "Claude Code's inbox keeps the session's own model",
+                    "Claude Code's inbox always uses the model of the session",
                 ))
             }
             method::RECAP => result(live::recap(Arc::clone(self.shared()?), given(params)?).await?),
@@ -397,7 +397,9 @@ pub(crate) fn install() -> Result<steery_sdk::wire::harness::Install, String> {
     let line = "curl -fsSL https://claude.ai/install.sh | bash";
     Ok(steery_sdk::wire::harness::Install {
         argv: vec!["bash".into(), "-c".into(), line.into()],
-        about: format!("Claude Code's own installer, its native build into ~/.local/bin: {line}"),
+        about: format!(
+            "Claude Code's own installer. It installs the native build into ~/.local/bin: {line}"
+        ),
     })
 }
 

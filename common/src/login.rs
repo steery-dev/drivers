@@ -180,7 +180,7 @@ impl Waiting {
             .held()
             .take_if(|login| login.way == way)
             .ok_or_else(|| {
-                gone(format!("No {label} sign-in waits on this host any more: start it again"))
+                gone(format!("No {label} sign-in waits on this host now. Start the sign-in again."))
             })?;
         let given = given.trim();
         let before = login.said.borrow().len();
@@ -194,13 +194,13 @@ impl Waiting {
                 }
                 None if login.reads_code => {
                     if let Err(e) = login.type_line(given) {
-                        return Err(refused(format!("{label}'s sign-in took nothing: {e}")));
+                        return Err(refused(format!("{label}'s sign-in did not take the input: {e}")));
                     }
                 }
                 None => {
                     let line = login.back.as_ref().map_or_else(
-                        || format!("{label}'s sign-in reads nothing here: leave it empty"),
-                        |back| format!("Paste the whole address your browser ended on: {}", back.starts()),
+                        || format!("{label}'s sign-in does not read this field. Leave it empty."),
+                        |back| format!("Paste the full address where your browser ended: {}", back.starts()),
                     );
                     self.put_back(login);
                     return Err(refused(line));
@@ -223,16 +223,16 @@ impl Waiting {
             Err(_) => {
                 let line = match (&login.back, given.is_empty()) {
                     (Some(back), true) => format!(
-                        "{label} has not finished signing in: paste the address your browser \
-                         ended on ({})",
+                        "{label} did not complete the sign-in. Paste the address where your \
+                         browser ended ({}).",
                         back.starts()
                     ),
                     (None, true) => format!(
-                        "{label} has not finished signing in: finish on the page, then continue"
+                        "{label} did not complete the sign-in. Complete it on the page, then continue."
                     ),
                     (_, false) => own_line(&login.said.borrow(), before, echo).unwrap_or_else(|| {
                         format!(
-                            "{label} did not finish signing in within {} s",
+                            "{label} did not complete the sign-in within {} s",
                             ENDS_WITHIN.as_secs()
                         )
                     }),
@@ -292,7 +292,7 @@ impl Visit {
     async fn go(&self) -> Result<(), String> {
         let unreached = |e: std::io::Error| {
             format!(
-                "Nothing answered on {}:{} ({e}): start the sign-in again",
+                "Nothing answered on {}:{} ({e}). Start the sign-in again.",
                 self.host, self.port
             )
         };
@@ -322,7 +322,7 @@ impl Visit {
             if head.starts_with(b"HTTP/") {
                 Ok(())
             } else {
-                Err(format!("{}:{} answered no HTTP", self.host, self.port))
+                Err(format!("{}:{} did not answer with HTTP", self.host, self.port))
             }
         })
         .await

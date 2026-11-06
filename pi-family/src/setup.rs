@@ -60,8 +60,8 @@ pub async fn plan(
             refused,
             entries: Vec::new(),
             notes: vec![
-                "Not installed here: no executable found, and a configuration directory is not \
-                 evidence of one."
+                "Not installed here. The driver found no executable. A configuration directory \
+                 does not prove that an executable is installed."
                     .into(),
             ],
             install,
@@ -73,16 +73,19 @@ pub async fn plan(
     let other = harness.other();
     if other.binary().is_some() && other.root(home).as_ref() == Ok(&root) {
         return Ok(refused(format!(
-            "pi and omp are both installed here and both keep their configuration in {} — the \
-             skill Steery writes is one file, and it cannot belong to both. Unset the variable \
-             that moved them together, or give each one its own directory, and run setup again.",
+            "pi and omp are both installed here, and both keep their configuration in {}. Steery \
+             writes the skill as one file, and that file cannot belong to both. Unset the \
+             variable that moved them together, or give each one its own directory. Then run \
+             setup again.",
             root.display()
         )));
     }
     let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
     if release.is_none() {
-        notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
+        notes.push(
+            "`--version` did not answer, so the driver says nothing about this build.".into(),
+        );
     }
     notes.extend(harness.others_note(&binary));
     let found = Found {
@@ -145,24 +148,24 @@ pub async fn plan(
         },
     ]);
     notes.push(format!(
-        "It gets {} {} decides for itself when to ask and when to ask for the next \
-         instruction; nothing Steery writes stands in front of it.",
+        "It gets {} {} itself decides when to ask and when to ask for the next instruction. \
+         Nothing that Steery writes overrides that decision.",
         match harness {
             Harness::Omp => "the MCP entry, the skill and Steery's extension.",
-            Harness::Pi => "the skill and Steery's extension, which carries its MCP entry.",
+            Harness::Pi => "the skill and Steery's extension. The extension holds its MCP entry.",
         },
         harness.id()
     ));
     notes.push(
-        "Steery's extension says what each of its conversations is doing, and takes your \
-         words into one that is open. Whatever fails in it leaves the harness as it would be \
-         with no Steery."
+        "Steery's extension says what each of its conversations does, and it puts your words \
+         into an open conversation. If something in the extension fails, the harness works as \
+         it does without Steery."
             .into(),
     );
     if harness == Harness::Pi {
         notes.extend(own_servers(&root).into_iter().map(|file| {
             format!(
-                "{} has its own `{SERVER}` server; remove it to use Steery's extension.",
+                "{} has its own `{SERVER}` server. Remove it to use Steery's extension.",
                 file.display()
             )
         }));

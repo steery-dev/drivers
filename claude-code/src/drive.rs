@@ -29,12 +29,12 @@ const IN_A_TERMINAL: &str = "in a terminal";
 
 /// What a person reads of a process holding a conversation that Claude Code's registry
 /// does not name: Steery cannot speak to it or stop it.
-const UNREACHED: &str = "Claude Code open where Steery can't reach: quit it";
+const UNREACHED: &str = "Claude Code is open where Steery cannot reach it. Quit that Claude Code.";
 
 /// What a terminal into a Claude Code background session says: the session holds the
 /// conversation, and attaching to it starts nothing beside it.
 const IN_BACKGROUND: &str =
-    "Held by a Claude Code background session; it keeps running when you leave it";
+    "A Claude Code background session holds it. The session does not stop when you leave it.";
 
 /// How long one listing of `claude agents` answers `idle` for every conversation asked
 /// about meanwhile: a sweep asks for each in turn, and each listing starts the harness.
@@ -106,9 +106,9 @@ fn held_by(
             Some(_) if between_turns => HolderStop::Owner(None),
             Some(token) => HolderStop::Owner(Some(token)),
             // A process whose start cannot be read is one ending.
-            None => {
-                HolderStop::Beyond("Claude Code background session is ending: try again".into())
-            }
+            None => HolderStop::Beyond(
+                "The Claude Code background session ends now. Try again.".into(),
+            ),
         },
         (Ok(pid), None) => match started(pid) {
             Some(process_start) => HolderStop::Process {
@@ -117,9 +117,11 @@ fn held_by(
                 certain: true,
                 how: IN_A_TERMINAL.into(),
             },
-            None => HolderStop::Beyond(format!("Claude Code pid {pid} is ending: try again")),
+            None => HolderStop::Beyond(format!("Claude Code pid {pid} ends now. Try again.")),
         },
-        (Err(_), _) => HolderStop::Beyond("Claude Code is in a process Steery can't name".into()),
+        (Err(_), _) => {
+            HolderStop::Beyond("Claude Code runs in a process that Steery cannot identify".into())
+        }
     };
     Holder::Person { door, stop }
 }
@@ -306,7 +308,7 @@ pub async fn stop(root: &Path, store: &Store, says: &Says, stop: Stop) -> Result
             None => {
                 return Ok(Stopped {
                     stopped: false,
-                    proof: Some("no Claude Code background session is in it now".into()),
+                    proof: Some("no Claude Code background session holds it now".into()),
                 });
             }
         },
@@ -323,7 +325,8 @@ pub async fn stop(root: &Path, store: &Store, says: &Says, stop: Stop) -> Result
             return Ok(Stopped {
                 stopped: false,
                 proof: Some(format!(
-                    "Claude Code in a terminal (pid {pid}) has no stop of its own; it is signalled"
+                    "Claude Code in a terminal (pid {pid}) has no stop of its own. Steery signals \
+                     it."
                 )),
             });
         }
@@ -336,7 +339,9 @@ pub async fn stop(root: &Path, store: &Store, says: &Says, stop: Stop) -> Result
     };
     let job = Job::of(&token)
         .filter(|job| job.session == stop.external_id)
-        .ok_or_else(|| Error::invalid("the owner token names no background session of it"))?;
+        .ok_or_else(|| {
+            Error::invalid("the owner token names no background session of this conversation")
+        })?;
     let deadline = tokio::time::Instant::now() + STOP_WITHIN;
     let dir = registry::dir(root);
     let refused = |line: String| Error::refused(refusal::NOT_STOPPED, line);
@@ -426,7 +431,7 @@ pub(crate) async fn end_left(running: &[(u32, u64)], deadline: tokio::time::Inst
         }
     }
     let killed = registry::kernel::signal(running, libc::SIGKILL);
-    format!(", and of the {termed} processes it left running {killed} were sent SIGKILL")
+    format!(", and of the {termed} processes that it left running, {killed} got SIGKILL")
 }
 
 /// Whether the turn running in `external_id` took the words of say `say` (PROTOCOL.md
@@ -444,7 +449,7 @@ fn said_turn(
     let Some(live) = registry::live(&registry::dir(root), external_id) else {
         return Ok(Some(Stopped {
             stopped: false,
-            proof: Some("no Claude Code session is in it now".into()),
+            proof: Some("no Claude Code session holds it now".into()),
         }));
     };
     match live.status.as_deref() {
@@ -455,7 +460,7 @@ fn said_turn(
                 proof: Some(format!("the Claude Code session in it is {status}")),
             }));
         }
-        None => return other("the Claude Code session in it says nothing of a turn"),
+        None => return other("the Claude Code session in it says nothing about a turn"),
     }
     let transcript = store.transcript(external_id).ok();
     says.read(external_id, transcript.as_deref());
@@ -467,9 +472,11 @@ fn said_turn(
     {
         Ok(None)
     } else if says.waits(external_id, say) {
-        other("its words still wait in Claude Code's inbox: the turn running is another")
+        other(
+            "its words still wait in Claude Code's inbox. The turn that runs is a different turn.",
+        )
     } else {
-        other("the turn running in Claude Code did not take its words")
+        other("the turn that runs in Claude Code did not take its words")
     }
 }
 
@@ -517,7 +524,7 @@ pub fn mark(root: &Path, store: &Store, mark: ReceiptMark) -> Result<Marked, Err
 /// records the transcript gained past the mark. Two carrying it is refused.
 pub fn find(find: ReceiptFind) -> Result<Receipt, Error> {
     let mark: Mark = serde_json::from_str(&find.mark)
-        .map_err(|_| Error::invalid("the mark is no mark of this driver's"))?;
+        .map_err(|_| Error::invalid("this driver did not make the mark"))?;
     let end = End {
         dev: mark.dev,
         ino: mark.ino,
@@ -810,14 +817,14 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
         }
         (Act::Continue | Act::Fork, None) => {
             return Err(Error::invalid(
-                "a continue or a fork names its conversation",
+                "a continue or a fork must name its conversation",
             ));
         }
         (Act::New, _) => {}
         (Act::Hand, _) => {
             return Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
-                "a hand over is no turn of Claude Code's",
+                "Claude Code does not run a hand over as a turn",
             ));
         }
     }
@@ -826,7 +833,7 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
     {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
-            format!("Claude Code takes no effort {thinking}"),
+            format!("Claude Code does not take the effort {thinking}"),
         ));
     }
     if let Some(model) = &start.model
@@ -839,7 +846,9 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
         ));
     }
     let me = std::env::current_exe()
-        .map_err(|e| Error::refused(refusal::START_FAILED, format!("finding this driver: {e}")))?;
+        .map_err(|e| {
+            Error::refused(refusal::START_FAILED, format!("cannot find this driver: {e}"))
+        })?;
     let mut argv = vec![
         me.to_str()
             .ok_or_else(|| Error::refused(refusal::START_FAILED, "this driver's path is not text"))?
@@ -887,7 +896,7 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
     let filed = session.transcripts.first().ok_or_else(unknown)?;
     let root = config_root(filed).ok_or_else(unknown)?;
     if !terminal.cwd.is_absolute() {
-        return Err(Error::invalid("the folder is no absolute path"));
+        return Err(Error::invalid("the folder is not an absolute path"));
     }
     let cwd = terminal
         .cwd
@@ -930,7 +939,8 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
         }) => (
             format!("--resume {id}"),
             Some(format!(
-                "Claude Code has it open already (pid {pid}); this opens a second session on it."
+                "Claude Code has it open already (pid {pid}). This command opens a second session \
+                 on it."
             )),
         ),
         Some(Holder::Person {
@@ -989,14 +999,14 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     if !reader.cwd.is_absolute() {
-        return Err(Error::invalid("the reader's folder is no absolute path"));
+        return Err(Error::invalid("the reader's folder is not an absolute path"));
     }
     if let Some(thinking) = &reader.thinking
         && !EFFORT.contains(&thinking.as_str())
     {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
-            format!("Claude Code takes no effort {thinking}"),
+            format!("Claude Code does not take the effort {thinking}"),
         ));
     }
     let mut argv: Vec<String> = vec![

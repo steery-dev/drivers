@@ -66,7 +66,7 @@ impl Driver {
     fn place(&self) -> Result<&Place, Error> {
         self.place
             .get()
-            .ok_or_else(|| Error::invalid("`initialize` came first"))
+            .ok_or_else(|| Error::invalid("`initialize` must come first"))
     }
 
     fn store(&self) -> Result<&transcripts::Store, Error> {

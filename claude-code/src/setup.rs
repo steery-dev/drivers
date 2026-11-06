@@ -23,8 +23,8 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Result
             refused,
             entries: Vec::new(),
             notes: vec![
-                "Not installed here: no executable found, and a configuration directory is not \
-                 evidence of one."
+                "Not installed here. The driver found no executable. A configuration directory \
+                 does not prove that an executable is installed."
                     .into(),
             ],
             install,
@@ -38,7 +38,9 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Result
     };
     let mut notes = Vec::new();
     if release.is_none() {
-        notes.push("`--version` did not answer, so nothing about this build is claimed.".into());
+        notes.push(
+            "`--version` did not answer, so the driver says nothing about this build.".into(),
+        );
     }
     notes.extend(crate::others_note(&binary));
     Ok(Planned {
