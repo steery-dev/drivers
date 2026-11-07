@@ -179,13 +179,17 @@ Every build goes through [Kache](https://github.com/kunobi-ninja/kache), the com
    result is one archive per driver and target, and the manifest, `steery-programs.json`
    (PROTOCOL.md §7.1).
 3. With `--publish`, it makes the GitHub release `<tag>` of those files (`gh release create`).
+   It records the release on Steery's `drivers-releases` train: `build` as it starts, then
+   `shipped`, or `failed` with the step that stopped it. Steery's `release-of-commit` reads that
+   train to say which release first carries a commit.
 
-With `--no-pack`, it stops after the build. It needs these:
+With `--no-pack`, it stops after the build, and `--publish` needs the pack step. It needs these:
 
 - `cargo-zigbuild`
 - `zig`
 - the four targets (`rustup target add`)
-- `steery` on `PATH`, or named by `STEERY`
+- `steery` on `PATH`, or named by `STEERY`; with `--publish`, signed in to the `steery-dev`
+  workspace
 
 ## Checking a driver
 
