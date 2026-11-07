@@ -244,7 +244,7 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick`, `stop` and `recap` in its driver. `claude-code` and `codex` do this. omp and pi have
+  `pick` and `stop` in its driver. `claude-code` and `codex` do this. omp and pi have
   no door of their own, so their door is `plugin`. This repository keeps Steery's plugin in
   `pi-family/plugin/`, and `setup/plan` installs it. The plugin speaks the plugin door,
   version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
@@ -414,7 +414,7 @@ What each driver does:
   - `reader`: a one-shot `--print` reader. It closes everything that a flag can close.
   - `terminal`: the command line that resumes a conversation in a terminal.
 
-The live methods (`say`, `pick`, `stop`, `force`, `recap`, `compact`) belong to the plugin door
+The live methods (`say`, `pick`, `stop`, `force`, `compact`) belong to the plugin door
 (PROTOCOL.md §4.4). The runtime speaks this door itself, so the drivers have no live methods.
 The door answers a `say` when the harness holds the words, with the time in `queued_at`. When
 the runtime asks the same `say` again, the door answers when the harness took the words into
@@ -454,7 +454,7 @@ To connect another harness, copy `pi-family/` and keep its shape:
 | `plugin/` | Steery's plugin for harnesses whose door is `plugin`: the extension and its loader. The build embeds them in the binary. |
 
 A harness with its own door (`picks`, `keeps`) has no `plugin/`. Its driver answers `say`,
-`pick` and `recap` itself. A driver whose harness has hook commands as moments also answers
+`pick` and `stop` itself. A driver whose harness has hook commands as moments also answers
 `hook/answer`.
 
 ### The plugin
@@ -620,7 +620,7 @@ again has no sign-in that waits. Thus a step at that time is `not-found`.
     started driver reads back.
   - Nothing that Claude Code writes shows a compaction while it runs. Its `compact_boundary`
     comes only after the compaction is done. Thus `compacting` stays false.
-  - The session keeps its own model, so `pick` is unsupported. There is no `recap`.
+  - The session keeps its own model, so `pick` is unsupported.
 
 ```sh
 cd claude-code && cargo build
@@ -774,7 +774,6 @@ ways. The driver runs each way on a terminal of its own, in Codex's home.
     - the context left
     - the calls that run, and the calls that ended lately (from the rollout's newest records)
     - `settled`
-  - Codex has no recap other than a turn, so `recap` is unknown.
 
 Build and check it, with Codex on `PATH`:
 

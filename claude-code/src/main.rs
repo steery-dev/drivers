@@ -271,7 +271,6 @@ impl Program for ClaudeCode {
                     "Claude Code's inbox always uses the model of the session",
                 ))
             }
-            method::RECAP => result(live::recap(Arc::clone(self.shared()?), given(params)?).await?),
             // A reader's output is its answer whole: there is no `reader/read`.
             _ => Err(Error::Unknown),
         }

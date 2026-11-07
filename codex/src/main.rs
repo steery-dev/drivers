@@ -214,8 +214,6 @@ impl Program for Codex {
             method::TERMINAL => result(self.drive()?.terminal(steery_sdk::params(params)?)?),
             method::SAY => result(self.drive()?.say(steery_sdk::params(params)?).await?),
             method::PICK => result(self.drive()?.pick(steery_sdk::params(params)?).await?),
-            // Codex has no way to ask a thread's own model for a recap without running a
-            // turn in it.
             method::NEEDS_GIVE if self.needs() => result(
                 self.sign_ins
                     .give(self.drive()?.store.root(), steery_sdk::params(params)?)

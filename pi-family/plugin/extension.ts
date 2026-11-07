@@ -16,7 +16,7 @@
 // the runtime answers the one paragraph Steery has for its agent (`say`), and at a turn's
 // end (`settle`) the words that keep it going. In a
 // conversation Steery started, the runtime asks the copy over the same door to hand words
-// to it (`say`), switch its model (`pick`), stop a turn (`stop`), recap it (`recap`) and
+// to it (`say`), switch its model (`pick`), stop a turn (`stop`) and
 // compact it (`compact`). The copy draws nothing in the harness and takes no answer there:
 // a person answers Steery on Steery's own surfaces. pi's copy also carries Steery's MCP
 // entry, registering it for each conversation with headers naming it; omp lets no
@@ -199,20 +199,6 @@ const READ_FIELDS: Record<string, true> = {
  */
 const REREAD_MS = 5000;
 
-/**
- * How long the conversation's own recap may take ([`recap`]): under the forty seconds the
- * runtime waits for it.
- */
-const RECAP_MS = 35000;
-
-/** What the conversation's own model is asked for a recap, after its own history. */
-const RECAP_ASKED =
-  "Steery is carrying this conversation to another machine, where a new agent goes on from it. " +
-  "Do not use any tool and do not carry on with the work. Write a recap for that agent, in a few " +
-  "paragraphs: what the person asked for, decisions and why, work completed, the exact files and " +
-  "commands that matter, unresolved errors, and what remains. Say what was verified and what was " +
-  "not. Stay under 1500 words. No credentials, tokens or keys. Answer with the recap alone.";
-
 /** How many answered asks the door remembers, so an ask sent again is answered once. */
 const REMEMBERED = 256;
 
@@ -348,9 +334,6 @@ type Usage = { tokens?: number | null; contextWindow?: number } | undefined;
 /** A model as both harnesses hold one; Steery names it `<provider>/<id>`. */
 type Model = { provider: string; id: string; /** The wire its provider speaks. */ api?: string };
 
-/** One model request's answer, as both harnesses return it: its text parts and how it stopped. */
-type Answered = { content?: { type?: string; text?: string }[]; stopReason?: string; errorMessage?: string };
-
 /** The session's own input line, where it has one: the same in pi's terminal and its RPC clients. */
 type Ui = {
   getEditorText?(): string;
@@ -373,16 +356,7 @@ type Context = {
     getEntries?(): unknown[];
     /** Both: the entries from the first to where the conversation stands now, oldest first. */
     getBranch?(): unknown[];
-    /**
-     * Both: what the model is handed on the conversation's next turn — its messages,
-     * compacted where it was — as the harness builds it itself.
-     */
-    buildSessionContext?(): { messages?: unknown[] };
-    /** pi 1.0.0: the same, with where each message came from. */
-    buildSessionProjection?(): { messages?: unknown[] };
   };
-  /** Both: the system prompt its turns run under now. */
-  getSystemPrompt?(): string;
   getContextUsage?(): Usage;
   isIdle?(): boolean;
   hasPendingMessages?(): boolean;
@@ -429,13 +403,6 @@ type Context = {
      * omp watches its `config.yml` itself.
      */
     refresh?(options?: { signal?: AbortSignal }): Promise<unknown>;
-    /**
-     * pi 1.0.0: one request to a model through its provider, authenticated as a turn
-     * is, nothing written into the conversation.
-     */
-    complete?(model: Model, context: unknown, options?: { signal?: AbortSignal }): Promise<Answered>;
-    /** omp 18.4.12: the key a request to `model` is authenticated with, as its turns use. */
-    resolver?(model: Model, sessionId?: string): unknown;
   };
 };
 
@@ -1240,22 +1207,10 @@ type Kept = {
 };
 
 /**
-/**
  * What the loader hands a copy as it starts: the context the harness last handed it where
- * it takes over a session already under way, what the copy before it kept, and the
- * harness's own model calls ([`Models`]).
+ * it takes over a session already under way, and what the copy before it kept.
  */
-type Carried = { ctx?: Context; kept?: unknown; models?: unknown };
-
-/**
- * What of the harness's own packages a recap needs ([`recap`]), as the loader imports them:
- * `convertToLlm` from its coding agent, and — for omp, whose registry makes no request
- * itself — `completeSimple` from its model package.
- */
-type Models = {
-  convertToLlm?(messages: unknown[]): unknown[];
-  completeSimple?(model: Model, context: unknown, options: Record<string, unknown>): Promise<Answered>;
-};
+type Carried = { ctx?: Context; kept?: unknown };
 
 /**
  * A copy running in one session: stopped, it lets go of all it holds and says where the
@@ -1790,8 +1745,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   const ended: Ended[] = kept.ended;
   /** A dialog of the harness's own waiting on its person. */
   let dialog: Dialog | null = kept.dialog;
-  /** The harness's own model calls, as the loader handed them: without them no recap is written here. */
-  const models = carried.models && typeof carried.models === "object" ? (carried.models as Models) : undefined;
 
   /**
    * Whether the conversation can take words with no turn running and none waiting to go
@@ -2861,58 +2814,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * A recap of this conversation by its own model, for another machine that carries it on
-   * ([`RECAP_ASKED`]): one request through the harness's own provider, authenticated as
-   * its turns are, on the history its next turn would be handed and under the system
-   * prompt its turns run under, so a provider that caches it reads it from there. Nothing
-   * is written into the conversation and no turn starts; a turn running goes on. pi
-   * lends an extension the request itself (`modelRegistry.complete`); omp lends the key
-   * (`modelRegistry.resolver`) and the loader hands over its `completeSimple`. Whatever
-   * it answers is the runtime's to bound and redact.
-   */
-  const recap = async (ctx: Context): Promise<Said> => {
-    const model = ctx.model;
-    if (!model) return { refused: "model-missing", error: `${HARNESS} has no model selected` };
-    const manager = ctx.sessionManager;
-    const history = (manager.buildSessionProjection ?? manager.buildSessionContext)?.call(manager)?.messages;
-    const convert = models?.convertToLlm;
-    if (!Array.isArray(history) || history.length === 0 || !convert) {
-      return { refused: "selection-unsupported", error: `this ${HARNESS} does not give an extension its history` };
-    }
-    const context = {
-      systemPrompt: ctx.getSystemPrompt?.(),
-      messages: [
-        ...convert(history),
-        { role: "user", content: [{ type: "text", text: RECAP_ASKED }], timestamp: Date.now() },
-      ],
-    };
-    const signal = AbortSignal.timeout(RECAP_MS);
-    const registry = ctx.modelRegistry;
-    let answered: Answered | undefined;
-    if (registry?.complete) {
-      answered = await registry.complete(model, context, { signal });
-    } else if (registry?.resolver && models?.completeSimple) {
-      answered = await models.completeSimple(model, context, {
-        apiKey: registry.resolver(model, manager.getSessionId()),
-        sessionId: manager.getSessionId(),
-        disableReasoning: true,
-        signal,
-      });
-    } else {
-      return { refused: "selection-unsupported", error: `this ${HARNESS} does not give an extension a model call` };
-    }
-    const text = (answered?.content ?? [])
-      .filter((part) => part?.type === "text" && typeof part.text === "string")
-      .map((part) => part.text)
-      .join("")
-      .trim();
-    if (answered?.stopReason === "error" || answered?.stopReason === "aborted" || !text) {
-      return { refused: "refused", error: answered?.errorMessage ?? "the model wrote no recap" };
-    }
-    return { ok: { text } };
-  };
-
-  /**
    * What the harness keeps running past a turn's stop, by name: an abort ends the turn and
    * leaves these going ([`Context.getAsyncJobSnapshot`]). None from a harness that has none.
    */
@@ -3109,7 +3010,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const ctx = live;
     const op = request.op;
     if (ending || !wanted || !ctx) return { refused: "ending" };
-    if (led(ctx) && op !== "recap") return { refused: "refused", error: "a sub-agent's conversation takes this only at its lead" };
+    if (led(ctx)) return { refused: "refused", error: "a sub-agent's conversation takes this only at its lead" };
     if ((op === "say" || op === "pick") && oneShot(ctx) && !turning) {
       return { refused: "refused", error: "this one-shot run takes nothing before its own turn" };
     }
@@ -3137,8 +3038,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         return stop(ctx, request.say);
       case "force":
         return force(ctx, request.say);
-      case "recap":
-        return recap(ctx);
       case "compact":
         return compact(ctx, String(request.id), request.before, request.summary, request.least);
       default:
