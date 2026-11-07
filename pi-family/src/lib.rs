@@ -206,7 +206,7 @@ impl Program for Driver {
                 steery_sdk::params(params)?,
             )?),
             // The moments come over the plugin door, so no hook is a command to answer;
-            // `stop`, `say`, `pick` and `recap` are the door's, which the runtime speaks
+            // `stop`, `say` and `pick` are the door's, which the runtime speaks
             // itself; a reader's output is its answer whole.
             _ => Err(Error::Unknown),
         }

@@ -46,7 +46,7 @@ type Running = { stop(): unknown };
 type Extension = {
   default(
     pi: Api,
-    carried: { ctx?: unknown; kept?: unknown; models?: unknown },
+    carried: { ctx?: unknown; kept?: unknown },
   ): Running | undefined | Promise<Running | undefined>;
   surfaces?: { flags?: Flag[] };
 };
@@ -73,32 +73,6 @@ let refused: string | undefined;
 let moving: Promise<void> = Promise.resolve();
 let shifting = false;
 let watching: NodeJS.Timeout | undefined;
-/** The harness's own model calls, imported once ([`harnessModels`]). */
-let models: unknown;
-
-/**
- * Not static imports: a harness that cannot resolve one would refuse this whole file, and
- * Steery fails open.
- *
- * What of the harness's own packages a conversation's recap is written with, by the names
- * both harnesses resolve for an extension: `convertToLlm` from its coding agent and
- * `completeSimple` from its model package (omp maps both to its own). Either missing is
- * no recap here, never a refused file.
- */
-async function harnessModels(): Promise<unknown> {
-  const loaded: Record<string, unknown> = {};
-  try {
-    loaded.convertToLlm = ((await import("@earendil-works/pi-coding-agent")) as Record<string, unknown>).convertToLlm;
-  } catch {
-    // No recap of its own here.
-  }
-  try {
-    loaded.completeSimple = ((await import("@earendil-works/pi-ai")) as Record<string, unknown>).completeSimple;
-  } catch {
-    // pi's registry makes the request itself.
-  }
-  return loaded;
-}
 
 function named(): string | undefined {
   try {
@@ -156,7 +130,7 @@ async function start(session: Session, kept: unknown): Promise<void> {
   if (!running) return;
   try {
     session.running =
-      (await running.module.default(api(session), { ctx: session.ctx, kept, models })) ?? undefined;
+      (await running.module.default(api(session), { ctx: session.ctx, kept })) ?? undefined;
     session.started = true;
   } catch {
     session.handlers = new Map();
@@ -228,7 +202,6 @@ export default async function steery(pi: Api): Promise<void> {
   if (startedForNothing()) return;
   const session: Session = { pi, handlers: new Map(), places: new Map(), started: false };
   sessions.push(session);
-  models ??= await harnessModels();
   // Where a copy started after the session did takes it up. The name is watched only
   // while a session runs here: a harness may load this file and start none — pi does to
   // list its models — and the watch ends with the last session, which a pi runtime torn
