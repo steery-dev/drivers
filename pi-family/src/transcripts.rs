@@ -10,9 +10,10 @@
 //! lead's folder, `<conversation>/<job>.jsonl`, and one a sub-agent started inside that
 //! one's: those are the conversation's sub-agents, never conversations of their own.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -60,6 +61,7 @@ pub struct Store {
     starts: Starts,
     jobs: events::Conversations,
     listings: Listings,
+    sessions: Sessions,
 }
 
 /// Every transcript filed as a conversation, by the id it is filed under.
@@ -84,6 +86,7 @@ impl Store {
             starts: Starts::default(),
             jobs: events::Conversations::default(),
             listings: Listings::default(),
+            sessions: Sessions::default(),
         }
     }
 
@@ -119,6 +122,7 @@ impl Store {
                 sessions.push(session);
             }
         }
+        self.sessions.keep_only(filed.by_id.values().flatten());
         // A filing that missed a folder stands for nothing: each lookup reads them all.
         *self.filing.lock().unwrap_or_else(|e| e.into_inner()) = if filed.complete {
             filed.by_id
@@ -307,7 +311,7 @@ impl Store {
             None => lead.clone(),
             Some(agent) => {
                 let found = self
-                    .sub_agents(&lead)
+                    .sub_agents(&lead, &mut None)
                     .into_iter()
                     .find(|found| {
                         found.external_id == *agent || found.name.as_deref() == Some(agent)
@@ -496,16 +500,23 @@ impl Store {
     }
 
     /// A conversation as `sessions/list` says it, where it changed at or after `since`:
-    /// one that did not is never read.
+    /// one that did not is never read. One whose files and folders all stand as they did
+    /// when it was last said is said again as it was ([`Sessions`]).
     fn session(&self, id: &str, file: &Path, since: Option<u64>) -> Option<Session> {
-        let updated_at = modified(file).filter(|at| since.is_none_or(|since| *at >= since))?;
+        let meta = std::fs::metadata(file).ok()?;
+        let updated_at =
+            millis_of(meta.modified().ok()?).filter(|at| since.is_none_or(|since| *at >= since))?;
+        if let Some(session) = self.sessions.again(file) {
+            return Some(session);
+        }
+        let mut read = Mark::of(&meta).map(|mark| vec![(file.to_owned(), mark)]);
         let head = head(file);
         let parent = parent(id, &head);
         let title = match self.harness {
             Harness::Omp => head.title,
             Harness::Pi => self.titles.title(file, updated_at),
         };
-        Some(Session {
+        let session = Session {
             external_id: id.to_owned(),
             parent,
             title,
@@ -514,8 +525,96 @@ impl Store {
             updated_at,
             transcripts: vec![file.to_owned()],
             app: false,
-            sub_agents: self.sub_agents(file),
+            sub_agents: self.sub_agents(file, &mut read),
+        };
+        self.sessions.keep(file, &session, read);
+        Some(session)
+    }
+}
+
+/// Each conversation as the last `sessions/list` said it, by its transcript, with what it
+/// was read from ([`ReadFrom`]): said again as it was while each of those stands as it did, so
+/// a listing of nothing new opens no transcript. Measured 2026-11-07 on aram-work-mac (omp:
+/// 199 conversations of the last 3 days, 2,363 sub-agents, asked every 4–6 s): 71 % of the
+/// omp driver's CPU was `sessions/list` opening each transcript's head and its sub-agents'
+/// starts again on every call.
+#[derive(Default)]
+struct Sessions {
+    kept: Mutex<HashMap<PathBuf, (Session, Marks)>>,
+}
+
+/// Each file and folder a listing of one conversation read, with its [`Mark`] as it was read.
+type Marks = Vec<(PathBuf, Mark)>;
+
+/// What a listing of one conversation was read from ([`Marks`]); `None` where something
+/// read cannot be vouched for by a mark: it is read again at the next listing.
+type ReadFrom = Option<Marks>;
+
+/// A file or folder as `stat` says it: another where any of this changed. A folder's
+/// changes when an entry is added to it, removed from it or renamed in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Mark {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    changed: SystemTime,
+}
+
+impl Mark {
+    fn of(meta: &std::fs::Metadata) -> Option<Self> {
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            changed: meta.modified().ok()?,
         })
+    }
+
+    fn at(path: &Path) -> Option<Self> {
+        Self::of(&std::fs::metadata(path).ok()?)
+    }
+}
+
+/// `path`, as `mark` says it stood, among what `read` was read from; where it cannot be
+/// marked, nothing vouches for the read.
+fn depend(read: &mut ReadFrom, path: &Path, mark: Option<Mark>) {
+    match (read.as_mut(), mark) {
+        (Some(marks), Some(mark)) => marks.push((path.to_owned(), mark)),
+        _ => *read = None,
+    }
+}
+
+impl Sessions {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, (Session, Marks)>> {
+        self.kept.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The conversation of `file` as it was last said, where everything it was read from
+    /// stands as it did.
+    fn again(&self, file: &Path) -> Option<Session> {
+        let kept = self.lock();
+        let (session, read) = kept.get(file)?;
+        read.iter()
+            .all(|(path, mark)| Mark::at(path) == Some(*mark))
+            .then(|| session.clone())
+    }
+
+    /// Keep `session` as `file`'s, where what it was read from can vouch for it: every
+    /// mark older than [`SETTLED`], as a stamp as coarse as a second could hide a change
+    /// made in the tick it was read in.
+    fn keep(&self, file: &Path, session: &Session, read: ReadFrom) {
+        let settled = |mark: &Mark| mark.changed.elapsed().is_ok_and(|age| age >= SETTLED);
+        let mut kept = self.lock();
+        match read.filter(|read| read.iter().all(|(_, mark)| settled(mark))) {
+            Some(read) => kept.insert(file.to_owned(), (session.clone(), read)),
+            None => kept.remove(file),
+        };
+    }
+
+    /// Forget every conversation but those of `filed`, the transcripts a listing filed.
+    fn keep_only<'a>(&self, filed: impl Iterator<Item = &'a PathBuf>) {
+        let filed: HashSet<&PathBuf> = filed.collect();
+        self.lock().retain(|file, _| filed.contains(file));
     }
 }
 
@@ -667,10 +766,11 @@ fn parent(id: &str, head: &Head) -> Option<String> {
 impl Store {
     /// The sub-agents filed in a conversation's folder, and in theirs: each a transcript
     /// whose header names who started it (`parentSession`), named for its job, with the
-    /// `task` call that started it and what that call asked of it.
-    fn sub_agents(&self, file: &Path) -> Vec<SubAgent> {
+    /// `task` call that started it and what that call asked of it. `read` gets each file and
+    /// folder they were read from.
+    fn sub_agents(&self, file: &Path, read: &mut ReadFrom) -> Vec<SubAgent> {
         let mut found = Vec::new();
-        self.visit(file, None, 1, &mut found);
+        self.visit(file, None, 1, &mut found, read);
         found.sort_by(|a, b| {
             a.started_at
                 .cmp(&b.started_at)
@@ -680,22 +780,54 @@ impl Store {
     }
 
     /// The sub-agents `starter` started, filed in the folder named for its transcript, and
-    /// those they started in turn, `lead` being the sub-agent `starter` is.
-    fn visit(&self, starter: &Path, lead: Option<&str>, depth: usize, out: &mut Vec<SubAgent>) {
+    /// those they started in turn, `lead` being the sub-agent `starter` is. `read` gets each
+    /// file and folder read: the folder, or where there is none the folder it would be made
+    /// in, which making it changes; each file whose head names no starter yet, which writing
+    /// it changes; and `starter`, whose `task` calls name what each started.
+    fn visit(
+        &self,
+        starter: &Path,
+        lead: Option<&str>,
+        depth: usize,
+        out: &mut Vec<SubAgent>,
+        read: &mut ReadFrom,
+    ) {
         let folder = starter.with_extension("");
-        let Some((files, _)) = self.listings.files(&folder) else {
+        match std::fs::metadata(&folder) {
+            Ok(meta) => depend(read, &folder, Mark::of(&meta)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match folder.parent() {
+                    Some(up) => depend(read, up, Mark::at(up)),
+                    None => *read = None,
+                }
+                return;
+            }
+            Err(_) => {
+                *read = None;
+                return;
+            }
+        }
+        let Some((files, whole)) = self.listings.files(&folder) else {
+            *read = None;
             return;
         };
-        let filed: Vec<(&PathBuf, String, Arc<SubHead>)> = files
-            .iter()
-            .filter_map(|path| {
-                let job = path.file_stem()?.to_str()?.to_owned();
-                Some((path, job, self.listings.head(&folder, path)?))
-            })
-            .collect();
+        if !whole {
+            *read = None;
+        }
+        let mut filed: Vec<(&PathBuf, String, Arc<SubHead>)> = Vec::new();
+        for path in files.iter() {
+            let Some(job) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            match self.listings.head(&folder, path) {
+                Some(head) => filed.push((path, job.to_owned(), head)),
+                None => depend(read, path, Mark::at(path)),
+            }
+        }
         if filed.is_empty() {
             return;
         }
+        depend(read, starter, Mark::at(starter));
         let jobs = self
             .starts
             .jobs(starter, filed.iter().map(|(_, job, _)| job.as_str()));
@@ -713,7 +845,7 @@ impl Store {
                 transcripts: vec![path.clone()],
             });
             if depth < SUB_AGENT_DEPTH {
-                self.visit(path, Some(&external_id), depth + 1, out);
+                self.visit(path, Some(&external_id), depth + 1, out, read);
             }
         }
     }
@@ -1024,9 +1156,8 @@ pub fn head(file: &Path) -> Head {
     found
 }
 
-/// When a file last changed, in milliseconds since 1970.
-fn modified(file: &Path) -> Option<u64> {
-    let at = std::fs::metadata(file).ok()?.modified().ok()?;
+/// A file's change time, in milliseconds since 1970.
+fn millis_of(at: SystemTime) -> Option<u64> {
     u64::try_from(at.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
@@ -1241,6 +1372,23 @@ pub(crate) mod tests {
             for record in records {
                 std::io::Write::write_all(&mut open, format!("{}\n", record.as_ref()).as_bytes())
                     .unwrap();
+            }
+        }
+
+        /// Every file and folder under the home as if last changed an hour ago: what a
+        /// listing read of them is kept, as of a home nobody has touched for a while.
+        pub(crate) fn age(&self) {
+            let ago = SystemTime::now() - Duration::from_secs(3600);
+            let mut left = vec![self.0.clone()];
+            while let Some(path) = left.pop() {
+                if path.is_dir() {
+                    left.extend(
+                        std::fs::read_dir(&path)
+                            .unwrap()
+                            .map(|entry| entry.unwrap().path()),
+                    );
+                }
+                File::open(&path).unwrap().set_modified(ago).unwrap();
             }
         }
 
@@ -1725,6 +1873,30 @@ pub(crate) mod tests {
             "toolu_3",
             second,
         ));
+        assert_eq!(listed(&store, &[]).sessions[0].sub_agents, expected);
+
+        // Nobody touched the home for an hour: its listing is kept and said again as it
+        // was, and a sub-agent filed since in a folder it read is said at once though
+        // neither its lead nor the conversation's own folder changed.
+        home.age();
+        assert_eq!(listed(&store, &[]).sessions[0].sub_agents, expected);
+        assert_eq!(listed(&store, &[]).sessions[0].sub_agents, expected, "kept");
+        let third = home.write(
+            &format!("{filed}/Scout/Scout.Third.jsonl"),
+            &[format!(
+                r#"{{"type":"session","version":3,"id":"third","parentSession":"{}","timestamp":"2026-10-09T10:04:00Z"}}"#,
+                scout_file.display()
+            )],
+        );
+        expected.push(SubAgent {
+            external_id: "third".into(),
+            lead: Some(scout.into()),
+            name: Some("Scout.Third".into()),
+            task: None,
+            started_at: millis("2026-10-09T10:04:00Z"),
+            started_by: None,
+            transcripts: vec![third],
+        });
         assert_eq!(listed(&store, &[]).sessions[0].sub_agents, expected);
     }
 
