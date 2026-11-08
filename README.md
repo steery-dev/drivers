@@ -660,6 +660,16 @@ ways. The driver runs each way on a terminal of its own, in Codex's home.
 3. `api-key`: an OpenAI API key. `codex login --with-api-key` reads it on standard input, and
    Codex keeps it.
 
+When Codex's own `hooks/list` lists a Steery hook as `untrusted` or `modified`, the plan also
+asks `hooks` in one way, `trust`. Codex runs a hook only after its person trusted the hook's
+exact content. Until then a Steery turn cannot ask its person for more permissions (Codex
+refuses the escalation with no one to ask), and Codex hands no moment over. On the person's
+Go, the driver writes Codex's own trust for each such hook at its current hash, through the
+app server's `config/batchWrite` in Codex's home (`hooks.state.<key>.trusted_hash`). It
+trusts only the hooks whose command is the runtime's hook line from the last plan. Where
+every Steery hook runs already, the way is `not-found`. A hook that an administrator manages
+is not the person's to trust. A driver on version 4 says the same as a note.
+
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads
   rollouts from `sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl`. A thread that
   continues in more than one rollout is one conversation. Its newest rollout is the current
@@ -716,8 +726,13 @@ ways. The driver runs each way on a terminal of its own, in Codex's home.
     `turn_context`.
   - `start`: this binary in its turn mode,
     `steery-driver-codex turn --codex <codex> <continue|fork|new> [<thread>] [--worktree] [--model m] [--thinking t] --inbox <socket>`.
+    A continue is refused `no-place` where the folder that the thread opened in is gone:
+    Codex resumes a thread only there, and every command of the turn would fail to start.
     The turn mode does these steps:
-    1. It opens the thread (`thread/resume`, `thread/fork`, `thread/start`).
+    1. It opens the thread (`thread/resume`, `thread/fork`, `thread/start`). Where the
+       person's configuration names no sandbox for the folder (`config/read`), it asks for
+       `workspace-write`, as the Codex app does for each thread it starts. Codex otherwise runs
+       a folder that nobody trusted `read-only`, and the turn writes nothing.
     2. It starts the turn.
     3. It writes every message of the app server to standard output.
     4. It takes more words on the inbox (`turn/steer`, or `turn/start` after the turn ended).
@@ -725,9 +740,10 @@ ways. The driver runs each way on a terminal of its own, in Codex's home.
 
     A worktree goes where Codex makes its own, `<CODEX_HOME>/worktrees/<4 hex>/<repo>`.
   - `turn/read`: the thread named, the words taken (by their delivery marker), and how each
-    turn completed. Also the app server's refusals (`harness-busy` beside a live writer). The
-    events of its lines go to the runtime before the driver reads the rollout. Each event has
-    the rollout's own id. The events are these:
+    turn completed. Also the app server's refusals: `harness-busy` beside a live writer, and
+    `model-missing` for a turn that failed `modelNotFound` (a model that Codex lists, but
+    that the account does not get). The events of its lines go to the runtime before the
+    driver reads the rollout. Each event has the rollout's own id. The events are these:
     - turns that began and ended
     - the agent's words and reasoning
     - shell and MCP calls and their results

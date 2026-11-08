@@ -100,12 +100,13 @@ pub async fn run(asked: Asked) -> Result<(), String> {
         false => None,
     };
     let place = place.as_deref().unwrap_or(&cwd);
-    let (method, params) = opening(&asked.act, asked.id.as_deref(), place)?;
     let mut command = tokio::process::Command::new(&asked.codex);
     command.stderr(Stdio::null());
     let mut server = AppServer::open(command, true)
         .await
         .map_err(|e| e.to_string())?;
+    let sandbox = sandbox(&mut server, place).await;
+    let (method, params) = opening(&asked.act, asked.id.as_deref(), place, sandbox)?;
     let opened = server
         .call(method, params)
         .await
@@ -227,10 +228,15 @@ fn ends(message: &Value, thread: &str, turn: &str) -> bool {
         && message.pointer("/params/turn/id").and_then(Value::as_str) == Some(turn)
 }
 
-/// The request that opens the thread for an act, in `place`.
-fn opening(act: &str, id: Option<&str>, place: &Path) -> Result<(&'static str, Value), String> {
+/// The request that opens the thread for an act, in `place`, in the `sandbox` named.
+fn opening(
+    act: &str,
+    id: Option<&str>,
+    place: &Path,
+    sandbox: Option<&str>,
+) -> Result<(&'static str, Value), String> {
     let cwd = place.to_string_lossy();
-    Ok(match (act, id) {
+    let (method, mut params) = match (act, id) {
         ("new", _) => ("thread/start", json!({"cwd": cwd})),
         ("fork", Some(id)) => (
             "thread/fork",
@@ -242,7 +248,29 @@ fn opening(act: &str, id: Option<&str>, place: &Path) -> Result<(&'static str, V
         ),
         (act, None) => return Err(format!("a {act} must name the conversation it acts on")),
         (act, Some(_)) => return Err(format!("Codex does not run a {act}")),
-    })
+    };
+    if let Some(sandbox) = sandbox {
+        params["sandbox"] = json!(sandbox);
+    }
+    Ok((method, params))
+}
+
+/// The sandbox a turn asks for: none where the person's configuration, as Codex reads it
+/// for `place`, names one, else `workspace-write`, the sandbox Codex gives a project its
+/// person trusts and the Codex app gives each thread it starts. Without it Codex runs a
+/// folder nobody trusted in its `read-only` sandbox, and the turn writes nothing (2026-11-08:
+/// asked to write a file, a Steery turn wrote nothing in 3 of 3 tries).
+async fn sandbox(server: &mut AppServer, place: &Path) -> Option<&'static str> {
+    let read = server
+        .call(
+            "config/read",
+            json!({"cwd": place.to_string_lossy(), "includeLayers": false}),
+        )
+        .await
+        .ok()?;
+    read.pointer("/config/sandbox_mode")
+        .is_none_or(Value::is_null)
+        .then_some("workspace-write")
 }
 
 /// A new worktree of the repository `cwd` is in, where Codex makes its own, and the folder
@@ -298,21 +326,28 @@ mod tests {
     use super::*;
 
     /// The act opens the thread it names: a fork or a new one in the place given, a
-    /// continue where the thread ran.
+    /// continue where the thread ran; each in the sandbox asked for, and none where none was.
     #[test]
     fn each_act_opens_its_thread() {
         let place = Path::new("/w");
-        assert_eq!(opening("new", None, place).unwrap().0, "thread/start");
-        let (method, params) = opening("fork", Some("t"), place).unwrap();
+        let (method, params) = opening("new", None, place, Some("workspace-write")).unwrap();
+        assert_eq!(
+            (method, params["sandbox"].as_str()),
+            ("thread/start", Some("workspace-write"))
+        );
+        let (method, params) = opening("fork", Some("t"), place, None).unwrap();
         assert_eq!(
             (method, params["cwd"].as_str()),
             ("thread/fork", Some("/w"))
         );
-        let (method, params) = opening("continue", Some("t"), place).unwrap();
+        assert!(params.get("sandbox").is_none());
+        let (method, params) =
+            opening("continue", Some("t"), place, Some("workspace-write")).unwrap();
         assert_eq!(method, "thread/resume");
         assert!(params.get("cwd").is_none());
-        assert!(opening("continue", None, place).is_err());
-        assert!(opening("hand", Some("t"), place).is_err());
+        assert_eq!(params["sandbox"], "workspace-write");
+        assert!(opening("continue", None, place, None).is_err());
+        assert!(opening("hand", Some("t"), place, None).is_err());
     }
 
     #[test]

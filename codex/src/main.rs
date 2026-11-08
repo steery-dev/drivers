@@ -21,6 +21,7 @@ mod says;
 mod setup;
 mod sign_in;
 mod tail;
+mod trust;
 mod turn;
 mod words;
 
@@ -81,14 +82,16 @@ const MINIMUM: &str = "0.155.1";
 const UPDATE: &str = "codex update";
 
 /// The driver: the protocol it picked, Codex's home and conversations, from `initialize`,
-/// the sign-in it started that waits for its person, and the listings it answered, to
-/// answer the next with only what changed.
+/// the sign-in it started that waits for its person, the runtime's hook line from the last
+/// plan (which hooks are Steery's, for the trust a person gives), and the listings it
+/// answered, to answer the next with only what changed.
 struct Codex {
     notifier: Notifier,
     protocol: OnceLock<u32>,
     place: OnceLock<Result<drive::Drive, String>>,
     home: OnceLock<PathBuf>,
     sign_ins: sign_in::SignIns,
+    hook: std::sync::Mutex<Option<String>>,
     changes: steery_sdk::listing::Changes,
 }
 
@@ -100,6 +103,7 @@ impl Codex {
             place: OnceLock::new(),
             home: OnceLock::new(),
             sign_ins: sign_in::SignIns::default(),
+            hook: std::sync::Mutex::new(None),
             changes: steery_sdk::listing::Changes::default(),
         }
     }
@@ -162,9 +166,11 @@ impl Program for Codex {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         match method {
-            method::SETUP_PLAN => result(
-                setup::plan(self.home()?, steery_sdk::params(params)?, self.needs()).await?,
-            ),
+            method::SETUP_PLAN => {
+                let setup: wire::harness::Setup = steery_sdk::params(params)?;
+                *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(setup.hook.clone());
+                result(setup::plan(self.home()?, setup, self.needs()).await?)
+            }
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
@@ -214,11 +220,16 @@ impl Program for Codex {
             method::TERMINAL => result(self.drive()?.terminal(steery_sdk::params(params)?)?),
             method::SAY => result(self.drive()?.say(steery_sdk::params(params)?).await?),
             method::PICK => result(self.drive()?.pick(steery_sdk::params(params)?).await?),
-            method::NEEDS_GIVE if self.needs() => result(
-                self.sign_ins
-                    .give(self.drive()?.store.root(), steery_sdk::params(params)?)
-                    .await?,
-            ),
+            method::NEEDS_GIVE if self.needs() => {
+                let give: wire::harness::Give = steery_sdk::params(params)?;
+                let root = self.drive()?.store.root();
+                if give.need == trust::NEED {
+                    let hook = self.hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    result(trust::give(&drive::binary()?, root, hook.as_deref(), give).await?)
+                } else {
+                    result(self.sign_ins.give(root, give).await?)
+                }
+            }
             _ => Err(Error::Unknown),
         }
     }
