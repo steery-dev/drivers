@@ -5,20 +5,22 @@
 //! use, and hands each hook a JSON document on standard input: `session_id`, `cwd`,
 //! `hook_event_name`, `model` (the moment's, kept on the Moment as state), and per moment
 //! `prompt`, `tool_name`, `tool_input`, `tool_response`, `tool_use_id`,
-//! `stop_hook_active`, `permission_suggestions`. A sub-agent's moments come under its
+//! `stop_hook_active`. Codex sends no `permission_suggestions`, so a permission moment
+//! offers none. A sub-agent's moments come under its
 //! lead's `session_id` with its own `agent_id`.
 //!
 //! It reads a paragraph back for its agent on `SessionStart` and `UserPromptSubmit`
 //! (`hookSpecificOutput.additionalContext`) and keeps a turn going at `Stop` only on
 //! `decision: "block"` with the paragraph as `reason` (codex-rs `hooks/src/schema.rs`
 //! `StopCommandOutputWire`). `PreToolUse` takes a `permissionDecision`, and
-//! `PermissionRequest` a `decision` with a `behavior`, as Claude Code does.
+//! `PermissionRequest` a `decision` with a `behavior` and, on a no, a `message`. A yes
+//! is a plain `allow` for this call only: Codex fails closed on `updatedPermissions`.
 
 use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
-    Always, Answer, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment, HookRead,
-    Moment, Says, Suggestion, TurnState, Via,
+    Answer, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment, HookRead, Moment,
+    Says, TurnState, Via,
 };
 
 use crate::calls;
@@ -158,62 +160,12 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
         model: text(&document, "model").map(str::to_owned),
         thinking: None,
         failure: None,
-        suggestions: (kind == HookKind::Permission)
-            .then(|| {
-                document
-                    .get("permission_suggestions")
-                    .and_then(Value::as_array)
-                    .map(|offered| offered.iter().map(suggestion).collect())
-            })
-            .flatten()
-            .unwrap_or_default(),
+        // Codex sends no `permission_suggestions`: it offers no standing scope.
+        suggestions: Vec::new(),
     };
     Ok(HookMoment {
         moment: Some(moment),
     })
-}
-
-/// One of Codex's `permission_suggestions` as a person reads it, kept at its index so
-/// `always: {suggestion: n}` passes back the entry Codex wrote. Every shape it declares is
-/// named; one it grows later is offered by its type, never dropped.
-fn suggestion(update: &Value) -> Suggestion {
-    let about = match text(update, "destination") {
-        Some("session") => "this conversation",
-        Some("projectSettings") => "this project, for everyone",
-        Some("localSettings") => "this project, for you",
-        Some("userSettings") => "everywhere, from now on",
-        _ => "as Codex keeps it",
-    };
-    let kind = text(update, "type").unwrap_or("unnamed");
-    let label = match kind {
-        "addRules" | "replaceRules" => {
-            let rules: Vec<String> = update
-                .get("rules")
-                .and_then(Value::as_array)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
-                .iter()
-                .map(
-                    |rule| match (text(rule, "toolName"), text(rule, "ruleContent")) {
-                        (Some(tool), Some(content)) => format!("`{tool}({content})`"),
-                        (Some(tool), None) => format!("`{tool}`"),
-                        _ => "an unnamed rule".to_owned(),
-                    },
-                )
-                .collect();
-            match rules.is_empty() {
-                true => "Always allow what Codex offered".to_owned(),
-                false => format!("Always {}", rules.join(", ")),
-            }
-        }
-        "setMode" => format!("Switch to `{}`", text(update, "mode").unwrap_or("—")),
-        "addDirectories" => "Add the directories it named".to_owned(),
-        other => format!("`{other}`, as Codex offered it"),
-    };
-    Suggestion {
-        label,
-        about: about.to_owned(),
-    }
 }
 
 /// Whether a call's response says it worked: an object's own `success`, `is_error` or
@@ -237,8 +189,7 @@ fn succeeded(response: Option<&Value>) -> bool {
 /// `hook/answer`: what the hook prints for what the runtime decided. Codex reads a
 /// non-zero exit as a hook that failed, so the exit is always 0.
 pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
-    let document: Value = serde_json::from_str(&answer.document).unwrap_or(Value::Null);
-    let printed = printed(&answer.event, &document, &answer.answer);
+    let printed = printed(&answer.event, &answer.answer);
     Ok(HookAnswered {
         stdout: printed.map(|value| value.to_string()).unwrap_or_default(),
         exit_code: 0,
@@ -246,7 +197,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     })
 }
 
-fn printed(event: &str, document: &Value, answer: &Answer) -> Option<Value> {
+fn printed(event: &str, answer: &Answer) -> Option<Value> {
     let say = answer.say.as_deref().filter(|say| !say.trim().is_empty());
     match (event, &answer.decision) {
         ("Stop", _) => say.map(|say| json!({"decision": "block", "reason": say})),
@@ -267,13 +218,9 @@ fn printed(event: &str, document: &Value, answer: &Answer) -> Option<Value> {
         }
         ("PermissionRequest", Some(decision)) => {
             let decision = match decision {
-                Decision::Allow { always, .. } => {
-                    let mut allowed = json!({"behavior": "allow"});
-                    if let Some(update) = always.and_then(|always| standing(always, document)) {
-                        allowed["updatedPermissions"] = json!([update]);
-                    }
-                    allowed
-                }
+                // Codex fails closed on `updatedPermissions` (and on `updatedInput` and
+                // `interrupt`), so a yes covers this call only, whatever `always` says.
+                Decision::Allow { .. } => json!({"behavior": "allow"}),
                 Decision::Deny { reason } => json!({"behavior": "deny", "message": reason}),
             };
             Some(json!({"hookSpecificOutput": {
@@ -288,30 +235,11 @@ fn printed(event: &str, document: &Value, answer: &Answer) -> Option<Value> {
     }
 }
 
-/// The permission a yes stands for from now on: one of the harness's own suggestions,
-/// passed back whole; every call of this tool; or every call at all, both for this
-/// session only.
-fn standing(always: Always, document: &Value) -> Option<Value> {
-    match always {
-        Always::Suggestion(n) => document
-            .get("permission_suggestions")
-            .and_then(Value::as_array)
-            .and_then(|suggestions| suggestions.get(n as usize))
-            .cloned(),
-        Always::Tool => text(document, "tool_name").map(|tool| {
-            json!({"type": "addRules", "rules": [{"toolName": tool}], "behavior": "allow",
-                   "destination": "session"})
-        }),
-        Always::Everything => {
-            Some(json!({"type": "setMode", "mode": "bypassPermissions", "destination": "session"}))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use steery_sdk::wire::harness::Always;
 
     fn moment(event: &str, document: Value) -> Option<Moment> {
         read(HookRead {
@@ -415,15 +343,12 @@ mod tests {
         );
     }
 
-    /// A person's yes can stand for more: the harness's own suggestion passed back whole,
-    /// or the two wide ones for this session; a no carries its reason; a question
-    /// answered in Steery denies the tool with the answer.
+    /// A yes is a plain allow for this call, whatever `always` says, as Codex fails closed
+    /// on `updatedPermissions`; a no carries its reason; a question answered in Steery
+    /// denies the tool with the answer.
     #[test]
     fn decisions_are_printed_as_codex_reads_them() {
-        let suggestion = json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "cargo check:*"}],
-            "behavior": "allow", "destination": "localSettings"});
-        let doc =
-            json!({"session_id": "s", "tool_name": "Bash", "permission_suggestions": [suggestion]});
+        let doc = json!({"session_id": "s", "tool_name": "Bash"});
         let allow = |always| Answer {
             decision: Some(Decision::Allow {
                 reason: "yes".into(),
@@ -431,26 +356,22 @@ mod tests {
             }),
             ..Answer::default()
         };
-        let printed: Value = serde_json::from_str(&said(
-            "PermissionRequest",
-            doc.clone(),
-            allow(Some(Always::Suggestion(0))),
-        ))
-        .unwrap();
-        assert_eq!(
-            printed["hookSpecificOutput"]["decision"]["updatedPermissions"][0],
-            suggestion
-        );
-        let printed: Value = serde_json::from_str(&said(
-            "PermissionRequest",
-            doc.clone(),
-            allow(Some(Always::Tool)),
-        ))
-        .unwrap();
-        assert_eq!(
-            printed["hookSpecificOutput"]["decision"]["updatedPermissions"][0]["rules"][0]["toolName"],
-            "Bash"
-        );
+        for always in [
+            None,
+            Some(Always::Suggestion(0)),
+            Some(Always::Tool),
+            Some(Always::Everything),
+        ] {
+            let printed: Value =
+                serde_json::from_str(&said("PermissionRequest", doc.clone(), allow(always)))
+                    .unwrap();
+            assert_eq!(
+                printed,
+                json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"}}}),
+                "{always:?}"
+            );
+        }
         let printed: Value = serde_json::from_str(&said(
             "PermissionRequest",
             doc.clone(),
@@ -463,8 +384,9 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            printed["hookSpecificOutput"]["decision"],
-            json!({"behavior": "deny", "message": "that would wipe the cache"})
+            printed,
+            json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": "that would wipe the cache"}}})
         );
         let printed: Value = serde_json::from_str(&said(
             "PreToolUse",
@@ -489,30 +411,12 @@ mod tests {
         );
     }
 
-    /// Each of Codex's `permission_suggestions` is offered as a person reads it, at its
-    /// own index, a shape not yet known by its type rather than dropped.
+    /// Codex sends no `permission_suggestions`: a permission moment offers none.
     #[test]
-    fn a_permissions_suggestions_read_as_a_person_reads_them() {
-        let doc = json!({"session_id": "s", "tool_name": "Bash", "tool_use_id": "c1",
-        "permission_suggestions": [
-            {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "cargo check:*"}],
-             "behavior": "allow", "destination": "localSettings"},
-            {"type": "somethingNew", "destination": "session"},
-        ]});
+    fn a_permission_moment_offers_no_suggestions() {
+        let doc = json!({"session_id": "s", "tool_name": "Bash", "tool_use_id": "c1"});
         let read = moment("PermissionRequest", doc).expect("a moment");
-        assert_eq!(
-            read.suggestions,
-            vec![
-                Suggestion {
-                    label: "Always `Bash(cargo check:*)`".into(),
-                    about: "this project, for you".into(),
-                },
-                Suggestion {
-                    label: "`somethingNew`, as Codex offered it".into(),
-                    about: "this conversation".into(),
-                },
-            ]
-        );
+        assert!(read.suggestions.is_empty());
     }
 
     /// Codex stops listening to a `SessionEnd` or `Interrupt` hook after three seconds,
