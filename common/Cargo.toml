@@ -6,7 +6,7 @@ license = "MIT"
 description = "What Steery's drivers share: finding and asking a harness's executable, reading a transcript's records within bounds, following a file only appended to, a transcript that is a tree of records, a delivery's receipt in a transcript, a read that said nothing answered again while its files stand as they did, the MCP servers a harness's JSON configuration names, and a harness's own sign-in run on a terminal of the driver's."
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v11.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
 libc = "0.2"
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "net", "process", "rt", "sync", "time"] }

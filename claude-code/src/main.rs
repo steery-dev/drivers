@@ -152,7 +152,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 10"))?;
+            .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             protocol,
@@ -326,6 +326,8 @@ fn info() -> wire::HarnessInfo {
             unnamed: true,
         }),
         facts: wire::HarnessFacts {
+            // The driver sends no `sessions/touched`: the runtime sweeps its conversations.
+            touches: false,
             by_file: false,
             // Claude Code resumes a conversation by its id from any folder.
             resumes_in_place: false,

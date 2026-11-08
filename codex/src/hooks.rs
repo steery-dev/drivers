@@ -66,8 +66,8 @@ pub fn timeout(event: &str) -> u32 {
     }
 }
 
-/// The hooks as `initialize` declares them.
-pub fn declared() -> Vec<Hook> {
+/// The hooks as `initialize` declares them under the `protocol` picked.
+pub fn declared(protocol: u32) -> Vec<Hook> {
     EVENTS
         .iter()
         .map(|(event, kind, says)| Hook {
@@ -77,6 +77,10 @@ pub fn declared() -> Vec<Hook> {
             says: says.to_vec(),
             waits: (timeout(event) == ASKING).then_some(ASKING),
             env: Vec::new(),
+            // Codex fails closed on a `PermissionRequest` answer with `updatedPermissions`
+            // (0.166.0), so a yes covers its one call: Codex keeps neither scope.
+            keeps: (*kind == HookKind::Permission && protocol >= steery_sdk::KEEPS)
+                .then(Vec::new),
         })
         .collect()
 }
@@ -426,7 +430,7 @@ mod tests {
         assert_eq!(timeout("SessionEnd"), 3);
         assert_eq!(timeout("Interrupt"), 3);
         assert_eq!(timeout("Stop"), 5);
-        let waits: Vec<(String, Option<u32>)> = declared()
+        let waits: Vec<(String, Option<u32>)> = declared(steery_sdk::KEEPS)
             .into_iter()
             .map(|hook| (hook.event, hook.waits))
             .filter(|(_, w)| w.is_some())

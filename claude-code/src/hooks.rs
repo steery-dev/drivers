@@ -147,6 +147,8 @@ pub fn table() -> Vec<Hook> {
                 .then(|| ENV_FILE.to_owned())
                 .into_iter()
                 .collect(),
+            // Claude Code keeps both scopes (`updatedPermissions`): absent says both.
+            keeps: None,
         })
         .collect()
 }

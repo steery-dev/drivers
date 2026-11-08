@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use steery_driver_common::program::{NEEDS, PROTOCOLS, WAITED};
+use steery_driver_common::program::{NEEDS, WAITED};
 use steery_sdk::wire;
 use steery_sdk::{Error, Program, method, refusal, result};
 
@@ -81,10 +81,8 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol(&params.protocol).ok_or_else(|| {
-            let spoken: Vec<_> = PROTOCOLS.iter().rev().map(u32::to_string).collect();
-            Error::invalid(format!("this driver speaks protocols {}", spoken.join(", ")))
-        })?;
+        let protocol = steery_driver_common::program::protocol(&params.protocol)
+            .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
             protocol,
