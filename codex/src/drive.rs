@@ -258,6 +258,21 @@ impl Drive {
             })?;
             uuid(id)?;
             self.store.current(id)?;
+            // Codex resumes a thread in the folder it opened in, whatever folder the turn
+            // runs from: where that folder is gone, every command of the turn fails to
+            // start ("No such file or directory"), and Codex finishes the turn anyway.
+            if start.act == Act::Continue
+                && let Some(place) = self.store.place(id)?
+                && !place.is_dir()
+            {
+                return Err(Error::refused(
+                    refusal::NO_PLACE,
+                    format!(
+                        "{} is gone, and Codex can resume the conversation only there",
+                        place.display()
+                    ),
+                ));
+            }
         }
         if !start.cwd.is_absolute() || !start.folder.is_absolute() {
             return Err(Error::invalid("the folders must be absolute paths"));
@@ -1101,8 +1116,11 @@ fn took(line: &Value, delivery: &str) -> bool {
 }
 
 /// The runtime's word for a failed turn's class, said so a turn that ends before it names a
-/// conversation still carries it: `signed-out` or `limited`, by the app server's own
-/// error info (`codexErrorInfo`, its HTTP status), never its wording.
+/// conversation still carries it: `signed-out`, `limited` or `model-missing`, by the app
+/// server's own error info (`codexErrorInfo`, its HTTP status), never its wording. Codex
+/// knows which models an account may use only when it asks for one: a model its own list
+/// names can still be one the account does not get (`modelNotFound`, 0.166.0: "The
+/// 'gpt-nope-9' model is not supported when using Codex with a ChatGPT account").
 fn class_of(line: &Value) -> Option<&'static str> {
     if line.get("method").and_then(Value::as_str) != Some("turn/completed") {
         return None;
@@ -1111,7 +1129,17 @@ fn class_of(line: &Value) -> Option<&'static str> {
     if turn.get("status").and_then(Value::as_str) != Some("failed") {
         return None;
     }
-    match crate::events::failure_of(turn.get("error")?).kind {
+    let error = turn.get("error")?;
+    let info = error
+        .get("codexErrorInfo")
+        .or_else(|| error.get("codex_error_info"));
+    if info
+        .and_then(Value::as_str)
+        .is_some_and(|code| matches!(code, "modelNotFound" | "model_not_found"))
+    {
+        return Some(refusal::MODEL_MISSING);
+    }
+    match crate::events::failure_of(error).kind {
         FailureKind::SignIn => Some("signed-out"),
         FailureKind::RateLimit => Some("limited"),
         _ => None,

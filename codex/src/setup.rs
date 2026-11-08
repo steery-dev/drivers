@@ -132,26 +132,36 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
         carries: vec![Part::Hooks],
     }));
     let lacks = async { needs && crate::drive::signed_in(&binary, &root).await == Some(false) };
-    let (trusted, lacks) = tokio::join!(trust(&binary, &root, &setup.hook), lacks);
-    match trusted {
-        Ok(carried) => entries.extend(carried.into_iter().map(|(key, hash)| Entry {
-            path: config.clone(),
-            format: Format::Toml,
-            at: Some(format!("hooks.state.{}.trusted_hash", quoted(&key))),
-            value: json!(hash),
-            carries: vec![Part::Hooks],
-        })),
+    let (hooks, lacks) = tokio::join!(steery_hooks(&binary, &root, &setup.hook), lacks);
+    let mut asked = Vec::new();
+    if lacks {
+        asked.push(crate::sign_in::need());
+    }
+    match hooks {
+        Ok(hooks) => {
+            entries.extend(hooks.carried.into_iter().map(|(key, hash)| Entry {
+                path: config.clone(),
+                format: Format::Toml,
+                at: Some(format!("hooks.state.{}.trusted_hash", quoted(&key))),
+                value: json!(hash),
+                carries: vec![Part::Hooks],
+            }));
+            match (hooks.untrusted.is_empty(), needs) {
+                (true, _) => {}
+                (false, true) => asked.push(crate::trust::need()),
+                (false, false) => notes.push(
+                    "Codex runs no hook that a person has not trusted. Open `/hooks` inside \
+                     Codex once and trust the Steery entries. Until then, Codex hands nothing \
+                     over, and a Steery turn cannot ask its person for more permissions."
+                        .into(),
+                ),
+            }
+        }
         Err(why) => notes.push(format!(
             "Codex did not list its hooks ({why}). The driver did not restore the trust that a \
-             moved Steery hook lost."
+             moved Steery hook lost, and cannot say which Steery hooks Codex runs."
         )),
     }
-    notes.push(
-        "Codex runs no hook that a person has not trusted. Open `/hooks` inside Codex once and \
-         trust the Steery entries. Until then, Steery reads its conversations only from outside, \
-         and Codex hands nothing over."
-            .into(),
-    );
     Ok(Planned {
         found: Some(Found {
             binary,
@@ -162,7 +172,7 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
         entries,
         notes,
         install: None,
-        needs: if lacks { vec![crate::sign_in::need()] } else { Vec::new() },
+        needs: asked,
     })
 }
 
@@ -210,17 +220,26 @@ struct Listed {
     trust_status: Option<String>,
 }
 
-/// The trust records to write again, asked of Codex's own app server in Codex's home.
-async fn trust(binary: &Path, root: &Path, hook: &str) -> Result<Vec<(String, String)>, String> {
-    let bytes = match std::fs::read(root.join("config.toml")) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+/// Steery's hooks as Codex's own app server in Codex's home lists them.
+pub(crate) struct SteeryHooks {
+    /// The trust records to write again: each Steery hook a record on the same file and
+    /// event already trusts at its current hash.
+    pub carried: Vec<(String, String)>,
+    /// Each other Steery hook Codex does not run, by key, at its current hash: what only
+    /// its person can trust ([`crate::trust`]).
+    pub untrusted: Vec<(String, String)>,
+}
+
+pub(crate) async fn steery_hooks(
+    binary: &Path,
+    root: &Path,
+    hook: &str,
+) -> Result<SteeryHooks, String> {
+    let trusted = match std::fs::read(root.join("config.toml")) {
+        Ok(bytes) => trusted(&bytes)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
         Err(e) => return Err(e.to_string()),
     };
-    let trusted = trusted(&bytes)?;
-    if trusted.is_empty() {
-        return Ok(Vec::new());
-    }
     let cwd = root.parent().unwrap_or(root).to_owned();
     let listed = tokio::time::timeout(LIST_WITHIN, async {
         let mut command = steery_driver_common::program::helper(binary);
@@ -246,7 +265,9 @@ async fn trust(binary: &Path, root: &Path, hook: &str) -> Result<Vec<(String, St
             .unwrap_or_default(),
         );
     }
-    Ok(carried(&hooks, &trusted, hook))
+    let carried = carried(&hooks, &trusted, hook);
+    let untrusted = untrusted(&hooks, &carried, hook);
+    Ok(SteeryHooks { carried, untrusted })
 }
 
 fn result_places(listed: &Value) -> impl Iterator<Item = &Value> {
@@ -293,6 +314,28 @@ fn carried(
                 .then(|| (listed.key.clone(), hash.to_owned()))
         })
         .collect()
+}
+
+/// Each Steery hook Codex does not run and no record carries, by key, at its current hash:
+/// one nobody trusted, or one whose content changed since its person trusted it. A hook an
+/// administrator manages is not the person's to trust.
+fn untrusted(listed: &[Listed], carried: &[(String, String)], hook: &str) -> Vec<(String, String)> {
+    let mut untrusted: Vec<(String, String)> = listed
+        .iter()
+        .filter(|listed| {
+            matches!(
+                listed.trust_status.as_deref(),
+                Some("untrusted" | "modified")
+            )
+        })
+        .filter(|listed| listed.command.as_deref().is_some_and(|c| steery(c, hook)))
+        .filter(|listed| carried.iter().all(|(key, _)| *key != listed.key))
+        .filter_map(|listed| Some((listed.key.clone(), listed.current_hash.clone()?)))
+        .collect();
+    // `hooks/list` names a hook once for each folder asked about.
+    untrusted.sort();
+    untrusted.dedup();
+    untrusted
 }
 
 /// Every `trusted_hash` in a Codex `config.toml`, by key.

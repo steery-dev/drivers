@@ -464,6 +464,12 @@ impl Store {
         }
     }
 
+    /// The folder Codex resumes a conversation in: the one its newest rollout opened in.
+    pub fn place(&self, id: &str) -> Result<Option<PathBuf>, Error> {
+        let (_, filed) = self.family_of(id)?;
+        Ok(newest(&filed).head.cwd.clone())
+    }
+
     /// The conversation's rollouts, oldest first.
     pub fn transcripts(&self, id: &str) -> Result<Vec<PathBuf>, Error> {
         let (_, mut filed) = self.family_of(id)?;
