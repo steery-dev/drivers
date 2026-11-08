@@ -25,11 +25,12 @@ pub fn executable(path: PathBuf) -> Option<PathBuf> {
 /// `call_ended`'s `waited`, 7 is 6 with say ids (`say`'s `id`, `stop`'s `say`), 8 is 7 with
 /// `identity.call_meta`, 9 is 8 with a harness's `lines` and `hosted` (the drivers give
 /// neither: their agents write their lines), 10 is 9 with `sessions/list` answering only
-/// what changed since a cursor (`steery_sdk::listing::Changes`), and 11 is 10 without
-/// `recap`, which no driver answers at any version: no supported runtime asks it. Every
-/// runtime Steery supports offers 4 (it came in runtime 7.0.130; the oldest supported is
-/// later), so no driver answers an older one.
-pub const PROTOCOLS: [u32; 8] = [11, 10, 9, 8, 7, 6, 5, 4];
+/// what changed since a cursor (`steery_sdk::listing::Changes`), 11 is 10 without
+/// `recap`, which no driver answers at any version: no supported runtime asks it, 12 is 11
+/// with `touches` (the drivers send none: the runtime sweeps their conversations), and 13
+/// is 12 with a permission hook's `keeps`. Every runtime Steery supports offers 4 (it came
+/// in runtime 7.0.130; the oldest supported is later), so no driver answers an older one.
+pub const PROTOCOLS: [u32; 10] = [13, 12, 11, 10, 9, 8, 7, 6, 5, 4];
 
 /// The first protocol with needs: `setup/plan`'s `needs` and `needs/give`.
 pub const NEEDS: u32 = 5;
@@ -43,6 +44,12 @@ pub const WAITED: u32 = 6;
 /// only where it is [`WAITED`] or newer.
 pub fn protocol(offered: &[u32]) -> Option<u32> {
     PROTOCOLS.into_iter().find(|version| offered.contains(version))
+}
+
+/// The refusal of an `initialize` that offered none of [`PROTOCOLS`], as a person reads it.
+pub fn unspoken() -> String {
+    let spoken: Vec<_> = PROTOCOLS.iter().rev().map(u32::to_string).collect();
+    format!("this driver speaks protocols {}", spoken.join(", "))
 }
 
 /// Why the programs `names` are not all on `PATH`, as a line a person reads (`["sh",

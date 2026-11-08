@@ -131,7 +131,7 @@ impl Codex {
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
-            .ok_or_else(|| Error::invalid("this driver speaks protocols 4 to 10"))?;
+            .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         self.changes.picked(protocol);
         let _ = self.home.set(params.home.clone());
@@ -281,6 +281,8 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             unnamed: true,
         }),
         facts: wire::HarnessFacts {
+            // The driver sends no `sessions/touched`: the runtime sweeps its threads.
+            touches: false,
             by_file: false,
             // `thread/resume` takes no folder: the thread runs where it ran.
             resumes_in_place: false,
@@ -299,6 +301,6 @@ fn info(protocol: u32) -> wire::HarnessInfo {
                 harness::Act::New,
             ],
         },
-        hooks: hooks::declared(),
+        hooks: hooks::declared(protocol),
     }
 }

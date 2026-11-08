@@ -155,6 +155,8 @@ impl Harness {
                 unnamed: self == Self::Omp,
             }),
             facts: wire::HarnessFacts {
+                // The driver sends no `sessions/touched`: the runtime sweeps its sessions.
+                touches: false,
                 // pi continues a conversation by its transcript (`--session <file>`).
                 by_file: self == Self::Pi,
                 resumes_in_place: true,
@@ -218,6 +220,7 @@ impl Harness {
             says,
             waits: None,
             env: Vec::new(),
+            keeps: None,
         })
         .collect()
     }
