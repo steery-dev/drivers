@@ -508,8 +508,8 @@ impl Drive {
         })
     }
 
-    /// `receipt/find`: the one turn after the mark whose person input carries the delivery
-    /// marker, and the owner that ran it.
+    /// `receipt/find`: the one turn from the mark on whose person input carries the
+    /// delivery marker, and the owner that ran it.
     pub async fn find(&self, find: ReceiptFind) -> Result<Receipt, Error> {
         let thread = &find.external_id;
         let mark: Value = serde_json::from_str(&find.mark)
@@ -577,7 +577,10 @@ impl Drive {
         if say.mode == SayMode::Immediate
             && let Some(Owned::Window(Some(_)) | Owned::Queue(Some(_))) = self.owned(thread).await
         {
-            return Err(Error::refused(refusal::HARNESS_BUSY, "Codex runs a turn in it"));
+            return Err(Error::refused(
+                refusal::HARNESS_BUSY,
+                "Codex runs a turn in it",
+            ));
         }
         let waiting = match &say.id {
             Some(id) => self.waiting(thread, &say.words, id).await,
@@ -642,8 +645,8 @@ impl Drive {
     }
 
     /// The say `id` about to put `words` into `thread`, to be tied to the turn that takes
-    /// them. Words of no delivery are matched only after the thread's newest turn before
-    /// them, so none where that cannot be read.
+    /// them. Words of no delivery are matched only past the thread's point before them, so
+    /// none where that cannot be read.
     async fn waiting(&self, thread: &str, words: &str, id: &str) -> Option<Waiting> {
         let words = Words::of(words, id);
         let before = match &words {
@@ -653,14 +656,13 @@ impl Drive {
                 let codex = binary().ok()?;
                 tokio::time::timeout(BEFORE_WITHIN, async {
                     let mut server = native::reader(&codex, &home).await.ok()?;
-                    let latest = native::latest(&mut server, thread).await;
+                    let point = native::point(&mut server, thread).await;
                     server.close().await;
-                    latest.ok()
+                    point.ok()
                 })
                 .await
                 .ok()
                 .flatten()?
-                .map(|turn| turn.id)
             }
         };
         Some(Waiting {
@@ -1604,7 +1606,10 @@ mod tests {
             r#"{"method":"thread/settings/updated","params":{"threadId":"01a158a8","threadSettings":{"model":"gpt-5.6-terra","modelProvider":"openai","effort":null}},"emittedAtMs":1792488782000}"#,
         );
         assert!(
-            matches!(plain.events.as_slice(), [Event::Model { thinking: None, .. }]),
+            matches!(
+                plain.events.as_slice(),
+                [Event::Model { thinking: None, .. }]
+            ),
             "an effort of null is the model's default"
         );
     }

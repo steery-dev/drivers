@@ -28,9 +28,9 @@ const THREADS_MAX: usize = 256;
 pub struct Waiting {
     pub say: String,
     pub words: Words,
-    /// The thread's newest turn before the words went, where it was read: words of no
-    /// delivery are matched only in turns after it.
-    pub before: Option<String>,
+    /// The thread's point before the words went, where it was read: words of no delivery
+    /// are matched only past it ([`native::taking`]).
+    pub before: Option<native::Point>,
     /// When the words went.
     pub at: u64,
 }
@@ -261,9 +261,9 @@ pub async fn tie_waiting(
     if waiting.is_empty() {
         return Ok(false);
     }
-    let asked: Vec<(Option<&str>, &Words)> = waiting
+    let asked: Vec<(Option<&native::Point>, &Words)> = waiting
         .iter()
-        .map(|waiting| (waiting.before.as_deref(), &waiting.words))
+        .map(|waiting| (waiting.before.as_ref(), &waiting.words))
         .collect();
     let found = native::taking(server, thread, &asked).await?;
     let now = crate::home::now();

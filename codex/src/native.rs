@@ -102,7 +102,10 @@ fn same_home(server: &AppServer, home: &Path) -> Result<(), String> {
     if said.is_absolute() && canonical(said).is_some() && canonical(said) == canonical(home) {
         Ok(())
     } else {
-        Err(format!("this Codex app server serves the home {}", said.display()))
+        Err(format!(
+            "this Codex app server serves the home {}",
+            said.display()
+        ))
     }
 }
 
@@ -169,6 +172,47 @@ pub async fn latest(server: &mut AppServer, thread: &str) -> Result<Option<Turn>
         .and_then(Value::as_array)
         .ok_or("Codex's turn page has no data")?;
     turns.first().map(turn).transpose()
+}
+
+/// A point in a thread's history: its newest turn as it was read, and the person inputs
+/// that turn held then. Words told into a turn that runs go into that same turn
+/// (`turn/steer`), so what came after the point is a newer turn, or a person input of the
+/// point's turn that it did not hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Point {
+    pub turn: String,
+    pub seen: Vec<String>,
+}
+
+/// The point of `thread` now, none where it has no turn yet.
+pub async fn point(server: &mut AppServer, thread: &str) -> Result<Option<Point>, String> {
+    let page = read(
+        server
+            .call(
+                "thread/turns/list",
+                json!({"threadId": thread, "sortDirection": "desc", "limit": 1, "itemsView": "full"}),
+            )
+            .await,
+    )?;
+    let turns = page
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or("Codex's turn page has no data")?;
+    let Some(newest) = turns.first() else {
+        return Ok(None);
+    };
+    let seen = inputs(newest)?
+        .map(|item| {
+            item.get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| "a Codex person input has no id".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Some(Point {
+        turn: turn(newest)?.id,
+        seen,
+    }))
 }
 
 fn turn(turn: &Value) -> Result<Turn, String> {
@@ -250,8 +294,10 @@ pub async fn find(
     Ok(found)
 }
 
-/// The one turn after `before` (the newest when it is none) whose person input carries the
-/// delivery marker whole. Two carrying it is an error: the words went in twice.
+/// The one turn from `before` on (the newest when it is none) whose person input carries
+/// the delivery marker whole. The turn marked before is read too: words told while it ran
+/// went into it (`turn/steer`), and the marker names one delivery, so one found there is
+/// that delivery's words. Two carrying it is an error: the words went in twice.
 pub async fn carrying(
     server: &mut AppServer,
     thread: &str,
@@ -261,13 +307,11 @@ pub async fn carrying(
     let mut matches = Vec::new();
     let reached = pages(server, thread, "full", |value| {
         let id = turn(value)?.id;
-        if Some(id.as_str()) == before {
-            return Ok(true);
-        }
-        if carries(value, |text| marked(text, marker))? {
+        let at_mark = Some(id.as_str()) == before;
+        if carries(value, &[], |text| marked(text, marker))? {
             matches.push(id);
         }
-        Ok(false)
+        Ok(at_mark)
     })
     .await?;
     if before.is_some() && !reached {
@@ -316,12 +360,13 @@ pub struct Taking {
     pub error: Option<String>,
 }
 
-/// For each of `asked`, the newest turn after its own `before` whose person input carries
-/// its words, among the thread's [`TAKEN_WITHIN`] newest turns.
+/// For each of `asked`, the newest turn past its own [`Point`] whose person input carries
+/// its words, among the thread's [`TAKEN_WITHIN`] newest turns: the point's turn itself
+/// only by a person input it did not hold at the point.
 pub async fn taking(
     server: &mut AppServer,
     thread: &str,
-    asked: &[(Option<&str>, &Words)],
+    asked: &[(Option<&Point>, &Words)],
 ) -> Result<Vec<Option<Taking>>, String> {
     let mut found: Vec<Option<Taking>> = vec![None; asked.len()];
     let mut passed = vec![false; asked.len()];
@@ -333,9 +378,14 @@ pub async fn taking(
             if found[at].is_some() || passed[at] {
                 continue;
             }
-            if *before == Some(listed.id.as_str()) {
-                passed[at] = true;
-            } else if carries(value, |text| words.in_text(text))? {
+            let held: &[String] = match before {
+                Some(point) if point.turn == listed.id => {
+                    passed[at] = true;
+                    &point.seen
+                }
+                _ => &[],
+            };
+            if carries(value, held, |text| words.in_text(text))? {
                 found[at] = Some(Taking {
                     turn: listed.clone(),
                     error: value
@@ -355,7 +405,29 @@ pub async fn taking(
     Ok(found)
 }
 
-fn carries(turn: &Value, holds: impl Fn(&str) -> bool) -> Result<bool, String> {
+/// Whether a person input of `turn`, other than those `held` names, has a text `holds`
+/// takes.
+fn carries(turn: &Value, held: &[String], holds: impl Fn(&str) -> bool) -> Result<bool, String> {
+    Ok(inputs(turn)?
+        .filter(|item| {
+            !item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| held.iter().any(|held| held == id))
+        })
+        .any(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .any(&holds)
+        }))
+}
+
+/// The person inputs of a turn whose items Codex loaded.
+fn inputs(turn: &Value) -> Result<impl Iterator<Item = &Value>, String> {
     if turn.get("itemsView").and_then(Value::as_str) != Some("full") {
         return Err("Codex did not load the turn's items".into());
     }
@@ -363,17 +435,9 @@ fn carries(turn: &Value, holds: impl Fn(&str) -> bool) -> Result<bool, String> {
         .get("items")
         .and_then(Value::as_array)
         .ok_or("a Codex turn has no items")?;
-    Ok(items.iter().any(|item| {
-        item.get("type").and_then(Value::as_str) == Some("userMessage")
-            && item
-                .get("content")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                .any(&holds)
-    }))
+    Ok(items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("userMessage")))
 }
 
 #[cfg(test)]
@@ -397,7 +461,7 @@ mod tests {
     fn a_turn_s_items_say_whether_it_carries_the_words() {
         let full = json!({"id": "t1", "status": "completed", "itemsView": "full", "items": [
             {"type": "userMessage", "content": [{"type": "text", "text": "do it steery-delivery:d1"}]}]});
-        let holds = |words: Words| carries(&full, |text| words.in_text(text));
+        let holds = |words: Words| carries(&full, &[], |text| words.in_text(text));
         assert_eq!(
             Words::of("do it steery-delivery:d1", "d1"),
             Words::Marker("steery-delivery:d1".into())
@@ -412,7 +476,12 @@ mod tests {
             Ok(true)
         );
         assert_eq!(holds(Words::of("do it", "r1")), Ok(false));
-        assert!(carries(&json!({"id": "t1", "itemsView": "notLoaded"}), |_| true).is_err());
+        assert!(
+            carries(&json!({"id": "t1", "itemsView": "notLoaded"}), &[], |_| {
+                true
+            })
+            .is_err()
+        );
     }
 
     /// An app server that serves `CODEX_HOME` and lists a thread's turns as `pages` says,
@@ -456,9 +525,10 @@ for line in sys.stdin:
         json!({"id": id, "status": "completed", "itemsView": "full", "items": items})
     }
 
-    /// The words went in as exactly one turn after the one marked before, read page by
-    /// page: none is no receipt yet; two, the mark gone, a turn listed twice, or pages
-    /// that do not advance are refused.
+    /// The words went in as exactly one turn from the one marked before on, read page by
+    /// page: the marked turn itself where they were steered into it as it ran. None is no
+    /// receipt yet; two, the mark gone, a turn listed twice, or pages that do not advance
+    /// are refused.
     #[tokio::test]
     async fn only_one_turn_after_the_mark_carries_the_words() {
         let dir =
@@ -474,6 +544,10 @@ for line in sys.stdin:
                 json!({"start": page(vec![listed("t3", true)], json!("p2")),
                        "p2": page(vec![listed("t2", false), before.clone()], Value::Null)}),
                 Ok(Some("t3".to_owned())),
+            ),
+            (
+                json!({"start": page(vec![listed("t1", true)], Value::Null)}),
+                Ok(Some("t1".to_owned())),
             ),
             (
                 json!({"start": page(vec![listed("t3", true), listed("t2", true), before.clone()], Value::Null)}),
@@ -507,36 +581,57 @@ for line in sys.stdin:
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Each say's words are found in the newest turn after the one before them that
-    /// carries them, with the error it failed on; words whose turn before is reached
-    /// first, or that no turn carries, have none.
+    /// Each say's words are found in the newest turn past its point that carries them, with
+    /// the error it failed on: the point's turn only by an input it did not hold then, as
+    /// words steered into it. Words whose point is reached first, or that no turn carries,
+    /// have none.
     #[tokio::test]
     async fn each_say_s_words_are_found_in_the_turn_that_took_them() {
         let dir =
             std::env::temp_dir().join(format!("steery-codex-taking-{}", uuid::Uuid::now_v7()));
-        let said = |id: &str, status: &str, text: &str| {
-            json!({"id": id, "status": status, "itemsView": "full", "error": null, "items": [
-                {"type": "userMessage", "content": [{"type": "text", "text": text}]}]})
+        let said = |id: &str, status: &str, texts: &[&str]| {
+            let items: Vec<Value> = texts
+                .iter()
+                .enumerate()
+                .map(|(at, text)| {
+                    json!({"type": "userMessage", "id": format!("{id}-{at}"),
+                    "content": [{"type": "text", "text": text}]})
+                })
+                .collect();
+            json!({"id": id, "status": status, "itemsView": "full", "error": null, "items": items})
         };
-        let mut failed = said("t2", "failed", "go on");
+        let mut failed = said("t2", "failed", &["go on"]);
         failed["error"] = json!({"message": "usage limit"});
-        let pages = json!({"start": {"data": [said("t3", "inProgress", "a steery-delivery:d1"),
-            failed, said("t1", "completed", "go on")], "nextCursor": null}});
+        let pages = json!({"start": {"data": [said("t3", "inProgress", &["a steery-delivery:d1", "more"]),
+            failed, said("t1", "completed", &["go on"])], "nextCursor": null}});
         let binary = app_server(&dir, &pages);
         let mut server = reader(&binary, &dir).await.unwrap();
-        let (marker, text, other) = (
+        let (marker, text, other, steered) = (
             Words::of("a steery-delivery:d1", "d1"),
             Words::of("go on", "r1"),
             Words::of("b steery-delivery:d9", "d9"),
+            Words::of("more", "r2"),
+        );
+        let point = |turn: &str, seen: &[&str]| Point {
+            turn: turn.to_owned(),
+            seen: seen.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        let (at_t1, at_t2, at_t3, t3_ran) = (
+            point("t1", &["t1-0"]),
+            point("t2", &["t2-0"]),
+            point("t3", &["t3-0", "t3-1"]),
+            point("t3", &["t3-0"]),
         );
         let found = taking(
             &mut server,
             "thread",
             &[
-                (Some("t2"), &marker),
-                (Some("t1"), &text),
-                (Some("t3"), &text),
+                (Some(&at_t2), &marker),
+                (Some(&at_t1), &text),
+                (Some(&at_t3), &text),
                 (None, &other),
+                (Some(&t3_ran), &steered),
+                (Some(&at_t3), &steered),
             ],
         )
         .await
@@ -554,6 +649,8 @@ for line in sys.stdin:
         );
         assert_eq!(turn(&found[2]), None);
         assert_eq!(turn(&found[3]), None);
+        assert_eq!(turn(&found[4]), Some(("t3".to_owned(), None)));
+        assert_eq!(turn(&found[5]), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
