@@ -32,6 +32,7 @@ short name, its tint and its mark.
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe |
+| `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -68,6 +69,7 @@ agrees (PROTOCOL.md §4.1).
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
+| `cursor` | `~/.local/bin` | `sh -c "curl -fsS https://cursor.com/install \| bash"` |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -98,6 +100,7 @@ signed in, as the harness itself says.
 | `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
+| `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -279,6 +282,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`. `.mcp.json` where the folder is trusted and the server approved, not rejected. (`start` runs `claude --bg`, not `-p`. `claude --bg` is an interactive background session that waits on approval.) `disabledMcpServers` off. | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 | `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
+| `cursor` | `~/.cursor/mcp.json`, whatever `CURSOR_CONFIG_DIR` says | `.cursor/mcp.json`, listed before its person approves it in Cursor | never: plugins, team servers |
 
 ## Adding a driver
 
