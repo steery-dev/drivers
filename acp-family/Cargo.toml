@@ -13,9 +13,15 @@ path = "src/bin/grok.rs"
 name = "steery-driver-copilot"
 path = "src/bin/copilot.rs"
 
+[[bin]]
+name = "steery-driver-kilo"
+path = "src/bin/kilo.rs"
+
 [dependencies]
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
 steery-driver-common = { path = "../common" }
+# Kilo keeps its conversations in SQLite; bundled, so no system library is needed.
+rusqlite = { version = "0.32", features = ["bundled"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

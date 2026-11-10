@@ -7,6 +7,7 @@
 mod copilot;
 mod grok;
 mod harness;
+mod kilo;
 
 pub use harness::Harness;
 
@@ -15,5 +16,6 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
         Harness::Copilot => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
+        Harness::Kilo => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
     }
 }

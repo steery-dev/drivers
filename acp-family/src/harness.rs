@@ -7,6 +7,8 @@ pub enum Harness {
     Grok,
     /// GitHub Copilot CLI, whose executable is `copilot`.
     Copilot,
+    /// Kilo, whose executable is `kilo`.
+    Kilo,
 }
 
 impl Harness {
@@ -15,6 +17,7 @@ impl Harness {
         match self {
             Self::Grok => "grok",
             Self::Copilot => "copilot",
+            Self::Kilo => "kilo",
         }
     }
 
@@ -23,6 +26,7 @@ impl Harness {
         match self {
             Self::Grok => "Grok Build",
             Self::Copilot => "Copilot",
+            Self::Kilo => "Kilo",
         }
     }
 
@@ -31,6 +35,7 @@ impl Harness {
         match self {
             Self::Grok => "Gk",
             Self::Copilot => "Co",
+            Self::Kilo => "Kl",
         }
     }
 
@@ -39,6 +44,7 @@ impl Harness {
         match self {
             Self::Grok => "#1d1d1f",
             Self::Copilot => "#8534f3",
+            Self::Kilo => "#617a91",
         }
     }
 
