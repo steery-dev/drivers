@@ -907,8 +907,8 @@ class Door {
   /**
    * The last message of a turn finished on its own: ask the runtime whether Steery's
    * words keep the turn going, wait at most 1 s, and continue with them. A one-shot copy
-   * asks nothing: Kilo has no hook between a turn's last answer and its end, and `kilo run`
-   * (or a driven `kilo acp`) exits as the turn ends, before any words could go in.
+   * asks nothing: `kilo run` exits as the turn ends, before any words could go in, and a
+   * driven `kilo acp` asks Steery's `session/prompt` hook from the driver's turn instead.
    */
   maybeSettle(info: Info): void {
     if (!this.welcomed || this.lead || this.ending || this.oneShot()) return;
