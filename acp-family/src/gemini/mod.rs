@@ -161,7 +161,11 @@ impl Program for Driver {
             }
             method::MCP_LIST => {
                 let place = self.place()?;
-                result(mcp::list(&place.home, &place.root, steery_sdk::params(params)?)?)
+                result(mcp::list(
+                    &place.home,
+                    &place.root,
+                    steery_sdk::params(params)?,
+                )?)
             }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),

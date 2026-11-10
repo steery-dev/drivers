@@ -171,7 +171,10 @@ pub fn read(path: &Path, cursor: Option<&str>, tail: Option<u64>) -> Result<Even
         events: Vec::new(),
     };
     // An older release's chat file is one JSON document, which no release writes on.
-    if path.extension().is_some_and(|extension| extension == "json") {
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "json")
+    {
         let unread = tail.is_some() || start < length;
         if unread {
             if length > RECORD as u64 {
@@ -304,8 +307,8 @@ impl Fold {
         {
             return;
         }
-        if let Some(summary) = text(&record["content"])
-            .filter(|text| text.trim_start().starts_with(SNAPSHOT))
+        if let Some(summary) =
+            text(&record["content"]).filter(|text| text.trim_start().starts_with(SNAPSHOT))
         {
             // A turn whose newest message is an answer is over before the compression; a
             // turn compressed in its middle goes on.
@@ -400,7 +403,10 @@ impl Fold {
                 thinking: None,
             });
         }
-        let thoughts = record["thoughts"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let thoughts = record["thoughts"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         for (index, thought) in thoughts.iter().enumerate().skip(last.thoughts) {
             let subject = thought["subject"].as_str().unwrap_or_default().trim();
             let description = thought["description"].as_str().unwrap_or_default().trim();
@@ -452,7 +458,10 @@ impl Fold {
                 context_left: None,
             });
         }
-        let calls = record["toolCalls"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let calls = record["toolCalls"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         for recorded in calls {
             let Some(call_id) = recorded["id"].as_str() else {
                 continue;
@@ -476,7 +485,10 @@ impl Fold {
     fn call(&mut self, at: u64, recorded: &Value) {
         let id = recorded["id"].as_str().unwrap_or_default();
         let name = recorded["name"].as_str().unwrap_or_default();
-        let ended = recorded["timestamp"].as_str().and_then(millis).unwrap_or(at);
+        let ended = recorded["timestamp"]
+            .as_str()
+            .and_then(millis)
+            .unwrap_or(at);
         let status = recorded["status"].as_str().unwrap_or_default();
         let mut began = call(
             id,
@@ -485,10 +497,7 @@ impl Fold {
             None,
         );
         began.id = id.to_owned();
-        self.events.push(Event::CallBegan {
-            at,
-            call: began,
-        });
+        self.events.push(Event::CallBegan { at, call: began });
         let output = output(recorded);
         self.events.push(Event::CallEnded {
             at: ended,
@@ -606,7 +615,10 @@ impl Fold {
 pub(super) fn person(record: &Value) -> Option<(String, Vec<Clip>)> {
     let content = &record["content"];
     let parts = parts(content);
-    if parts.iter().any(|part| part.get("functionResponse").is_some()) {
+    if parts
+        .iter()
+        .any(|part| part.get("functionResponse").is_some())
+    {
         return None;
     }
     let written = text(content).unwrap_or_default();
@@ -615,7 +627,10 @@ pub(super) fn person(record: &Value) -> Option<(String, Vec<Clip>)> {
         .filter(|shown| !shown.is_null())
         .and_then(text);
     // Gemini records its own "Please continue." with the person's first prompt shown.
-    if written.trim() == CONTINUE && shown.as_deref().is_some_and(|shown| shown.trim() != CONTINUE)
+    if written.trim() == CONTINUE
+        && shown
+            .as_deref()
+            .is_some_and(|shown| shown.trim() != CONTINUE)
     {
         return None;
     }
@@ -624,7 +639,7 @@ pub(super) fn person(record: &Value) -> Option<(String, Vec<Clip>)> {
     if said.starts_with(CONTEXT) || said.starts_with(SNAPSHOT) {
         return None;
     }
-    let clips: Vec<Clip> = parts.iter().filter_map(|part| clip(part)).collect();
+    let clips: Vec<Clip> = parts.iter().filter_map(clip).collect();
     (!said.is_empty() || !clips.is_empty()).then(|| (said.to_owned(), clips))
 }
 
@@ -709,7 +724,9 @@ pub(super) fn call(id: &str, name: &str, input: Value, server: Option<&str>) -> 
             .and_then(|rest| rest.strip_prefix('_'))
             .map(|tool| (server, tool))
             .or(Some((server, name))),
-        None => name.strip_prefix("mcp_").and_then(|rest| rest.split_once('_')),
+        None => name
+            .strip_prefix("mcp_")
+            .and_then(|rest| rest.split_once('_')),
     };
     let (tool, group, server, steery) = match served {
         Some(("steery", tool)) => (

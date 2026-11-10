@@ -17,9 +17,7 @@ use memchr::memmem;
 use serde_json::Value;
 use steery_driver_common::follow::Followed;
 use steery_driver_common::lines::RECORD;
-use steery_sdk::wire::harness::{
-    Events, List, Listed, Locate, Located, Read, Session, SubAgent,
-};
+use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
 use super::events;
@@ -120,7 +118,10 @@ impl Store {
         // A file that is gone is forgotten.
         lock(&self.scans).retain(|file, _| file.exists());
         let folders = std::fs::read_dir(&self.tmp).into_iter().flatten().flatten();
-        for folder in folders.map(|entry| entry.path()).filter(|path| path.is_dir()) {
+        for folder in folders
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+        {
             let chats = folder.join(CHATS);
             let Ok(entries) = std::fs::read_dir(&chats) else {
                 continue;
@@ -152,13 +153,16 @@ impl Store {
                     continue;
                 };
                 let changed = events::changed(&file);
-                let conversation = index.by_id.entry(id.clone()).or_insert_with(|| Conversation {
-                    id,
-                    files: Vec::new(),
-                    head: Head::default(),
-                    changed: None,
-                    project,
-                });
+                let conversation = index
+                    .by_id
+                    .entry(id.clone())
+                    .or_insert_with(|| Conversation {
+                        id,
+                        files: Vec::new(),
+                        head: Head::default(),
+                        changed: None,
+                        project,
+                    });
                 if conversation.project != project {
                     // One id in two project folders: the listing is unsure which it is.
                     index.complete = false;
@@ -180,7 +184,10 @@ impl Store {
         let open = File::open(file).ok()?;
         let mut scans = lock(&self.scans);
         let scan = scans.entry(file.to_owned()).or_default();
-        if file.extension().is_some_and(|extension| extension == "json") {
+        if file
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
             scan.read_whole(&open)?;
         } else {
             scan.read_on(&open)?;
@@ -233,7 +240,10 @@ impl Store {
                 excluded.push(conversation.id.clone());
             }
         }
-        sessions.retain(|session| list.seen_since.is_none_or(|since| session.updated_at >= since));
+        sessions.retain(|session| {
+            list.seen_since
+                .is_none_or(|since| session.updated_at >= since)
+        });
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Listed {
             sessions,
@@ -259,7 +269,11 @@ impl Store {
         let index = self.index();
         let conversation = index.conversation(&read.external_id)?;
         let file = match &read.sub_agent {
-            None => conversation.files.last().cloned().ok_or_else(|| not_found(&read.external_id))?,
+            None => conversation
+                .files
+                .last()
+                .cloned()
+                .ok_or_else(|| not_found(&read.external_id))?,
             Some(child) => self
                 .sub_agents(&index, conversation)
                 .into_iter()
@@ -304,7 +318,10 @@ impl Store {
                     .flatten()
                     .flatten()
                     .map(|entry| entry.path())
-                    .filter(|path| path.extension().is_some_and(|extension| extension == "jsonl"));
+                    .filter(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "jsonl")
+                    });
                 for file in files {
                     let Some(head) = self.head(&file) else {
                         continue;
@@ -431,7 +448,10 @@ impl Head {
             if let Some(updated) = set["lastUpdated"].as_str().and_then(events::millis) {
                 self.updated = Some(updated);
             }
-            if let Some(summary) = set["summary"].as_str().filter(|text| !text.trim().is_empty()) {
+            if let Some(summary) = set["summary"]
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+            {
                 self.summary = Some(title(summary));
             }
             return;
@@ -459,7 +479,9 @@ impl Head {
                             name: call["args"]["agent_name"].as_str().map(str::to_owned),
                             task: call["args"]["prompt"]
                                 .as_str()
-                                .and_then(|prompt| prompt.lines().find(|line| !line.trim().is_empty()))
+                                .and_then(|prompt| {
+                                    prompt.lines().find(|line| !line.trim().is_empty())
+                                })
                                 .map(title),
                         },
                     );
@@ -491,7 +513,11 @@ fn chat_file(path: &Path) -> bool {
 
 /// A title, at most [`TITLE`] characters of `text`'s first line.
 fn title(text: &str) -> String {
-    let line = text.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .trim();
     match line.char_indices().nth(TITLE) {
         Some((end, _)) => format!("{}…", &line[..end]),
         None => line.to_owned(),
@@ -539,7 +565,12 @@ mod tests {
                 copy(&entry.path(), &target, at);
             } else {
                 std::fs::copy(entry.path(), &target).unwrap();
-                File::options().write(true).open(&target).unwrap().set_modified(at).unwrap();
+                File::options()
+                    .write(true)
+                    .open(&target)
+                    .unwrap()
+                    .set_modified(at)
+                    .unwrap();
             }
         }
     }
@@ -577,7 +608,11 @@ mod tests {
         // leaves no prompt in `logs.json`.
         let listed = store.list(List::default());
         assert!(listed.complete);
-        let mut ids: Vec<_> = listed.sessions.iter().map(|s| s.external_id.as_str()).collect();
+        let mut ids: Vec<_> = listed
+            .sessions
+            .iter()
+            .map(|s| s.external_id.as_str())
+            .collect();
         ids.sort();
         assert_eq!(
             ids,
@@ -588,9 +623,17 @@ mod tests {
                 "df636b9c-090c-436e-a92e-7e8798e4b943",
             ]
         );
-        let lead = &listed.sessions.iter().find(|s| s.external_id.starts_with("488d")).unwrap();
+        let lead = &listed
+            .sessions
+            .iter()
+            .find(|s| s.external_id.starts_with("488d"))
+            .unwrap();
         assert_eq!(lead.title.as_deref(), Some("use a sub-agent to list files"));
-        assert!(lead.cwd.as_deref().is_some_and(|cwd| cwd.ends_with("subagent/work")));
+        assert!(
+            lead.cwd
+                .as_deref()
+                .is_some_and(|cwd| cwd.ends_with("subagent/work"))
+        );
         let [child] = lead.sub_agents.as_slice() else {
             panic!("one sub-agent: {:?}", lead.sub_agents);
         };
@@ -605,18 +648,32 @@ mod tests {
         // acknowledgement of it is no answer of the agent.
         let compress = read(&store, "df636b9c-090c-436e-a92e-7e8798e4b943", None, None);
         assert!(compress.whole && !compress.more);
-        assert_eq!(turns(&compress.events), ["Finished", "Finished", "compacted", "Finished"]);
+        assert_eq!(
+            turns(&compress.events),
+            ["Finished", "Finished", "compacted", "Finished"]
+        );
         let agent = |events: &[Event]| {
             events
                 .iter()
-                .filter(|event| matches!(event, Event::Words { voice: Voice::Agent, .. }))
+                .filter(|event| {
+                    matches!(
+                        event,
+                        Event::Words {
+                            voice: Voice::Agent,
+                            ..
+                        }
+                    )
+                })
                 .count()
         };
         assert_eq!(agent(&compress.events), 3);
 
         // `/rewind` to the second prompt takes its turn back.
         let rewind = read(&store, "760907b6-38c2-467e-8585-e4c4458da883", None, None);
-        assert_eq!(turns(&rewind.events), ["Finished", "Interrupted", "rollback 1", "Finished"]);
+        assert_eq!(
+            turns(&rewind.events),
+            ["Finished", "Interrupted", "rollback 1", "Finished"]
+        );
 
         // The sub-agent's own chat ends at its `complete_task`; its lead says how it ended.
         let lead = read(&store, "488d4dbe-87e4-4026-aa02-5905bc8790fb", None, None);
@@ -644,14 +701,16 @@ mod tests {
         assert_eq!(turns(&failed.events), ["Interrupted", "rollback 1"]);
 
         // A conversation that is not listed is not read.
-        assert!(store
-            .read(Read {
-                external_id: "2216106a-26ee-4868-8f78-dee3ab5ef4c1".into(),
-                sub_agent: None,
-                cursor: None,
-                tail: None,
-            })
-            .is_err());
+        assert!(
+            store
+                .read(Read {
+                    external_id: "2216106a-26ee-4868-8f78-dee3ab5ef4c1".into(),
+                    sub_agent: None,
+                    cursor: None,
+                    tail: None,
+                })
+                .is_err()
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -684,7 +743,11 @@ mod tests {
             serde_json::to_value(&said).unwrap(),
             serde_json::to_value(&once.events).unwrap()
         );
-        assert_eq!(turns(&once.events), ["Finished"], "the newest turn is still open");
+        assert_eq!(
+            turns(&once.events),
+            ["Finished"],
+            "the newest turn is still open"
+        );
 
         // Written again from its start, the file is read again from its start.
         std::fs::write(&file, &whole[..lines[0].len()]).unwrap();
