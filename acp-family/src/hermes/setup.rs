@@ -1,6 +1,6 @@
 //! `setup/plan`: Steery's skill, as a whole file in Hermes's skills folder. Hermes keeps its
-//! MCP servers only in `config.yaml`, a format no setup entry can write, so the plan says the
-//! command that adds Steery's server instead of planning it.
+//! MCP servers only in `config.yaml`. No runtime merges a `yaml` entry yet, so the plan says
+//! the command that adds Steery's server instead of planning it.
 
 use std::path::{Path, PathBuf};
 
