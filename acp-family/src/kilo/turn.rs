@@ -35,6 +35,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
 
 use super::hooks::{ASKS_WAITS, EVENT};
+use super::store::{Store, Turn};
 
 /// How long a caller at the inbox has to finish writing its words.
 const WORDS_WITHIN: Duration = Duration::from_secs(10);
@@ -44,6 +45,14 @@ const CANCELLED_WITHIN: Duration = Duration::from_secs(15);
 
 /// How long Kilo has to end once its standard input closes.
 const CLOSED_WITHIN: Duration = Duration::from_secs(5);
+
+/// How often the turn looks again whether Kilo still runs a turn of the session, once
+/// every prompt it sent has its answer.
+const LOOKS_EVERY: Duration = Duration::from_millis(100);
+
+/// How long the newest words of the session may wait for an answer while Kilo marks no
+/// turn of it: words sent with no reply never get one.
+const UNANSWERED_WITHIN: Duration = Duration::from_secs(5);
 
 /// What a turn is asked to do, as its command line says it.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -188,7 +197,16 @@ pub async fn run(asked: Asked) -> Result<(), String> {
         // The permissions that wait on the hook, by their request ids.
         let mut asking = JoinSet::new();
         let mut waiting: Vec<Value> = Vec::new();
-        while !prompts.is_empty() {
+        // Words queued by another client of this Kilo, such as Steery's plugin, take over
+        // a running turn, and ACP then answers the prompt they took over: the turn ends
+        // when Kilo runs none of the session.
+        let store = std::env::var_os("HOME").map(|home| Store::new(std::path::Path::new(&home)));
+        let mut unmarked: Option<tokio::time::Instant> = None;
+        while !prompts.is_empty()
+            || store
+                .as_ref()
+                .is_some_and(|store| kilo.runs(store, &session, &mut unmarked))
+        {
             for request in std::mem::take(&mut kilo.asks) {
                 let Some(id) = request.get("id").cloned() else {
                     continue;
@@ -242,6 +260,7 @@ pub async fn run(asked: Asked) -> Result<(), String> {
                     }
                 },
                 () = deadline => break,
+                () = tokio::time::sleep(LOOKS_EVERY), if prompts.is_empty() => {}
             }
         }
         // The inbox closes before Kilo does: words told from here on are told to a turn
@@ -359,6 +378,12 @@ impl Acp {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0);
+        // Steery's plugin in Kilo trusts `STEERY_STARTED` only from its own parent, which is
+        // this turn: it passes on what the runtime started it as, under its own pid.
+        match started() {
+            Some(what) => command.env("STEERY_STARTED", format!("{}:{what}", std::process::id())),
+            None => command.env_remove("STEERY_STARTED"),
+        };
         let mut child = tokio::process::Command::from(command)
             .kill_on_drop(true)
             .spawn()?;
@@ -374,6 +399,46 @@ impl Acp {
             next: 0,
             asks: Vec::new(),
         })
+    }
+
+    /// Whether this Kilo still runs a turn of `session`: its own mark says so (this
+    /// process, or a child of the launcher that `kilo` may be), or the newest words of
+    /// the session have no answer yet, as between queued words' turn and the one they
+    /// took over, for at most [`UNANSWERED_WITHIN`] with no mark.
+    fn runs(
+        &self,
+        store: &Store,
+        session: &str,
+        unmarked: &mut Option<tokio::time::Instant>,
+    ) -> bool {
+        let marked = match (store.turn(session), self.child.id()) {
+            (Some(Turn::Here(pid)), Some(kilo)) => {
+                pid == kilo
+                    || kernel::descendants(kilo)
+                        .iter()
+                        .any(|(child, _)| *child == pid)
+            }
+            _ => false,
+        };
+        if marked {
+            *unmarked = None;
+            return true;
+        }
+        let unanswered = store.latest(session).is_ok_and(|latest| {
+            let answered = latest
+                .answer
+                .as_ref()
+                .and_then(|answer| answer.pointer("/time/created"))
+                .and_then(Value::as_u64);
+            latest
+                .asked
+                .is_some_and(|asked| answered.is_none_or(|at| at < asked))
+        });
+        unanswered
+            && unmarked
+                .get_or_insert_with(tokio::time::Instant::now)
+                .elapsed()
+                < UNANSWERED_WITHIN
     }
 
     /// Write one message to Kilo, and the same line to standard output.
@@ -504,6 +569,15 @@ impl Acp {
             kernel::signal(&running, libc::SIGKILL);
         }
     }
+}
+
+/// What the runtime started this turn as (`STEERY_STARTED=<pid>:<what>`), where the pid is
+/// this process's parent, as PROTOCOL.md §3.3 trusts it.
+fn started() -> Option<String> {
+    let value = std::env::var("STEERY_STARTED").ok()?;
+    let (pid, what) = value.split_once(':')?;
+    let pid: u32 = pid.parse().ok()?;
+    (pid > 1 && pid == std::os::unix::process::parent_id()).then(|| what.to_owned())
 }
 
 /// One line on standard output, whole.
