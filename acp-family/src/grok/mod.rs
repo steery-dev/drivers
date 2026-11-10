@@ -3,6 +3,7 @@
 //! Steery, and reads its hooks' moments.
 
 mod events;
+mod setup;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -40,7 +41,6 @@ pub(crate) fn root(home: &Path) -> PathBuf {
 
 /// The `grok` that Steery runs: the one on `PATH`, else the one its installer links in
 /// `<root>/bin`, a folder that is not yet on `PATH` right after an install.
-#[allow(dead_code)] // For setup, models, MCP and sign-in, which land next.
 pub(crate) fn binary(root: &Path) -> Option<PathBuf> {
     steery_driver_common::program::on_path("grok")
         .or_else(|| steery_driver_common::program::executable(root.join("bin").join("grok")))
@@ -138,6 +138,9 @@ impl Program for Driver {
             }
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
+            method::SETUP_PLAN => result(
+                setup::plan(&self.place()?.root, steery_sdk::params(params)?).await,
+            ),
             method::SESSIONS_FOLD => {
                 let _: harness::Fold = steery_sdk::params(params)?;
                 Err(Error::refused(
