@@ -4,6 +4,7 @@
 //! lives in its own module and answers the program protocol for it alone. What two of them
 //! share, such as reading ACP's `session/update` records, is a module of its own.
 
+mod copilot;
 mod grok;
 mod harness;
 
@@ -13,5 +14,6 @@ pub use harness::Harness;
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+        Harness::Copilot => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
     }
 }

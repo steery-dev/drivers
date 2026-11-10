@@ -9,6 +9,10 @@ description = "Steery's drivers for the harnesses that speak the Agent Client Pr
 name = "steery-driver-grok"
 path = "src/bin/grok.rs"
 
+[[bin]]
+name = "steery-driver-copilot"
+path = "src/bin/copilot.rs"
+
 [dependencies]
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
 steery-driver-common = { path = "../common" }
