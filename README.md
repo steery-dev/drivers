@@ -32,7 +32,7 @@ short name, its tint and its mark.
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
-| `kilo` | Kilo | [`acp-family`](acp-family/) | observe |
+| `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive |
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `amp` | Amp | [`amp`](amp/) | observe |

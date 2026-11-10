@@ -1,7 +1,8 @@
 //! `setup/plan`: what sets Kilo up for Steery: Steery's skill, in its global folder's
-//! `skills`, and Steery's MCP server, under `mcp` in its global `kilo.json`, a file Kilo
-//! merges with the person's own `kilo.jsonc`. Kilo runs no hook command, and the driver
-//! has no plugin for it yet, so nothing else is written.
+//! `skills`; Steery's MCP server, under `mcp` in its global `kilo.json`, a file Kilo
+//! merges with the person's own `kilo.jsonc`; and Steery's hook command line, in a file of
+//! its own that the turns this driver starts read. Kilo runs no hook command itself, and the
+//! driver has no plugin for it yet, so nothing else is written.
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +20,12 @@ const INSTALLER: &str = "curl -fsSL https://kilo.ai/cli/install | bash";
 /// `~/.kilo/bin`.
 pub fn binary(home: &Path) -> Option<PathBuf> {
     program::on_path("kilo").or_else(|| program::executable(home.join(".kilo/bin/kilo")))
+}
+
+/// Steery's hook command line, which a turn runs at a permission Kilo asks for. Kilo reads
+/// nothing under its config folder's `steery`.
+pub fn hook_file(config: &Path) -> PathBuf {
+    config.join(STEERY).join("hook")
 }
 
 pub async fn plan(home: &Path, data: &Path, config: &Path, asked: Setup) -> Result<Planned, Error> {
@@ -83,6 +90,13 @@ pub async fn plan(home: &Path, data: &Path, config: &Path, asked: Setup) -> Resu
                     "timeout": u64::from(asked.timeout) * 1000,
                 }),
                 carries: vec![Part::Mcp],
+            },
+            Entry {
+                path: hook_file(config),
+                format: Format::Text,
+                at: None,
+                value: json!(asked.hook),
+                carries: vec![Part::Hooks],
             },
         ],
         notes: Vec::new(),

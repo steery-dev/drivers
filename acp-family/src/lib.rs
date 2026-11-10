@@ -9,7 +9,6 @@ mod cursor;
 mod grok;
 mod harness;
 mod hermes;
-mod kernel;
 mod kilo;
 
 pub use harness::Harness;
@@ -28,7 +27,10 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             }
         }
         Harness::Hermes => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
-        Harness::Kilo => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
+        Harness::Kilo => match std::env::args().nth(1).as_deref() {
+            Some("turn") => kilo::turn::main(std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
+        },
         Harness::Cursor => steery_sdk::serve(|_notifier| cursor::Driver::default()).await,
     }
 }

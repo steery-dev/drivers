@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use steery_driver_common::kernel;
 use steery_sdk::wire::harness::{
     Event, Execution, Held, HeldBy, Holder, HolderStop, Look, Looked, Marked, Read, Receipt,
     ReceiptFind, ReceiptMark, Sample, Sampled, Stop, Stopped, Terminal, TerminalCommand, TurnState,
@@ -12,7 +13,6 @@ use steery_sdk::wire::harness::{
 use steery_sdk::{Error, refusal};
 
 use super::transcripts::Store;
-use crate::kernel;
 
 /// The bytes at the end of a transcript that `idle` reads for its last turn.
 const IDLE_TAIL: u64 = 256 * 1024;
