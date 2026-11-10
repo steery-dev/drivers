@@ -1,0 +1,21 @@
+[package]
+name = "steery-driver-acp-family"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Steery's drivers for the harnesses that speak the Agent Client Protocol: they read the harness's conversations, plan its setup and read its moments."
+
+[[bin]]
+name = "steery-driver-grok"
+path = "src/bin/grok.rs"
+
+[dependencies]
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
+steery-driver-common = { path = "../common" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "io-util", "sync"] }
+
+# Its own workspace, so it builds alone.
+[workspace]

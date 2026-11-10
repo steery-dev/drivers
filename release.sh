@@ -52,7 +52,7 @@ export STEERY_PROGRAM_RELEASE=$tag
 # Linux builds link glibc 2.30 at most, so they run in every current Linux image.
 targets=(aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu.2.30 aarch64-unknown-linux-gnu.2.30)
 # Each crate and the executables it builds.
-crates=(pi-family:steery-driver-omp,steery-driver-pi claude-code:steery-driver-claude-code codex:steery-driver-codex)
+crates=(pi-family:steery-driver-omp,steery-driver-pi claude-code:steery-driver-claude-code codex:steery-driver-codex acp-family:steery-driver-grok)
 
 rm -rf dist
 for zig_target in "${targets[@]}"; do
