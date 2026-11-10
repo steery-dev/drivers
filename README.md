@@ -31,6 +31,7 @@ short name, its tint and its mark.
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
+| `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -67,6 +68,7 @@ agrees (PROTOCOL.md §4.1).
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
+| `opencode` | `~/.opencode/bin` | `bash -c "curl -fsSL https://opencode.ai/v2/install \| bash -s -- --no-modify-path"`. OpenCode 2 only: an `opencode` that names a 1.x release does not count as found, and a note names it. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -97,6 +99,7 @@ signed in, as the harness itself says.
 | `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
+| `opencode` | ``run `opencode auth login` in a terminal`` | not told. OpenCode's free models need no account, so an empty model list never means signed out. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -278,6 +281,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`. `.mcp.json` where the folder is trusted and the server approved, not rejected. (`start` runs `claude --bg`, not `-p`. `claude --bg` is an interactive background session that waits on approval.) `disabledMcpServers` off. | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 | `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
+| `opencode` | the system folder's, then the config folder's `opencode.json`, `opencode.jsonc` (comments and trailing commas read), then the file `OPENCODE_CONFIG` names. `mcp.servers` (OpenCode 2) over `mcp.<name>` (OpenCode 1's shape). `enabled: false` off. | each folder's `opencode.json`, `opencode.jsonc`, from `/` down to it; then each folder's `.opencode/` ones, in the same order | not with managed preferences, `OPENCODE_CONFIG_CONTENT`, a `plugin` or `plugins` list, or a module in a config folder's `plugin/` or `plugins/` |
 
 ## Adding a driver
 
