@@ -1,26 +1,30 @@
-//! A Kilo turn, run by this driver's own binary in its turn mode: the words on standard
-//! input, Kilo's own ACP server (`kilo acp`) spoken to — `session/new`, `session/resume` or
-//! `session/fork`, the model and the effort set as the session's config options, then
-//! `session/prompt` with the words — every message Kilo writes and every request this turn
-//! sends it written verbatim to standard output, one a line, and out once Kilo has answered
-//! each prompt. What runs is the conversation Kilo's own clients run: the person's
-//! configuration, MCP servers, rules and skills.
+//! A turn of an ACP harness (Kilo, OpenCode), run by its driver's own binary in its turn
+//! mode: the words on standard input, the harness's own ACP server (`<binary> acp`) spoken
+//! to — `session/new`, `session/resume` or `session/fork`, the model and the effort set as
+//! the session's config options, then `session/prompt` with the words — every message the
+//! harness writes and every request this turn sends it written verbatim to standard output,
+//! one a line, and out once the harness has answered each prompt. What runs is the
+//! conversation the harness's own clients run: the person's configuration, MCP servers,
+//! rules and skills.
 //!
 //! While the turn runs, more words told on its inbox (a unix socket in the turn's folder) go
-//! in as one more `session/prompt`, which Kilo queues behind the one running; the caller
-//! reads back `heard`. A permission Kilo asks for goes to Steery's hook (`--hook`, setup's
-//! command line), run as `<hook> session/request_permission` with the request's `params` on
-//! standard input: its standard output is Kilo's answer ([`super::hooks`]). Without a hook,
-//! or where the hook fails or says nothing, the call is rejected, as Kilo's own `kilo run`
-//! rejects one with no person at it. Once Kilo runs nothing more of the session, the turn
-//! runs `<hook> session/prompt`: words on its standard output go in as one more
-//! `session/prompt`, and the turn goes on. SIGTERM or SIGINT cancels the turn
-//! (`session/cancel`), so Kilo ends its message as aborted instead of leaving it unfinished,
-//! and every permission still asked is answered cancelled; a second signal ends the turn at
-//! once. A request Kilo refuses before the words go in is the one line `<refusal word>:
-//! <Kilo's line>` on standard error, and the turn fails.
+//! in as the harness takes words mid-turn ([`Told`]); the caller reads back `heard`. A
+//! permission the harness asks for goes to Steery's hook (`--hook`, setup's command line),
+//! run as `<hook> session/request_permission` with the request's `params` on standard input:
+//! its standard output is the harness's answer ([`hooks`]). Without a hook, or where the hook
+//! fails or says nothing, the call is rejected, as no person is at the harness to ask. Once
+//! the harness runs nothing more of the session, the turn runs `<hook> session/prompt`:
+//! words on its standard output go in as one more `session/prompt`, and the turn goes on.
+//! SIGTERM or SIGINT cancels the turn (`session/cancel`), so the harness ends its message as
+//! aborted instead of leaving it unfinished, and every permission still asked is answered
+//! cancelled; a second signal ends the turn at once. A request the harness refuses before
+//! the words go in is the one line `<refusal word>: <the harness's line>` on standard error,
+//! and the turn fails.
 
-use std::collections::HashSet;
+pub mod drive;
+pub mod hooks;
+
+use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -36,36 +40,65 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
 
-use super::hooks::{ASKS_WAITS, ENDED, ENDED_WAITS, PERMISSION};
-use super::store::{Store, Turn};
+use crate::Harness;
+use hooks::{ASKS_WAITS, ENDED, ENDED_WAITS, PERMISSION};
 
 /// How long a caller at the inbox has to finish writing its words.
 const WORDS_WITHIN: Duration = Duration::from_secs(10);
 
-/// How long Kilo has to answer a cancel before the turn ends without its answer.
+/// How long the harness has to answer a cancel before the turn ends without its answer.
 const CANCELLED_WITHIN: Duration = Duration::from_secs(15);
 
-/// How long Kilo has to end once its standard input closes.
+/// How long the harness has to end once its standard input closes.
 const CLOSED_WITHIN: Duration = Duration::from_secs(5);
 
-/// How often the turn looks again whether Kilo still runs a turn of the session, once
-/// every prompt it sent has its answer.
+/// How often the turn looks again whether the harness still runs a turn of the session,
+/// once every prompt it sent has its answer.
 const LOOKS_EVERY: Duration = Duration::from_millis(100);
 
-/// How long the newest words of the session may wait for an answer while Kilo marks no
-/// turn of it: words sent with no reply never get one.
-const UNANSWERED_WITHIN: Duration = Duration::from_secs(5);
+/// OpenCode's extension that puts words into the running turn of a session.
+const STEERING: &str = "_session/steering";
+
+/// How words told on the inbox go into the harness mid-turn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Told {
+    /// As one more `session/prompt`, which the harness queues behind the one running.
+    Prompt,
+    /// Into the running turn, through [`STEERING`]; where no turn runs any more, as one
+    /// more `session/prompt`. The harness refuses a second prompt while one runs.
+    Steer,
+}
+
+/// What one harness of the family adds to the turn.
+pub trait Host {
+    /// The harness.
+    fn harness(&self) -> Harness;
+
+    /// How words told on the inbox go in.
+    fn told(&self) -> Told;
+
+    /// Whether the harness still runs a turn of `session` once every prompt the turn sent
+    /// has its answer, as words another client queued into it can make it; `acp` is the pid
+    /// of the harness's ACP server, and `unmarked` the turn's own memory between looks.
+    fn runs(
+        &self,
+        acp: Option<u32>,
+        session: &str,
+        unmarked: &mut Option<tokio::time::Instant>,
+    ) -> bool;
+}
 
 /// What a turn is asked to do, as its command line says it.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Asked {
-    pub kilo: PathBuf,
+    /// The harness's executable, whose `acp` the turn speaks to.
+    pub binary: PathBuf,
     pub act: String,
     pub id: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub inbox: Option<PathBuf>,
-    /// Steery's hook command line, which answers the permissions Kilo asks for.
+    /// Steery's hook command line, which answers the permissions the harness asks for.
     pub hook: Option<String>,
 }
 
@@ -73,8 +106,8 @@ impl Asked {
     /// The arguments after `turn`.
     pub fn args(&self) -> Vec<String> {
         let mut args = vec![
-            "--kilo".to_owned(),
-            self.kilo.to_string_lossy().into_owned(),
+            "--binary".to_owned(),
+            self.binary.to_string_lossy().into_owned(),
             self.act.clone(),
         ];
         args.extend(self.id.clone());
@@ -100,7 +133,7 @@ impl Asked {
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| args.next().ok_or(format!("{flag} needs a value"));
             match arg.as_str() {
-                "--kilo" => asked.kilo = PathBuf::from(value("--kilo")?),
+                "--binary" => asked.binary = PathBuf::from(value("--binary")?),
                 "--model" => asked.model = Some(value("--model")?),
                 "--thinking" => asked.thinking = Some(value("--thinking")?),
                 "--inbox" => asked.inbox = Some(PathBuf::from(value("--inbox")?)),
@@ -116,9 +149,9 @@ impl Asked {
             "continue" | "fork" => named,
             _ => false,
         };
-        if asked.kilo.as_os_str().is_empty() || !fits {
+        if asked.binary.as_os_str().is_empty() || !fits {
             return Err(
-                "usage: turn --kilo <binary> <new | continue <id> | fork <id>> \
+                "usage: turn --binary <binary> <new | continue <id> | fork <id>> \
                         [--model m] [--thinking t] [--inbox path] [--hook command]"
                     .into(),
             );
@@ -129,9 +162,9 @@ impl Asked {
 
 /// The turn mode's entry: run the turn its arguments ask for, and say on standard error why
 /// it failed.
-pub async fn main(args: impl Iterator<Item = String>) -> std::io::Result<()> {
+pub async fn main(host: impl Host, args: impl Iterator<Item = String>) -> std::io::Result<()> {
     let outcome = match Asked::parse(args) {
-        Ok(asked) => run(asked).await,
+        Ok(asked) => run(&host, asked).await,
         Err(usage) => Err(format!("{}: {usage}", refusal::START_FAILED)),
     };
     if let Err(line) = outcome {
@@ -142,7 +175,7 @@ pub async fn main(args: impl Iterator<Item = String>) -> std::io::Result<()> {
 }
 
 /// Run one turn; the error is the line for standard error.
-pub async fn run(asked: Asked) -> Result<(), String> {
+async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
     let failed = |e: std::io::Error| format!("{}: {e}", refusal::START_FAILED);
     let mut words = String::new();
     tokio::io::stdin()
@@ -152,9 +185,10 @@ pub async fn run(asked: Asked) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(failed)?;
     let mut terms = signal(SignalKind::terminate()).map_err(failed)?;
     let mut interrupts = signal(SignalKind::interrupt()).map_err(failed)?;
-    let mut kilo = Acp::open(&asked.kilo).await.map_err(failed)?;
+    let label = host.harness().label();
+    let mut acp = Acp::open(&asked.binary, label).await.map_err(failed)?;
     let outcome = async {
-        kilo.call(
+        acp.call(
             "initialize",
             json!({"protocolVersion": 1, "clientCapabilities": {}}),
         )
@@ -163,7 +197,7 @@ pub async fn run(asked: Asked) -> Result<(), String> {
         let session = match (asked.act.as_str(), asked.id.as_deref()) {
             ("continue", Some(id)) => {
                 let params = json!({"sessionId": id, "cwd": cwd, "mcpServers": []});
-                kilo.call("session/resume", params).await?;
+                acp.call("session/resume", params).await?;
                 id.to_owned()
             }
             (act, id) => {
@@ -174,47 +208,64 @@ pub async fn run(asked: Asked) -> Result<(), String> {
                     ),
                     None => ("session/new", json!({"cwd": cwd, "mcpServers": []})),
                 };
-                let opened = kilo.call(method, params).await?;
+                let opened = acp.call(method, params).await?;
                 opened
                     .get("sessionId")
                     .and_then(Value::as_str)
                     .map(str::to_owned)
-                    .ok_or_else(|| format!("{}: Kilo's {act} named no session", refusal::REFUSED))?
+                    .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?
             }
         };
         for (option, value) in [("model", &asked.model), ("effort", &asked.thinking)] {
             if let Some(value) = value {
                 let params = json!({"sessionId": session, "configId": option, "value": value});
-                kilo.call("session/set_config_option", params).await?;
+                acp.call("session/set_config_option", params).await?;
             }
         }
-        let mut prompts = HashSet::from([kilo.prompt(&session, &words).await?]);
+        let mut prompts = HashSet::from([acp.prompt(&session, &words).await?]);
         // Bound once the session is named: words heard before that would have no turn to
         // go into. A turn that cannot bind runs with no inbox.
         let heard = asked
             .inbox
             .as_ref()
             .and_then(|path| UnixListener::bind(path).ok());
+        // Words told on the inbox that wait for the harness to say whether it steered them
+        // in, with the caller who told them, by the steering request's id.
+        let mut steering: HashMap<u64, (String, UnixStream)> = HashMap::new();
+        // Words the harness would not steer in, as no turn ran: they go in as one prompt once
+        // the harness answered every prompt, as it takes no second prompt while one runs.
+        let mut later: Vec<(String, UnixStream)> = Vec::new();
         let mut cancelled: Option<tokio::time::Instant> = None;
         // The permissions that wait on the hook, by their request ids.
         let mut asking = JoinSet::new();
         let mut waiting: Vec<Value> = Vec::new();
-        // Words queued by another client of this Kilo, such as Steery's plugin, take over
-        // a running turn, and ACP then answers the prompt they took over: the turn ends
-        // when Kilo runs none of the session.
-        let store = std::env::var_os("HOME").map(|home| Store::new(std::path::Path::new(&home)));
         let mut unmarked: Option<tokio::time::Instant> = None;
-        // How Kilo's answer to the newest prompt says the turn ended, and whether Steery's
-        // hook already made the turn go on.
+        // How the harness's answer to the newest prompt says the turn ended, and whether
+        // Steery's hook already made the turn go on.
         let mut stopped: Option<String> = None;
         let mut continued = false;
         loop {
         while !prompts.is_empty()
-            || store
-                .as_ref()
-                .is_some_and(|store| kilo.runs(store, &session, &mut unmarked))
+            || !steering.is_empty()
+            || !later.is_empty()
+            || host.runs(acp.child.id(), &session, &mut unmarked)
         {
-            for request in std::mem::take(&mut kilo.asks) {
+            if prompts.is_empty() && !later.is_empty() {
+                let told = std::mem::take(&mut later);
+                let words = told.iter().map(|(words, _)| words.as_str()).collect::<Vec<_>>();
+                let said = match (cancelled, acp.prompt(&session, &words.join("\n\n")).await) {
+                    (Some(_), _) => "the turn is ending".to_owned(),
+                    (None, Ok(id)) => {
+                        prompts.insert(id);
+                        HEARD.to_owned()
+                    }
+                    (None, Err(line)) => line,
+                };
+                for (_, stream) in told {
+                    reply(stream, &said).await;
+                }
+            }
+            for request in std::mem::take(&mut acp.asks) {
                 let Some(id) = request.get("id").cloned() else {
                     continue;
                 };
@@ -226,9 +277,9 @@ pub async fn run(asked: Asked) -> Result<(), String> {
                     }
                     (None, None) => {
                         let rejection = json!({"outcome": rejected(params.get("options"))});
-                        kilo.answer(&id, rejection).await?;
+                        acp.answer(&id, rejection).await?;
                     }
-                    (_, Some(_)) => kilo.answer(&id, CANCELLED.clone()).await?,
+                    (_, Some(_)) => acp.answer(&id, CANCELLED.clone()).await?,
                 }
             }
             let deadline = async {
@@ -238,43 +289,57 @@ pub async fn run(asked: Asked) -> Result<(), String> {
                 }
             };
             tokio::select! {
-                message = kilo.next() => {
-                    if let Some(message) = message?
-                        && let Some(id) = message.get("id").and_then(Value::as_u64)
-                        && prompts.remove(&id)
-                    {
-                        let reason = message.pointer("/result/stopReason").and_then(Value::as_str);
-                        stopped = Some(reason.unwrap_or("error").to_owned());
+                message = acp.next() => {
+                    let answered = message?;
+                    let id = answered.as_ref().and_then(|message| message.get("id")?.as_u64());
+                    if let (Some(message), Some(id)) = (answered, id) {
+                        if prompts.remove(&id) {
+                            let reason = message.pointer("/result/stopReason").and_then(Value::as_str);
+                            stopped = Some(reason.unwrap_or("error").to_owned());
+                        } else if let Some((words, stream)) = steering.remove(&id) {
+                            match steered(acp.label, &message) {
+                                Ok(true) => reply(stream, HEARD).await,
+                                Ok(false) => later.push((words, stream)),
+                                Err(line) => reply(stream, &line).await,
+                            }
+                        }
                     }
                 }
                 Some(Ok((id, answer))) = asking.join_next() => {
                     waiting.retain(|waits| *waits != id);
-                    kilo.answer(&id, answer).await?;
+                    acp.answer(&id, answer).await?;
                 }
                 Ok((stream, _)) = accept(heard.as_ref()) => {
-                    if let Some(id) = hear(&mut kilo, &session, stream).await {
-                        prompts.insert(id);
+                    match hear(&mut acp, host.told(), &session, stream).await {
+                        Heard::Prompted(id) => {
+                            prompts.insert(id);
+                        }
+                        Heard::Steering(id, words, stream) => {
+                            steering.insert(id, (words, stream));
+                        }
+                        Heard::Not => {}
                     }
                 }
                 _ = terms.recv() => match cancelled {
                     Some(_) => break,
                     None => {
-                        cancelled = Some(kilo.cancel(&session).await?);
-                        abandon(&mut kilo, &mut asking, &mut waiting).await?;
+                        cancelled = Some(acp.cancel(&session).await?);
+                        abandon(&mut acp, &mut asking, &mut waiting).await?;
                     }
                 },
                 _ = interrupts.recv() => match cancelled {
                     Some(_) => break,
                     None => {
-                        cancelled = Some(kilo.cancel(&session).await?);
-                        abandon(&mut kilo, &mut asking, &mut waiting).await?;
+                        cancelled = Some(acp.cancel(&session).await?);
+                        abandon(&mut acp, &mut asking, &mut waiting).await?;
                     }
                 },
                 () = deadline => break,
-                () = tokio::time::sleep(LOOKS_EVERY), if prompts.is_empty() => {}
+                () = tokio::time::sleep(LOOKS_EVERY), if prompts.is_empty() && steering.is_empty() => {}
             }
         }
-        // Kilo runs nothing more of the session: Steery's hook may give it words to go on.
+        // The harness runs nothing more of the session: Steery's hook may give it words to
+        // go on.
         let (Some(hook), None, Some(reason)) = (&asked.hook, cancelled, stopped.take()) else {
             break;
         };
@@ -283,10 +348,10 @@ pub async fn run(asked: Asked) -> Result<(), String> {
         };
         continued = true;
         unmarked = None;
-        prompts.insert(kilo.prompt(&session, &words).await?);
+        prompts.insert(acp.prompt(&session, &words).await?);
         }
-        // The inbox closes before Kilo does: words told from here on are told to a turn
-        // that is ending.
+        // The inbox closes before the harness does: words told from here on are told to a
+        // turn that is ending.
         drop(heard);
         Ok(())
     }
@@ -294,7 +359,7 @@ pub async fn run(asked: Asked) -> Result<(), String> {
     if let Some(inbox) = &asked.inbox {
         let _ = std::fs::remove_file(inbox);
     }
-    kilo.close().await;
+    acp.close().await;
     outcome
 }
 
@@ -305,21 +370,21 @@ static CANCELLED: std::sync::LazyLock<Value> =
 /// End the hooks still running, and answer their permissions cancelled, as ACP asks of a
 /// client once it cancels.
 async fn abandon(
-    kilo: &mut Acp,
+    acp: &mut Acp,
     asking: &mut JoinSet<(Value, Value)>,
     waiting: &mut Vec<Value>,
 ) -> Result<(), String> {
     asking.abort_all();
     for id in waiting.drain(..) {
-        kilo.answer(&id, CANCELLED.clone()).await?;
+        acp.answer(&id, CANCELLED.clone()).await?;
     }
     Ok(())
 }
 
-/// Run Steery's hook at a permission Kilo asks for, the request's `params` on its standard
-/// input. Kilo's answer is the hook's standard output where it is an answer with an
-/// `outcome`, else a rejection: a hook that fails, says nothing, or runs past
-/// [`ASKS_WAITS`] lets no call run.
+/// Run Steery's hook at a permission the harness asks for, the request's `params` on its
+/// standard input. The harness's answer is the hook's standard output where it is an
+/// answer with an `outcome`, else a rejection: a hook that fails, says nothing, or runs
+/// past [`ASKS_WAITS`] lets no call run.
 async fn ask(hook: String, id: Value, params: Value) -> (Value, Value) {
     let waits = Duration::from_secs(ASKS_WAITS.into());
     let answer = hooked(&hook, PERMISSION, &params, waits)
@@ -373,50 +438,101 @@ async fn accept(
     }
 }
 
-/// Words told on the inbox, prompted into the session, where Kilo queues them behind the
-/// prompt it runs. The caller hears `heard`, or why they did not go in; the id is the new
-/// prompt's.
-async fn hear(kilo: &mut Acp, session: &str, mut stream: UnixStream) -> Option<u64> {
-    let mut words = String::new();
-    let read = tokio::time::timeout(WORDS_WITHIN, stream.read_to_string(&mut words)).await;
-    let (prompt, said) = match read {
-        Ok(Ok(_)) if !words.is_empty() => match kilo.prompt(session, &words).await {
-            Ok(id) => (Some(id), HEARD.to_owned()),
-            Err(line) => (None, line),
-        },
-        Ok(Ok(_)) => (None, "no words came".to_owned()),
-        Ok(Err(e)) => (None, format!("the words did not read: {e}")),
-        Err(_) => (None, "the words did not come in time".to_owned()),
-    };
-    let _ = stream.write_all(format!("{said}\n").as_bytes()).await;
-    let _ = stream.shutdown().await;
-    prompt
+/// What became of words told on the inbox.
+enum Heard {
+    /// They went in as a prompt of this id.
+    Prompted(u64),
+    /// The steering request of this id carries them; the caller waits for its answer.
+    Steering(u64, String, UnixStream),
+    /// They did not go in, and the caller heard why.
+    Not,
 }
 
-/// A running `kilo acp`: JSON-RPC 2.0, one message a line, on its standard input and output.
+/// Words told on the inbox, sent the way the harness takes words mid-turn. The caller hears
+/// `heard`, or why they did not go in, once the harness took them.
+async fn hear(acp: &mut Acp, told: Told, session: &str, mut stream: UnixStream) -> Heard {
+    let mut words = String::new();
+    let read = tokio::time::timeout(WORDS_WITHIN, stream.read_to_string(&mut words)).await;
+    let failed = match read {
+        Ok(Ok(_)) if !words.is_empty() => None,
+        Ok(Ok(_)) => Some("no words came".to_owned()),
+        Ok(Err(e)) => Some(format!("the words did not read: {e}")),
+        Err(_) => Some("the words did not come in time".to_owned()),
+    };
+    if let Some(said) = failed {
+        reply(stream, &said).await;
+        return Heard::Not;
+    }
+    let sent = match told {
+        Told::Prompt => acp.prompt(session, &words).await,
+        Told::Steer => acp.steer(session, &words).await,
+    };
+    match (told, sent) {
+        (Told::Prompt, Ok(id)) => {
+            reply(stream, HEARD).await;
+            Heard::Prompted(id)
+        }
+        (Told::Steer, Ok(id)) => Heard::Steering(id, words, stream),
+        (_, Err(line)) => {
+            reply(stream, &line).await;
+            Heard::Not
+        }
+    }
+}
+
+/// The harness's answer to words steered in: true where they went into the running turn,
+/// false where no turn ran to take them, or the harness's refusal.
+fn steered(label: &str, answer: &Value) -> Result<bool, String> {
+    if let Some(error) = answer.get("error") {
+        let said = error.get("message").and_then(Value::as_str).unwrap_or("refused");
+        return Err(format!("{label} did not take the words: {said}"));
+    }
+    match answer.pointer("/result/outcome").and_then(Value::as_str) {
+        Some("injected") => Ok(true),
+        Some("promptRequired") => Ok(false),
+        other => Err(format!(
+            "{label} answered the words with {}",
+            other.unwrap_or("no outcome")
+        )),
+    }
+}
+
+/// Tell the caller at the inbox one line, and close.
+async fn reply(mut stream: UnixStream, said: &str) {
+    let _ = stream.write_all(format!("{said}\n").as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
+/// A running `<binary> acp`: JSON-RPC 2.0, one message a line, on its standard input and
+/// output.
 struct Acp {
+    /// The harness's name, as its lines say it.
+    label: &'static str,
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Lines<BufReader<ChildStdout>>,
     next: u64,
-    /// Kilo's permission requests that the turn has yet to answer, whole.
+    /// The harness's permission requests that the turn has yet to answer, whole.
     asks: Vec<Value>,
+    /// The steering requests whose answers stay off standard output: the runtime reads an
+    /// answer there that refuses as the end of the turn.
+    quiet: HashSet<u64>,
 }
 
 impl Acp {
-    /// Start `kilo acp` in a process group of its own, so a signal meant for the turn
-    /// reaches Kilo only as the cancel this turn sends; its standard error is Kilo's log,
-    /// dropped.
-    async fn open(kilo: &std::path::Path) -> std::io::Result<Self> {
-        let mut command = std::process::Command::new(kilo);
+    /// Start `<binary> acp` in a process group of its own, so a signal meant for the turn
+    /// reaches the harness only as the cancel this turn sends; its standard error is the
+    /// harness's log, dropped.
+    async fn open(binary: &std::path::Path, label: &'static str) -> std::io::Result<Self> {
+        let mut command = std::process::Command::new(binary);
         command
             .arg("acp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .process_group(0);
-        // Steery's plugin in Kilo trusts `STEERY_STARTED` only from its own parent, which is
-        // this turn: it passes on what the runtime started it as, under its own pid.
+        // Steery's plugin trusts `STEERY_STARTED` only from its own parent, which is this
+        // turn: it passes on what the runtime started it as, under its own pid.
         match started() {
             Some(what) => command.env("STEERY_STARTED", format!("{}:{what}", std::process::id())),
             None => command.env_remove("STEERY_STARTED"),
@@ -425,105 +541,82 @@ impl Acp {
             .kill_on_drop(true)
             .spawn()?;
         let stdin = child.stdin.take();
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| std::io::Error::other("kilo acp has no standard output"))?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            std::io::Error::other(format!("{label}'s acp has no standard output"))
+        })?;
         Ok(Self {
+            label,
             child,
             stdin,
             lines: BufReader::new(stdout).lines(),
             next: 0,
             asks: Vec::new(),
+            quiet: HashSet::new(),
         })
     }
 
-    /// Whether this Kilo still runs a turn of `session`: its own mark says so (this
-    /// process, or a child of the launcher that `kilo` may be), or the newest words of
-    /// the session have no answer yet, as between queued words' turn and the one they
-    /// took over, for at most [`UNANSWERED_WITHIN`] with no mark.
-    fn runs(
-        &self,
-        store: &Store,
-        session: &str,
-        unmarked: &mut Option<tokio::time::Instant>,
-    ) -> bool {
-        let marked = match (store.turn(session), self.child.id()) {
-            (Some(Turn::Here(pid)), Some(kilo)) => {
-                pid == kilo
-                    || kernel::descendants(kilo)
-                        .iter()
-                        .any(|(child, _)| *child == pid)
-            }
-            _ => false,
-        };
-        if marked {
-            *unmarked = None;
-            return true;
-        }
-        let unanswered = store.latest(session).is_ok_and(|latest| {
-            let answered = latest
-                .answer
-                .as_ref()
-                .and_then(|answer| answer.pointer("/time/created"))
-                .and_then(Value::as_u64);
-            latest
-                .asked
-                .is_some_and(|asked| answered.is_none_or(|at| at < asked))
-        });
-        unanswered
-            && unmarked
-                .get_or_insert_with(tokio::time::Instant::now)
-                .elapsed()
-                < UNANSWERED_WITHIN
-    }
-
-    /// Write one message to Kilo, and the same line to standard output.
+    /// Write one message to the harness, and the same line to standard output.
     async fn send(&mut self, message: &Value) -> Result<(), String> {
         let line = self.write(message).await?;
         out(&line).await
     }
 
-    /// Write one message to Kilo alone; the line written.
+    /// Write one message to the harness alone; the line written.
     async fn write(&mut self, message: &Value) -> Result<String, String> {
+        let label = self.label;
         let line = format!("{message}\n");
         let stdin = self
             .stdin
             .as_mut()
-            .ok_or_else(|| format!("{}: Kilo's input is closed", refusal::REFUSED))?;
+            .ok_or_else(|| format!("{}: {label}'s input is closed", refusal::REFUSED))?;
         stdin
             .write_all(line.as_bytes())
             .await
-            .map_err(|e| format!("{}: Kilo did not take a message: {e}", refusal::REFUSED))?;
+            .map_err(|e| format!("{}: {label} did not take a message: {e}", refusal::REFUSED))?;
         Ok(line)
+    }
+
+    /// The next request's id.
+    fn id(&mut self) -> u64 {
+        self.next += 1;
+        self.next
     }
 
     /// Send a request; its id.
     async fn request(&mut self, method: &str, params: Value) -> Result<u64, String> {
-        self.next += 1;
-        let id = self.next;
+        let id = self.id();
         self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
             .await?;
         Ok(id)
     }
 
-    /// The next message from Kilo, written to standard output first; none where it is a
-    /// permission Kilo asks for, which then waits in `asks` for the turn to answer. Any
-    /// other request of Kilo's is answered here as a method this client does not have. No
-    /// answer of this client's is written out, so every answer on standard output is Kilo's.
+    /// The next message from the harness, written to standard output first; none where it
+    /// is a permission the harness asks for, which then waits in `asks` for the turn to
+    /// answer. Any other request of the harness's is answered here as a method this client
+    /// does not have. No answer of this client's is written out, so every answer on standard
+    /// output is the harness's; nor is the harness's answer to a steering request.
     async fn next(&mut self) -> Result<Option<Value>, String> {
+        let label = self.label;
         loop {
             let line = self
                 .lines
                 .next_line()
                 .await
-                .map_err(|e| format!("{}: Kilo's output did not read: {e}", refusal::REFUSED))?
-                .ok_or_else(|| format!("{}: Kilo ended before it answered", refusal::REFUSED))?;
+                .map_err(|e| format!("{}: {label}'s output did not read: {e}", refusal::REFUSED))?
+                .ok_or_else(|| format!("{}: {label} ended before it answered", refusal::REFUSED))?;
             if line.trim().is_empty() {
                 continue;
             }
-            out(&format!("{line}\n")).await?;
-            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            let message = serde_json::from_str::<Value>(&line).ok();
+            let steering = message
+                .as_ref()
+                .filter(|message| message.get("method").is_none())
+                .and_then(|message| message.get("id")?.as_u64())
+                .is_some_and(|id| self.quiet.remove(&id));
+            if !steering {
+                out(&format!("{line}\n")).await?;
+            }
+            let Some(message) = message else {
                 continue;
             };
             if let (Some(method), Some(id)) = (
@@ -543,8 +636,8 @@ impl Acp {
         }
     }
 
-    /// Call `method` and wait for its answer; Kilo's refusal is the line for standard
-    /// error, with the refusal word it means.
+    /// Call `method` and wait for its answer; the harness's refusal is the line for
+    /// standard error, with the refusal word it means.
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.request(method, params).await?;
         loop {
@@ -559,20 +652,31 @@ impl Acp {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("refused");
-                return Err(format!("{}: Kilo's {method}: {said}", word(error)));
+                return Err(format!("{}: {}'s {method}: {said}", word(error), self.label));
             }
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 
-    /// Prompt the session with the words; the prompt's id. Kilo answers it when the turn
-    /// those words began ends.
+    /// Prompt the session with the words; the prompt's id. The harness answers it when the
+    /// turn those words began ends.
     async fn prompt(&mut self, session: &str, words: &str) -> Result<u64, String> {
         let params = json!({"sessionId": session, "prompt": [{"type": "text", "text": words}]});
         self.request("session/prompt", params).await
     }
 
-    /// Ask Kilo to cancel the session's turn; when the turn ends without Kilo's answer.
+    /// Steer the words into the session's running turn ([`STEERING`]); the request's id.
+    /// Neither the request nor its answer goes to standard output.
+    async fn steer(&mut self, session: &str, words: &str) -> Result<u64, String> {
+        let id = self.id();
+        let params = json!({"sessionId": session, "prompt": [{"type": "text", "text": words}]});
+        self.write(&json!({"jsonrpc": "2.0", "id": id, "method": STEERING, "params": params}))
+            .await?;
+        self.quiet.insert(id);
+        Ok(id)
+    }
+
+    /// Ask the harness to cancel the session's turn; when the turn ends without its answer.
     async fn cancel(&mut self, session: &str) -> Result<tokio::time::Instant, String> {
         self.send(&json!({"jsonrpc": "2.0", "method": "session/cancel",
             "params": {"sessionId": session}}))
@@ -580,14 +684,14 @@ impl Acp {
         Ok(tokio::time::Instant::now() + CANCELLED_WITHIN)
     }
 
-    /// Answer one of Kilo's requests.
+    /// Answer one of the harness's requests.
     async fn answer(&mut self, id: &Value, result: Value) -> Result<(), String> {
         self.write(&json!({"jsonrpc": "2.0", "id": id, "result": result}))
             .await
             .map(drop)
     }
 
-    /// Close Kilo's input, which ends it, and end whatever of it still runs after
+    /// Close the harness's input, which ends it, and end whatever of it still runs after
     /// [`CLOSED_WITHIN`].
     async fn close(mut self) {
         drop(self.stdin.take());
@@ -627,7 +731,8 @@ async fn out(line: &str) -> Result<(), String> {
         .map_err(|e| format!("{}: the turn's output is closed: {e}", refusal::REFUSED))
 }
 
-/// The answer that rejects a permission once: Kilo's `reject` option, else cancelled.
+/// The answer that rejects a permission once: the harness's `reject_once` option, else
+/// cancelled.
 fn rejected(options: Option<&Value>) -> Value {
     options
         .and_then(Value::as_array)
@@ -641,9 +746,9 @@ fn rejected(options: Option<&Value>) -> Value {
         )
 }
 
-/// The refusal word a Kilo error means, by what its data names (Kilo's ACP errors,
-/// `acp/error.ts`): a session it does not have, a model, an effort or a config option it
-/// does not know.
+/// The refusal word an error of the family's ACP means, by what its data names (Kilo's and
+/// OpenCode's `acp/error.ts`): a session it does not have, a model, an effort or a config
+/// option it does not know.
 pub(super) fn word(error: &Value) -> &'static str {
     let data = error.get("data");
     let names = |key: &str| data.and_then(|data| data.get(key)).is_some();
@@ -665,7 +770,7 @@ mod tests {
     #[test]
     fn a_turn_s_command_line_reads_back_as_it_was_asked() {
         let asked = Asked {
-            kilo: "/opt/homebrew/bin/kilo".into(),
+            binary: "/opt/homebrew/bin/kilo".into(),
             act: "fork".into(),
             id: Some("ses_1".into()),
             model: Some("kilo/anthropic/claude-opus-4.5".into()),
@@ -675,14 +780,15 @@ mod tests {
         };
         assert_eq!(Asked::parse(asked.args().into_iter()), Ok(asked));
         let new = |args: &[&str]| Asked::parse(args.iter().map(|arg| (*arg).to_owned()));
-        assert!(new(&["--kilo", "kilo", "new"]).is_ok());
-        assert!(new(&["--kilo", "kilo", "new", "ses_1"]).is_err());
-        assert!(new(&["--kilo", "kilo", "continue"]).is_err());
-        assert!(new(&["--kilo", "kilo", "hand", "ses_1"]).is_err());
+        assert!(new(&["--binary", "kilo", "new"]).is_ok());
+        assert!(new(&["--binary", "kilo", "new", "ses_1"]).is_err());
+        assert!(new(&["--binary", "kilo", "continue"]).is_err());
+        assert!(new(&["--binary", "kilo", "hand", "ses_1"]).is_err());
+        assert!(new(&["new"]).is_err());
     }
 
     #[test]
-    fn kilo_s_errors_mean_their_refusal_words() {
+    fn acp_errors_mean_their_refusal_words() {
         let error = |data: Value| json!({"code": -32602, "message": "x", "data": data});
         assert_eq!(
             word(&error(json!({"sessionId": "ses_x"}))),

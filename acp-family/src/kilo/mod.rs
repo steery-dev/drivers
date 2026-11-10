@@ -6,12 +6,11 @@
 
 mod calls;
 mod config;
-mod drive;
+pub(crate) mod drive;
 mod events;
 mod hooks;
 mod setup;
 mod store;
-pub(crate) mod turn;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -98,7 +97,7 @@ impl Driver {
                 ],
                 touches: false,
             },
-            hooks: hooks::table(protocol),
+            hooks: crate::turn::hooks::table(protocol),
         }
     }
 }
@@ -143,7 +142,10 @@ impl Program for Driver {
             method::SESSIONS_LOCATE => result(store.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(store.read(steery_sdk::params(params)?)?),
             method::HOOK_READ => result(hooks::read(store, steery_sdk::params(params)?)?),
-            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(crate::turn::hooks::answer(
+                "Kilo",
+                steery_sdk::params(params)?,
+            )?),
             method::SESSIONS_FOLD => Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
                 "Kilo's plugin sends no entries: the driver reads kilo.db",
@@ -161,8 +163,14 @@ impl Program for Driver {
                 &self.listed.lock().unwrap_or_else(|e| e.into_inner()),
                 steery_sdk::params(params)?,
             )?),
-            method::TURN_READ => result(drive::turn_line(steery_sdk::params(params)?)),
-            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::TURN_READ => result(crate::turn::drive::turn_line(
+                "Kilo",
+                steery_sdk::params(params)?,
+            )),
+            method::STOP => result(crate::turn::drive::stop(
+                "Kilo",
+                &steery_sdk::params(params)?,
+            )?),
             method::RECEIPT_MARK => result(drive::mark(store, &steery_sdk::params(params)?)?),
             method::RECEIPT_FIND => result(drive::find(store, &steery_sdk::params(params)?)?),
             method::TERMINAL => result(drive::terminal(store, &steery_sdk::params(params)?)?),
