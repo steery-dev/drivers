@@ -84,9 +84,7 @@ impl SignIns {
             CLAUDE_SIGN_IN => self.start().await,
             CLAUDE_SIGN_IN_RETURN => {
                 let given = give.values.get(ADDRESS).map_or("", String::as_str);
-                self.0
-                    .give(CLAUDE_SIGN_IN_RETURN, given, "Claude Code")
-                    .await?;
+                self.0.give(CLAUDE_SIGN_IN_RETURN, given, "Claude Code").await?;
                 Ok(Given::Done {
                     line: "Claude Code is signed in on this host".into(),
                     env: Default::default(),
@@ -105,9 +103,7 @@ impl SignIns {
         let browser = Browser::new()
             .map_err(|e| refused(format!("cannot make a $BROWSER for Claude Code: {e}")))?;
         let mut command = steery_driver_common::program::helper(&binary);
-        command
-            .args(["auth", "login"])
-            .env("BROWSER", browser.program());
+        command.args(["auth", "login"]).env("BROWSER", browser.program());
         let mut running = Login::start(command, CLAUDE_SIGN_IN_RETURN.into(), true)
             .map_err(|e| refused(format!("claude auth login did not start: {e}")))?;
         let began = Instant::now();
@@ -183,9 +179,7 @@ impl Browser {
         // Written whole, then moved, so it is never read half written.
         std::fs::write(
             browser.program(),
-            format!(
-                "#!/bin/sh\nprintf '%s' \"$1\" > {at}/given.tmp && mv {at}/given.tmp {at}/given\n"
-            ),
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > {at}/given.tmp && mv {at}/given.tmp {at}/given\n"),
         )?;
         std::fs::set_permissions(browser.program(), std::fs::Permissions::from_mode(0o700))?;
         Ok(browser)

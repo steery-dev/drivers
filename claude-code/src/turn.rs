@@ -130,10 +130,8 @@ impl Turn {
 
     /// The turn [`Turn::args`] says.
     pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let binary = PathBuf::from(
-            args.next()
-                .ok_or("the turn does not name a claude executable")?,
-        );
+        let binary =
+            PathBuf::from(args.next().ok_or("the turn does not name a claude executable")?);
         let act = match args.next().as_deref() {
             Some("continue") => Act::Continue,
             Some("fork") => Act::Fork,
@@ -240,18 +238,12 @@ fn bypass_accepted(home: &Path, root: &Path, place: &Path) -> bool {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .is_some_and(|value| value.get(key) == Some(&Value::Bool(true)))
     };
-    let mut settings = vec![
-        root.join("settings.json"),
-        place.join(".claude/settings.local.json"),
-    ];
+    let mut settings = vec![root.join("settings.json"), place.join(".claude/settings.local.json")];
     settings.extend(crate::drive::managed_files());
     settings
         .iter()
         .any(|file| set(file, "skipDangerousModePermissionPrompt"))
-        || set(
-            &crate::state_file(home, root),
-            "bypassPermissionsModeAccepted",
-        )
+        || set(&crate::state_file(home, root), "bypassPermissionsModeAccepted")
 }
 
 /// The turn mode: run the turn its arguments say, the words on standard input. Exits 0
@@ -380,10 +372,7 @@ async fn follow(
         if let Some(copy) = agents::backgrounded(&said) {
             discard(&turn.binary, &copy).await;
         }
-        let note = said
-            .lines()
-            .find(|line| agents::copied(line))
-            .unwrap_or_default();
+        let note = said.lines().find(|line| agents::copied(line)).unwrap_or_default();
         return Err(format!(
             "{}: Claude Code started a copy and did not continue session {}. The driver stopped \
              and removed the copy.",
@@ -461,9 +450,7 @@ async fn follow(
                 ));
             }
             None if tokio::time::Instant::now() >= listed_by => {
-                return Err(format!(
-                    "`claude agents` never listed background session {short}"
-                ));
+                return Err(format!("`claude agents` never listed background session {short}"));
             }
             None => {}
         }
@@ -677,9 +664,7 @@ impl Kept {
                 "background session {} {}: it runs at {}, not {picked}",
                 self.job,
                 agents::OWN_OPTIONS,
-                self.effort
-                    .as_deref()
-                    .unwrap_or("Claude Code's default effort")
+                self.effort.as_deref().unwrap_or("Claude Code's default effort")
             ));
         }
         Ok(())
@@ -726,7 +711,9 @@ const HALT_WITHIN: Duration = Duration::from_secs(2);
 /// turn's group too. The line says what came of it.
 async fn halt(binary: &Path, root: &Path, job: Option<&String>, signal: &str) -> String {
     let Some(job) = job else {
-        return format!("{signal} stopped the turn before the launch named its background session");
+        return format!(
+            "{signal} stopped the turn before the launch named its background session"
+        );
     };
     let deadline = tokio::time::Instant::now() + HALT_WITHIN + crate::drive::COMMANDS_END_WITHIN;
     let running = crate::registry::living(&crate::registry::dir(root))
@@ -813,15 +800,13 @@ impl Heard {
     /// The hooks that run this binary's [`HEARD`] mode on the session's turn ends
     /// ([`ENDS`]), beside every hook its person's own settings name.
     fn hooks(&self) -> Result<Value, String> {
-        let binary =
-            std::env::current_exe().map_err(|e| format!("cannot find this driver: {e}"))?;
+        let binary = std::env::current_exe().map_err(|e| format!("cannot find this driver: {e}"))?;
         let command = format!(
             "{} {HEARD} {}",
             crate::drive::quoted(text(&binary)?),
             crate::drive::quoted(text(&self.0)?)
         );
-        let hook =
-            json!([{"hooks": [{"type": "command", "command": command, "timeout": HEARD_WAITS}]}]);
+        let hook = json!([{"hooks": [{"type": "command", "command": command, "timeout": HEARD_WAITS}]}]);
         Ok(Value::Object(
             ENDS.iter()
                 .map(|end| ((*end).to_owned(), hook.clone()))
@@ -1054,10 +1039,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(carried, json!({ "hooks": hooks, "env": given }));
-        assert_eq!(
-            settings(None, Some(&serde_json::Map::new()), false).unwrap(),
-            None
-        );
+        assert_eq!(settings(None, Some(&serde_json::Map::new()), false).unwrap(), None);
         for end in ENDS {
             let command = hooks[end][0]["hooks"][0]["command"].as_str().unwrap();
             assert!(
@@ -1213,16 +1195,9 @@ mod tests {
             ..turn(Act::Continue, Some(session), false)
         };
         let mut out = Vec::new();
-        let error = follow(
-            &continued,
-            dir.path(),
-            false,
-            "go",
-            &Default::default(),
-            &mut out,
-        )
-        .await
-        .expect_err("a live session holds it");
+        let error = follow(&continued, dir.path(), false, "go", &Default::default(), &mut out)
+            .await
+            .expect_err("a live session holds it");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
         assert!(
             !dir.path().join("launched").exists(),
@@ -1233,16 +1208,9 @@ mod tests {
             "note: session {session} is already running in the background, so this started a copy as 186b32ef.\nbackgrounded · 186b32ef"
         );
         crate::tests::stand_in(&binary, &script("[]", &copy));
-        let error = follow(
-            &continued,
-            dir.path(),
-            false,
-            "go",
-            &Default::default(),
-            &mut out,
-        )
-        .await
-        .expect_err("a copy is no continue");
+        let error = follow(&continued, dir.path(), false, "go", &Default::default(), &mut out)
+            .await
+            .expect_err("a copy is no continue");
         assert_eq!(agents::refusal_of(&error), "harness-busy");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("discarded")).unwrap(),
@@ -1276,21 +1244,10 @@ mod tests {
                 thinking: Some(thinking.into()),
                 ..continued.clone()
             };
-            let error = follow(
-                &other,
-                dir.path(),
-                false,
-                "go",
-                &Default::default(),
-                &mut out,
-            )
-            .await
-            .expect_err("the job runs its own options");
-            assert_eq!(
-                agents::refusal_of(&error),
-                "selection-unsupported",
-                "{error}"
-            );
+            let error = follow(&other, dir.path(), false, "go", &Default::default(), &mut out)
+                .await
+                .expect_err("the job runs its own options");
+            assert_eq!(agents::refusal_of(&error), "selection-unsupported", "{error}");
         }
         assert_eq!(launches(), before, "nothing started for another pick");
         let same = Turn {
@@ -1298,16 +1255,9 @@ mod tests {
             thinking: Some("high".into()),
             ..continued.clone()
         };
-        follow(
-            &same,
-            dir.path(),
-            false,
-            "go",
-            &Default::default(),
-            &mut out,
-        )
-        .await
-        .expect("the kept job is woken and followed");
+        follow(&same, dir.path(), false, "go", &Default::default(), &mut out)
+            .await
+            .expect("the kept job is woken and followed");
         assert_eq!(
             launches().lines().last(),
             Some(format!("--bg --resume {session} -- go").as_str())

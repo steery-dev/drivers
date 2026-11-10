@@ -475,12 +475,7 @@ impl State<'_> {
             self.pending = None;
         }
         if !thought.is_empty() {
-            self.said_of(
-                format!("{id}:thought"),
-                response.clone(),
-                Voice::Thought,
-                thought,
-            );
+            self.said_of(format!("{id}:thought"), response.clone(), Voice::Thought, thought);
         }
         if !said.is_empty() {
             self.said_of(id.clone(), response.clone(), Voice::Agent, said);
@@ -547,12 +542,7 @@ impl State<'_> {
             if let Some(work) = left_running(result, &said) {
                 ledger.started.put(&work, call);
             }
-            ledger
-                .waits
-                .get(call)
-                .map(str::to_owned)
-                .into_iter()
-                .collect()
+            ledger.waits.get(call).map(str::to_owned).into_iter().collect()
         };
         self.out.push(Event::CallEnded {
             at,
@@ -679,8 +669,7 @@ impl State<'_> {
         if self.tokens.as_ref() == Some(&said) {
             return;
         }
-        self.out
-            .push(tokens(self.at, said.0.clone(), model, usage, left));
+        self.out.push(tokens(self.at, said.0.clone(), model, usage, left));
         self.tokens = Some(said);
     }
 
@@ -1282,52 +1271,23 @@ mod tests {
                 })
                 .collect()
         };
-        let call = |uuid: &str, id: &str, name: &str, input: Value| json!({"uuid":uuid,"type":"assistant","message":{"id":format!("m-{uuid}"),"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}});
-        let answer = |uuid: &str, id: &str, said: &str, result: Value| json!({"uuid":uuid,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":said}]},"toolUseResult":result});
+        let call = |uuid: &str, id: &str, name: &str, input: Value| {
+            json!({"uuid":uuid,"type":"assistant","message":{"id":format!("m-{uuid}"),"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}})
+        };
+        let answer = |uuid: &str, id: &str, said: &str, result: Value| {
+            json!({"uuid":uuid,"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":said}]},"toolUseResult":result})
+        };
         let started = ended(&[
-            call(
-                "a1",
-                "t1",
-                "Bash",
-                json!({"command":"deploy/ship.sh","run_in_background":true}),
-            ),
-            answer(
-                "a2",
-                "t1",
-                "Command running in background with ID: bk7. Output is being written to: /tmp/bk7.output",
-                json!({"stdout":"","backgroundTaskId":"bk7"}),
-            ),
-            call(
-                "a3",
-                "t2",
-                "TaskUpdate",
-                json!({"taskId":"1","status":"in_progress"}),
-            ),
-            answer(
-                "a4",
-                "t2",
-                "Updated task #1 status",
-                json!({"success":true,"taskId":"1"}),
-            ),
+            call("a1", "t1", "Bash", json!({"command":"deploy/ship.sh","run_in_background":true})),
+            answer("a2", "t1", "Command running in background with ID: bk7. Output is being written to: /tmp/bk7.output", json!({"stdout":"","backgroundTaskId":"bk7"})),
+            call("a3", "t2", "TaskUpdate", json!({"taskId":"1","status":"in_progress"})),
+            answer("a4", "t2", "Updated task #1 status", json!({"success":true,"taskId":"1"})),
         ]);
-        assert_eq!(
-            started,
-            [("t1".to_owned(), vec![]), ("t2".to_owned(), vec![])]
-        );
+        assert_eq!(started, [("t1".to_owned(), vec![]), ("t2".to_owned(), vec![])]);
         let waiting = ended(&[
-            call(
-                "b1",
-                "t3",
-                "TaskOutput",
-                json!({"task_id":"bk7","block":true,"timeout":600000}),
-            ),
+            call("b1", "t3", "TaskOutput", json!({"task_id":"bk7","block":true,"timeout":600000})),
             answer("b2", "t3", "done", json!({"retrieval_status":"success"})),
-            call(
-                "b3",
-                "t4",
-                "TaskOutput",
-                json!({"task_id":"1","block":false}),
-            ),
+            call("b3", "t4", "TaskOutput", json!({"task_id":"1","block":false})),
             answer("b4", "t4", "no such task", json!({})),
             call("b5", "t5", "TaskStop", json!({"task_id":"b-nothing"})),
             answer("b6", "t5", "no such task", json!({})),
@@ -1549,10 +1509,7 @@ mod tests {
             let mut record = json!({"type":"assistant","uuid":"9f31","timestamp":"2026-09-03T13:26:16.609Z",
                 "isApiErrorMessage":true,"error":"rate_limit","apiErrorStatus":429,"apiErrorIsTransient":true,
                 "message":{"model":"<synthetic>","content":[{"type":"text","text":said}]}});
-            record
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            record.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             match events(&[
                 json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
                 record,
@@ -1593,21 +1550,14 @@ mod tests {
             "a wait of nothing is no wait"
         );
         assert_eq!(retry_in("Retry in 90000s"), None, "longer than any limit");
-        assert_eq!(
-            retry_in("Retry in 60 seconds"),
-            None,
-            "not the form it writes"
-        );
+        assert_eq!(retry_in("Retry in 60 seconds"), None, "not the form it writes");
 
         // A context over the limit, as Claude Code 2.1.281 wrote it: the prompt too long
         // for compaction to save, and compaction thrashing.
         let full = |extra: Value, said: &str| {
             let mut record = json!({"type":"assistant","isApiErrorMessage":true,"error":"invalid_request",
                 "message":{"model":"<synthetic>","content":[{"type":"text","text":said}]}});
-            record
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            record.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             match events(&[
                 json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
                 record,
@@ -1622,23 +1572,19 @@ mod tests {
             }
         };
         assert_eq!(
-            full(
-                json!({}),
-                "Prompt is too long · automatic compaction failed: Please run /login · API Error: 403"
-            ),
+            full(json!({}), "Prompt is too long · automatic compaction failed: Please run /login · API Error: 403"),
             FailureKind::ContextFull
         );
         assert_eq!(
-            full(
-                json!({"apiError": "autocompact_thrashing"}),
-                "Autocompact is thrashing: the context refilled"
-            ),
+            full(json!({"apiError": "autocompact_thrashing"}), "Autocompact is thrashing: the context refilled"),
             FailureKind::ContextFull
         );
 
         // Claude Code 2.1.296's weekly limit, as it wrote it: the quota that refused names
         // when it resets; a quota it took names nothing to wait for.
-        let quota = |status: &str| json!({"status": status, "resetsAt": 1_791_849_600_u64, "rateLimitType": "seven_day"});
+        let quota = |status: &str| {
+            json!({"status": status, "resetsAt": 1_791_849_600_u64, "rateLimitType": "seven_day"})
+        };
         let limit = |code: &str, quota: Value| {
             let mut read = events(&[
                 json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "go"}}),
@@ -2075,11 +2021,7 @@ mod tests {
         let read = events(&[
             json!({"type": "user", "origin": {"kind": "human"}, "message": {"content": "review the PR"}}),
             queued("q1", "human", "I cannot follow this PR, explain it simply"),
-            queued(
-                "q2",
-                "peer",
-                "Another Claude session sent a message:\nhello",
-            ),
+            queued("q2", "peer", "Another Claude session sent a message:\nhello"),
             json!({"type": "assistant", "message": {"id": "m", "stop_reason": "end_turn",
                 "content": [{"type": "text", "text": "Here it is, simply."}]}}),
         ]);
@@ -2107,18 +2049,12 @@ mod tests {
                 "compactMetadata": metadata})
         };
         let read = events(&[
-            boundary(
-                "147513ec",
-                json!({"trigger": "manual", "preTokens": 165775, "durationMs": 95526,
-                "preservedSegment": {"headUuid": "6d6a85c0", "anchorUuid": "d153c248", "tailUuid": "735e2458"}}),
-            ),
+            boundary("147513ec", json!({"trigger": "manual", "preTokens": 165775, "durationMs": 95526,
+                "preservedSegment": {"headUuid": "6d6a85c0", "anchorUuid": "d153c248", "tailUuid": "735e2458"}})),
             json!({"type": "user", "isCompactSummary": true, "isVisibleInTranscriptOnly": true,
             "message": {"role": "user", "content": "This session is being continued. Summary: built the parser."}}),
-            boundary(
-                "2f0c9d1a",
-                json!({"trigger": "auto", "preTokens": 929582, "postTokens": 41230,
-                "cumulativeDroppedTokens": 888352, "durationMs": 70211}),
-            ),
+            boundary("2f0c9d1a", json!({"trigger": "auto", "preTokens": 929582, "postTokens": 41230,
+                "cumulativeDroppedTokens": 888352, "durationMs": 70211})),
             boundary("5e1b7c40", json!({"preTokens": 120000})),
             json!({"isSidechain": true, "type": "system", "subtype": "compact_boundary", "uuid": "side",
                 "compactMetadata": {"trigger": "auto", "preTokens": 180000}}),
@@ -2131,14 +2067,13 @@ mod tests {
             )]
         );
         let at = millis("2026-06-30T11:39:50.021Z").unwrap();
-        let compacted =
-            |id: &str, by: Compactor, before: u64, after: Option<u64>| Event::Compacted {
-                at,
-                id: id.into(),
-                by,
-                tokens_before: Some(before),
-                tokens_after: after,
-            };
+        let compacted = |id: &str, by: Compactor, before: u64, after: Option<u64>| Event::Compacted {
+            at,
+            id: id.into(),
+            by,
+            tokens_before: Some(before),
+            tokens_after: after,
+        };
         let compactions: Vec<&Event> = read
             .iter()
             .filter(|event| matches!(event, Event::Compacted { .. }))
@@ -2155,12 +2090,7 @@ mod tests {
                     929_582,
                     Some(41_230)
                 ),
-                &compacted(
-                    "5e1b7c40",
-                    Compactor::Harness { reason: None },
-                    120_000,
-                    None
-                ),
+                &compacted("5e1b7c40", Compactor::Harness { reason: None }, 120_000, None),
             ]
         );
     }

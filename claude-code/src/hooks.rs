@@ -29,8 +29,9 @@ const LEAD: &str = "STEERY_LEAD";
 /// so the sign-in token Cursor also hands its hooks (`CURSOR_ACCESS_TOKEN`) never reaches it.
 const CURSOR: &str = "CURSOR_VERSION";
 /// Grok Build also runs the hooks of Claude Code's `settings.json` files as its own, under
-/// its own session id. It sets this variable for every command hook it runs
-/// (`xai-grok-hooks` `runner/command.rs`, grok 1.0.77); Claude Code never does.
+/// its own session id and with Claude Code's own field names. It sets this variable for
+/// every command hook it runs (`xai-grok-hooks` `runner/command.rs`, grok 1.0.77); Claude
+/// Code never does.
 const GROK: &str = "GROK_HOOK_EVENT";
 
 /// How long Claude Code gives a hook that only says a moment happened: it writes one
@@ -189,9 +190,8 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
     let external_id = text(document, "session_id")?.to_owned();
     let tool_input = || document.get("tool_input").cloned().unwrap_or(Value::Null);
     let call = match (event.kind, text(document, "tool_name")) {
-        (HookKind::BeforeCall | HookKind::AfterCall, Some(tool)) => {
-            text(document, "tool_use_id").map(|id| crate::calls::call(id, tool, tool_input()))
-        }
+        (HookKind::BeforeCall | HookKind::AfterCall, Some(tool)) => text(document, "tool_use_id")
+            .map(|id| crate::calls::call(id, tool, tool_input())),
         // Claude Code hands `PermissionRequest` the tool and its input but no `tool_use_id`
         // (https://code.claude.com/docs/en/hooks, "PermissionRequest input"): the call is
         // still the one a person decides on, under no id.
@@ -385,7 +385,9 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     }
     let output = match (event.kind, decision) {
         (_, None) => say.map(|say| context(event, say)).transpose()?,
-        (HookKind::BeforeCall, Some(decision)) => Some(before_call(decision, say, &document)?),
+        (HookKind::BeforeCall, Some(decision)) => {
+            Some(before_call(decision, say, &document)?)
+        }
         (HookKind::Permission, Some(decision)) => {
             if say.is_some() {
                 return Err(Error::invalid(
@@ -569,17 +571,14 @@ mod tests {
     use steery_sdk::wire::harness::FailureKind;
 
     fn read_one(event: &str, document: Value, env: &[(&str, &str)]) -> Option<Moment> {
-        read(
-            &Store::new(PathBuf::from("/nowhere")),
-            HookRead {
-                event: event.to_owned(),
-                document: document.to_string(),
-                env: env
-                    .iter()
-                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                    .collect(),
-            },
-        )
+        read(&Store::new(PathBuf::from("/nowhere")), HookRead {
+            event: event.to_owned(),
+            document: document.to_string(),
+            env: env
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        })
         .expect("JSON")
         .moment
     }
@@ -726,14 +725,8 @@ mod tests {
         )
         .expect("a moment");
         let failure = limited.failure.expect("why it failed");
-        assert_eq!(
-            (failure.kind, failure.line.as_str()),
-            (FailureKind::RateLimit, "529 Overloaded")
-        );
-        assert!(
-            ended.failure.is_none(),
-            "a turn that finished has no failure"
-        );
+        assert_eq!((failure.kind, failure.line.as_str()), (FailureKind::RateLimit, "529 Overloaded"));
+        assert!(ended.failure.is_none(), "a turn that finished has no failure");
         let opened = read_one(
             "SessionStart",
             json!({"session_id": "s1", "source": "startup", "model": "claude-sonnet-5-5"}),
@@ -756,14 +749,11 @@ mod tests {
         assert!(read_one("PreCompact", json!({"session_id": "s1"}), &[]).is_none());
         assert!(read_one("Stop", json!({"cwd": "/tmp"}), &[]).is_none());
         assert!(
-            read(
-                &Store::new(PathBuf::from("/nowhere")),
-                HookRead {
-                    event: "Stop".into(),
-                    document: "not json".into(),
-                    env: BTreeMap::new(),
-                }
-            )
+            read(&Store::new(PathBuf::from("/nowhere")), HookRead {
+                event: "Stop".into(),
+                document: "not json".into(),
+                env: BTreeMap::new(),
+            })
             .is_err()
         );
     }
@@ -985,11 +975,7 @@ mod tests {
         assert_eq!(out["hookEventName"], "PreToolUse");
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(out["additionalContext"], "They said: ship it");
-        assert_eq!(
-            out["updatedInput"],
-            json!({"plan": "1. Ship"}),
-            "the plan, so Claude Code asks nobody"
-        );
+        assert_eq!(out["updatedInput"], json!({"plan": "1. Ship"}), "the plan, so Claude Code asks nobody");
     }
 
     /// Claude Code's shell sources what a start hook appends to `CLAUDE_ENV_FILE` before
