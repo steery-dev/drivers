@@ -1,6 +1,7 @@
-//! A turn of an ACP harness (Kilo, OpenCode), run by its driver's own binary in its turn
-//! mode: the words on standard input, the harness's own ACP server (`<binary> acp`) spoken
-//! to — `session/new`, `session/resume` or `session/fork`, the model and the effort set as
+//! A turn of an ACP harness (Kilo, OpenCode, Cline), run by its driver's own binary in its
+//! turn mode: the words on standard input, the harness's own ACP server ([`Host::serves`])
+//! spoken to — `session/new`, `session/resume` or `session/load` ([`Opens`]), or
+//! `session/fork`, the model and the effort set as
 //! the session's config options, then `session/prompt` with the words — every message the
 //! harness writes and every request this turn sends it written verbatim to standard output,
 //! one a line, and out once the harness has answered each prompt. What runs is the
@@ -69,6 +70,17 @@ pub enum Told {
     Steer,
 }
 
+/// How a continue opens the conversation it goes on with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opens {
+    /// `session/resume`: the harness answers without the history.
+    Resume,
+    /// `session/load`: the harness replays the whole history as `session/update`
+    /// notifications before it answers. The replay stays off standard output, where it would
+    /// read as the turn answering.
+    Load,
+}
+
 /// What one harness of the family adds to the turn.
 pub trait Host {
     /// The harness.
@@ -76,6 +88,21 @@ pub trait Host {
 
     /// How words told on the inbox go in.
     fn told(&self) -> Told;
+
+    /// The arguments that start the harness's ACP server.
+    fn serves(&self) -> &'static [&'static str] {
+        &["acp"]
+    }
+
+    /// The environment the harness's ACP server starts with, beside the turn's own.
+    fn env(&self) -> &'static [(&'static str, &'static str)] {
+        &[]
+    }
+
+    /// How a continue opens its conversation.
+    fn opens(&self) -> Opens {
+        Opens::Resume
+    }
 
     /// Whether the harness still runs a turn of `session` once every prompt the turn sent
     /// has its answer, as words another client queued into it can make it; `acp` is the pid
@@ -186,7 +213,7 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
     let mut terms = signal(SignalKind::terminate()).map_err(failed)?;
     let mut interrupts = signal(SignalKind::interrupt()).map_err(failed)?;
     let label = host.harness().label();
-    let mut acp = Acp::open(&asked.binary, label).await.map_err(failed)?;
+    let mut acp = Acp::open(host, &asked.binary).await.map_err(failed)?;
     let outcome = async {
         acp.call(
             "initialize",
@@ -197,7 +224,17 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         let session = match (asked.act.as_str(), asked.id.as_deref()) {
             ("continue", Some(id)) => {
                 let params = json!({"sessionId": id, "cwd": cwd, "mcpServers": []});
-                acp.call("session/resume", params).await?;
+                match host.opens() {
+                    Opens::Resume => {
+                        acp.call("session/resume", params).await?;
+                    }
+                    Opens::Load => {
+                        acp.replaying = true;
+                        let loaded = acp.call("session/load", params).await;
+                        acp.replaying = false;
+                        loaded?;
+                    }
+                }
                 id.to_owned()
             }
             (act, id) => {
@@ -503,8 +540,8 @@ async fn reply(mut stream: UnixStream, said: &str) {
     let _ = stream.shutdown().await;
 }
 
-/// A running `<binary> acp`: JSON-RPC 2.0, one message a line, on its standard input and
-/// output.
+/// A running harness's ACP server: JSON-RPC 2.0, one message a line, on its standard input
+/// and output.
 struct Acp {
     /// The harness's name, as its lines say it.
     label: &'static str,
@@ -517,16 +554,21 @@ struct Acp {
     /// The steering requests whose answers stay off standard output: the runtime reads an
     /// answer there that refuses as the end of the turn.
     quiet: HashSet<u64>,
+    /// Whether the harness replays a conversation's history ([`Opens::Load`]): its
+    /// notifications stay off standard output until the load is answered.
+    replaying: bool,
 }
 
 impl Acp {
-    /// Start `<binary> acp` in a process group of its own, so a signal meant for the turn
-    /// reaches the harness only as the cancel this turn sends; its standard error is the
-    /// harness's log, dropped.
-    async fn open(binary: &std::path::Path, label: &'static str) -> std::io::Result<Self> {
+    /// Start the host's ACP server in a process group of its own, so a signal meant for the
+    /// turn reaches the harness only as the cancel this turn sends; its standard error is
+    /// the harness's log, dropped.
+    async fn open(host: &impl Host, binary: &std::path::Path) -> std::io::Result<Self> {
+        let label = host.harness().label();
         let mut command = std::process::Command::new(binary);
         command
-            .arg("acp")
+            .args(host.serves())
+            .envs(host.env().iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -552,6 +594,7 @@ impl Acp {
             next: 0,
             asks: Vec::new(),
             quiet: HashSet::new(),
+            replaying: false,
         })
     }
 
@@ -594,7 +637,8 @@ impl Acp {
     /// is a permission the harness asks for, which then waits in `asks` for the turn to
     /// answer. Any other request of the harness's is answered here as a method this client
     /// does not have. No answer of this client's is written out, so every answer on standard
-    /// output is the harness's; nor is the harness's answer to a steering request.
+    /// output is the harness's; nor is the harness's answer to a steering request, nor a
+    /// notification of a history it replays.
     async fn next(&mut self) -> Result<Option<Value>, String> {
         let label = self.label;
         loop {
@@ -613,7 +657,11 @@ impl Acp {
                 .filter(|message| message.get("method").is_none())
                 .and_then(|message| message.get("id")?.as_u64())
                 .is_some_and(|id| self.quiet.remove(&id));
-            if !steering {
+            let replayed = self.replaying
+                && message.as_ref().is_some_and(|message| {
+                    message.get("method").is_some() && message.get("id").is_none()
+                });
+            if !steering && !replayed {
                 out(&format!("{line}\n")).await?;
             }
             let Some(message) = message else {
