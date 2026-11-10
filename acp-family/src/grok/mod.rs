@@ -1,7 +1,8 @@
-//! Steery's driver for Grok Build at observe: it reads Grok's conversations from
+//! Steery's driver for Grok Build at observe and drive: it reads Grok's conversations from
 //! `$GROK_HOME/sessions/<encoded folder>/<id>/`, plans the entries that set Grok up for
-//! Steery, and reads its hooks' moments.
+//! Steery, reads its hooks' moments, and plans the turns that the runtime runs as Grok.
 
+mod drive;
 mod events;
 mod hooks;
 mod mcp;
@@ -9,6 +10,7 @@ mod models;
 mod setup;
 mod sign_in;
 mod store;
+mod turn;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -28,6 +30,7 @@ pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
     sign_ins: sign_in::SignIns,
+    turns: turn::Turns,
 }
 
 /// The person's home, and Grok's home.
@@ -70,7 +73,7 @@ impl Driver {
 
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: "1.0.77".into(),
                 update: Some("grok update".into()),
@@ -100,7 +103,20 @@ impl Driver {
                 cuts_tool_text: false,
                 call_bound: None,
             },
-            reader: None,
+            // `--tools ""` allows no built-in tool, `--no-subagents` and
+            // `--disable-web-search` reach nothing beyond. Grok 1.0.77 has no flag that
+            // leaves out MCP servers, rules files, hooks, or the saved run.
+            reader: Some(wire::ReaderFacts {
+                sealed: wire::Sealed {
+                    tools: true,
+                    mcp: false,
+                    instructions: false,
+                    extensions: false,
+                    history: false,
+                },
+                known: Vec::new(),
+                unnamed: true,
+            }),
             facts: wire::HarnessFacts {
                 by_file: false,
                 resumes_in_place: true,
@@ -112,7 +128,7 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![harness::Act::Continue, harness::Act::Fork, harness::Act::New],
                 touches: false,
             },
             hooks: hooks::table(),
@@ -171,6 +187,40 @@ impl Program for Driver {
                 result(mcp::list(&place.home, &place.root, steery_sdk::params(params)?).await?)
             }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HELD => result(drive::held(
+                &self.place()?.root,
+                &self.store()?,
+                steery_sdk::params(params)?,
+            )),
+            method::IDLE => result(drive::idle(&self.store()?, steery_sdk::params(params)?)),
+            method::START => result(
+                drive::start(
+                    &self.place()?.root,
+                    &self.store()?,
+                    steery_sdk::params(params)?,
+                )
+                .await?,
+            ),
+            method::TURN_READ => result(
+                self.turns
+                    .read(&self.store()?, steery_sdk::params(params)?),
+            ),
+            method::STOP => result(drive::stop(steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => result(drive::mark(steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
+            method::READER => result(drive::reader(
+                &self.place()?.root,
+                steery_sdk::params(params)?,
+            )?),
+            method::TERMINAL => {
+                let place = self.place()?;
+                result(drive::terminal(
+                    &place.home,
+                    &place.root,
+                    &self.store()?,
+                    steery_sdk::params(params)?,
+                )?)
+            }
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::MODELS => {
                 let _: wire::Empty = steery_sdk::params(params)?;
