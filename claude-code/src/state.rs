@@ -124,9 +124,7 @@ impl Followed {
     fn state(&mut self, entry: &Registered, store: &Store, says: &Says) -> LiveState {
         let id = &entry.session_id;
         if self.transcript.is_none()
-            && self
-                .missed
-                .is_none_or(|missed| missed.elapsed() >= LOOK_AGAIN)
+            && self.missed.is_none_or(|missed| missed.elapsed() >= LOOK_AGAIN)
         {
             self.transcript = store.transcript(id).ok();
             self.missed = self.transcript.is_none().then(Instant::now);

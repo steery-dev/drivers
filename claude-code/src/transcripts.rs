@@ -21,8 +21,8 @@ use std::time::UNIX_EPOCH;
 
 use serde_json::Value;
 use steery_driver_common::lines::{Line, RECORD, capped, consumed, first_whole};
-use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::receipt::DELIVERED;
+use steery_driver_common::quiet::{Quiet, Stamp};
 use steery_driver_common::tree::{Cursor, Trees, Walk};
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
@@ -252,9 +252,7 @@ impl Store {
         let agents = file.with_extension("").join("subagents");
         let fork = match read.sub_agent {
             None => self
-                .origin(&read.external_id, &file, &facts, &|first| {
-                    self.kin_now(first)
-                })
+                .origin(&read.external_id, &file, &facts, &|first| self.kin_now(first))
                 .and_then(|origin| Some((origin.parent, origin.own?))),
             Some(_) => None,
         };
@@ -373,9 +371,7 @@ impl Store {
             created_at: head.created_at,
             updated_at: facts.updated_at,
             transcripts: vec![file.to_owned()],
-            parent: self
-                .origin(id, file, facts, kin)
-                .map(|origin| origin.parent),
+            parent: self.origin(id, file, facts, kin).map(|origin| origin.parent),
             app: head
                 .entrypoint
                 .as_deref()
@@ -395,9 +391,7 @@ impl Store {
                 && !facts.headless
                 && let Some(first) = facts.head.first_uuid
             {
-                kin.entry(first)
-                    .or_default()
-                    .push((id.clone(), file.clone()));
+                kin.entry(first).or_default().push((id.clone(), file.clone()));
             }
         }
         kin
@@ -493,9 +487,7 @@ impl Store {
             .into_iter()
             .map(|(other, path, _)| (other, uuids(&path).into_iter().collect()))
             .collect();
-        let own = leading(file, |uuid| {
-            held.iter().any(|(_, theirs)| theirs.contains(uuid))
-        });
+        let own = leading(file, |uuid| held.iter().any(|(_, theirs)| theirs.contains(uuid)));
         let mut best: Option<(usize, &str)> = None;
         for (other, theirs) in &held {
             let copied = own.iter().take_while(|uuid| theirs.contains(*uuid)).count();
@@ -1134,7 +1126,12 @@ fn read_from(
             Ok((
                 Events {
                     cursor: walk
-                        .cursor(&path, read.from + consumed, through, turn_mark(said.turn))
+                        .cursor(
+                            &path,
+                            read.from + consumed,
+                            through,
+                            turn_mark(said.turn),
+                        )
                         .said(CURSOR),
                     events: said.events,
                     more: read.more,
@@ -1179,11 +1176,7 @@ fn batched(
     };
     let response = |node: u32| -> Result<Option<String>, String> {
         let record = walk.record(walk.tree.node(node))?;
-        Ok(record
-            .value
-            .as_ref()
-            .and_then(events::response)
-            .map(str::to_owned))
+        Ok(record.value.as_ref().and_then(events::response).map(str::to_owned))
     };
     Ok(match (response(parent)?, response(next)?) {
         (Some(parent), Some(next)) => parent == next,
@@ -1249,9 +1242,7 @@ mod tests {
     fn an_error_at_the_end_of_a_transcript_waits_for_what_follows_it() {
         let root = scratch();
         let id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-        let file = root
-            .join("projects/-private-tmp")
-            .join(format!("{id}.jsonl"));
+        let file = root.join("projects/-private-tmp").join(format!("{id}.jsonl"));
         write(
             &file,
             &[
@@ -1674,15 +1665,13 @@ mod tests {
         assert_eq!(store.session(fork).unwrap().parent.as_deref(), Some(lead));
         let events = reading(&store, fork, None, None).events;
         let at = |wanted: &dyn Fn(&Event) -> bool| events.iter().position(wanted);
-        let said =
-            |words: &str| at(&|event| matches!(event, Event::Words { text, .. } if text == words));
-        let forked = at(
-            &|event| matches!(event, Event::Fork { parent, at } if parent == lead && *at == 1_790_420_400_000),
-        );
-        assert!(
-            said("hi there") < forked && forked < said("and now"),
-            "{events:?}"
-        );
+        let said = |words: &str| {
+            at(&|event| matches!(event, Event::Words { text, .. } if text == words))
+        };
+        let forked = at(&|event| {
+            matches!(event, Event::Fork { parent, at } if parent == lead && *at == 1_790_420_400_000)
+        });
+        assert!(said("hi there") < forked && forked < said("and now"), "{events:?}");
         assert!(forked.is_some());
         std::fs::remove_dir_all(root).unwrap();
     }

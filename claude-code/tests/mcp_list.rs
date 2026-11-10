@@ -144,12 +144,8 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
     // The runtime hands a hook only the variables its entry names: Cursor's version, never
     // its sign-in token.
     for hook in &initialized.harness.unwrap().hooks {
-        let cursors: Vec<&str> = hook
-            .env
-            .iter()
-            .map(String::as_str)
-            .filter(|name| name.starts_with("CURSOR_"))
-            .collect();
+        let cursors: Vec<&str> =
+            hook.env.iter().map(String::as_str).filter(|name| name.starts_with("CURSOR_")).collect();
         assert_eq!(cursors, ["CURSOR_VERSION"], "{}", hook.event);
     }
     // Documents in the shapes Claude Code and cursor-agent 2026.07.01 hand a hook.
@@ -197,41 +193,28 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
     // A Cursor document without its version is still told apart by the hook's environment.
     let mut bare_call = cursor_call.clone();
     bare_call.as_object_mut().unwrap().remove("cursor_version");
-    let cursor_env =
-        json!({"CURSOR_VERSION": "2026.07.01-41b2de7", "CURSOR_ACCESS_TOKEN": "SECRET"});
+    let cursor_env = json!({"CURSOR_VERSION": "2026.07.01-41b2de7", "CURSOR_ACCESS_TOKEN": "SECRET"});
 
-    let read = |event: &str, document: &Value, env: &Value| json!({"event": event, "document": document.to_string(), "env": env});
-    let started = ask(
-        &driver,
-        method::HOOK_READ,
-        read("SessionStart", &claude_start, &json!({})),
-    )
-    .await;
+    let read = |event: &str, document: &Value, env: &Value| {
+        json!({"event": event, "document": document.to_string(), "env": env})
+    };
+    let started = ask(&driver, method::HOOK_READ, read("SessionStart", &claude_start, &json!({}))).await;
     assert_eq!(started["moment"]["external_id"], "c1");
     for (event, document, env) in [
         ("SessionStart", &cursor_start, json!({})),
         ("PreToolUse", &cursor_call, json!({})),
         ("PreToolUse", &bare_call, cursor_env.clone()),
     ] {
-        assert_eq!(
-            ask(&driver, method::HOOK_READ, read(event, document, &env)).await,
-            json!({}),
-            "{event}"
-        );
+        let read = ask(&driver, method::HOOK_READ, read(event, document, &env)).await;
+        assert_eq!(read, json!({}), "{event}");
     }
 
-    let answer = |event: &str, document: &Value, env: &Value, answer: Value| json!({"event": event, "document": document.to_string(), "env": env, "answer": answer});
+    let answer = |event: &str, document: &Value, env: &Value, answer: Value| {
+        json!({"event": event, "document": document.to_string(), "env": env, "answer": answer})
+    };
     let deny = || json!({"decision": {"deny": {"reason": "not now"}}});
-    let denied = ask(
-        &driver,
-        method::HOOK_ANSWER,
-        answer("PreToolUse", &claude_call, &json!({}), deny()),
-    )
-    .await;
-    assert!(
-        denied["stdout"].as_str().unwrap().contains("deny"),
-        "{denied}"
-    );
+    let denied = ask(&driver, method::HOOK_ANSWER, answer("PreToolUse", &claude_call, &json!({}), deny())).await;
+    assert!(denied["stdout"].as_str().unwrap().contains("deny"), "{denied}");
     let env_file = home.join("cursor.env");
     let silent = json!({"stdout": "", "exit_code": 0});
     for (event, document, env, said) in [
@@ -244,16 +227,8 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
             json!({"say": "Report your lines", "lead": "claude-code:k1"}),
         ),
     ] {
-        assert_eq!(
-            ask(
-                &driver,
-                method::HOOK_ANSWER,
-                answer(event, document, &env, said)
-            )
-            .await,
-            silent,
-            "{event}"
-        );
+        let answered = ask(&driver, method::HOOK_ANSWER, answer(event, document, &env, said)).await;
+        assert_eq!(answered, silent, "{event}");
     }
     assert!(!env_file.exists());
     driver.shutdown().await.unwrap();

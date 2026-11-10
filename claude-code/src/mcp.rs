@@ -39,8 +39,7 @@ pub fn list(home: &Path, root: &Path, asked: McpList) -> McpServers {
     let mut servers = Servers::default();
     // The last managed file that provides a server decides it, as Claude Code merges them.
     for file in managed.iter().rev() {
-        if let Some(provided) =
-            mcp::json(file).and_then(|said| said.get("managedMcpServers").cloned())
+        if let Some(provided) = mcp::json(file).and_then(|said| said.get("managedMcpServers").cloned())
         {
             add(&mut servers, &json!({ "mcpServers": provided }), |_| true);
         }

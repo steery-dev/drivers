@@ -106,9 +106,9 @@ fn held_by(
             Some(_) if between_turns => HolderStop::Owner(None),
             Some(token) => HolderStop::Owner(Some(token)),
             // A process whose start cannot be read is one ending.
-            None => {
-                HolderStop::Beyond("The Claude Code background session ends now. Try again.".into())
-            }
+            None => HolderStop::Beyond(
+                "The Claude Code background session ends now. Try again.".into(),
+            ),
         },
         (Ok(pid), None) => match started(pid) {
             Some(process_start) => HolderStop::Process {
@@ -726,9 +726,7 @@ pub(crate) async fn signed_in(key: bool) -> Option<bool> {
         eprintln!(
             "claude auth status: exit {}, no `loggedIn` in its output{}, so nothing is claimed of \
              its sign-in",
-            answer
-                .code
-                .map_or("by signal".to_owned(), |code| code.to_string()),
+            answer.code.map_or("by signal".to_owned(), |code| code.to_string()),
             if answer.said.is_empty() {
                 String::new()
             } else {
@@ -770,10 +768,7 @@ pub async fn models(home: &Path, root: &Path) -> Models {
 /// `managed` settings files.
 fn listed(root: &Path, managed: &[PathBuf]) -> Vec<Model> {
     let thinking = |model: &str| -> Vec<String> {
-        turn::efforts(model)
-            .iter()
-            .map(|&level| level.to_owned())
-            .collect()
+        turn::efforts(model).iter().map(|&level| level.to_owned()).collect()
     };
     let chosen = std::fs::read(root.join("settings.json"))
         .ok()
@@ -850,12 +845,10 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
             format!("Claude Code does not run {model} here"),
         ));
     }
-    let me = std::env::current_exe().map_err(|e| {
-        Error::refused(
-            refusal::START_FAILED,
-            format!("cannot find this driver: {e}"),
-        )
-    })?;
+    let me = std::env::current_exe()
+        .map_err(|e| {
+            Error::refused(refusal::START_FAILED, format!("cannot find this driver: {e}"))
+        })?;
     let mut argv = vec![
         me.to_str()
             .ok_or_else(|| Error::refused(refusal::START_FAILED, "this driver's path is not text"))?
@@ -1006,9 +999,7 @@ pub fn reader(reader: Reader) -> Result<ReaderPlan, Error> {
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     if !reader.cwd.is_absolute() {
-        return Err(Error::invalid(
-            "the reader's folder is not an absolute path",
-        ));
+        return Err(Error::invalid("the reader's folder is not an absolute path"));
     }
     if let Some(thinking) = &reader.thinking
         && !EFFORT.contains(&thinking.as_str())
@@ -1210,23 +1201,12 @@ mod tests {
         let users = listed(root, &[]);
         assert_eq!(
             named(&users),
-            [
-                "opus",
-                "sonnet",
-                "haiku",
-                "opusplan",
-                "opus[1m]",
-                "sonnet[1m]"
-            ]
+            ["opus", "sonnet", "haiku", "opusplan", "opus[1m]", "sonnet[1m]"]
         );
         let haiku = users.iter().find(|m| m.model == "haiku").unwrap();
         assert_eq!(haiku.thinking, EFFORT, "Haiku 5.5 takes up to max");
         let managed = root.join("managed-settings.json");
-        std::fs::write(
-            &managed,
-            r#"{"availableModels": ["sonnet", "claude-opus-4-8"]}"#,
-        )
-        .unwrap();
+        std::fs::write(&managed, r#"{"availableModels": ["sonnet", "claude-opus-4-8"]}"#).unwrap();
         let managed = [managed];
         assert_eq!(
             named(&listed(root, &managed)),
@@ -1317,15 +1297,10 @@ mod tests {
                     "prompt": "Another Claude session sent a message:\nsteery-delivery:d1 read it back"}})
             .to_string()
         };
-        let carried = |record: String| {
-            receipt::carried(format!("{record}\n").as_bytes(), "d1", input_carries)
-        };
+        let carried = |record: String| receipt::carried(format!("{record}\n").as_bytes(), "d1", input_carries);
         assert_eq!(carried(queued("peer", "prompt", false)), Ok(true));
         assert_eq!(carried(queued("human", "prompt", false)), Ok(true));
-        assert_eq!(
-            carried(queued("task-notification", "task-notification", false)),
-            Ok(false)
-        );
+        assert_eq!(carried(queued("task-notification", "task-notification", false)), Ok(false));
         assert_eq!(carried(queued("peer", "prompt", true)), Ok(false));
     }
 
