@@ -1,6 +1,7 @@
-//! `setup/plan`: Steery's skill, as a whole file in Hermes's skills folder. Hermes keeps its
-//! MCP servers only in `config.yaml`. No runtime merges a `yaml` entry yet, so the plan says
-//! the command that adds Steery's server instead of planning it.
+//! `setup/plan`: Steery's skill, as a whole file in Hermes's skills folder, and Steery's MCP
+//! server under `mcp_servers.steery` in `<root>/config.yaml`, the only place Hermes reads MCP
+//! servers from. A `yaml` entry needs protocol 14; under an older one the plan says the
+//! command that adds the server instead.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,7 @@ fn installed() -> Option<PathBuf> {
     executable(home.join(".local/bin/hermes"))
 }
 
-pub async fn plan(root: &Path, setup: Setup) -> Planned {
+pub async fn plan(root: &Path, setup: Setup, protocol: u32) -> Planned {
     let Some(binary) = on_path("hermes").or_else(installed) else {
         let (install, refused) = match lacks(&["bash", "curl", "git"]) {
             None => (
@@ -57,11 +58,34 @@ pub async fn plan(root: &Path, setup: Setup) -> Planned {
             "`--version` did not answer, so the driver says nothing about this build.".into(),
         );
     }
-    notes.push(format!(
-        "Hermes keeps MCP servers only in config.yaml, which setup cannot write yet: run \
-         `hermes mcp add steery --url {}`.",
-        setup.mcp_url
-    ));
+    let mut entries = vec![Entry {
+        path: root.join("skills/steery/SKILL.md"),
+        format: Format::Text,
+        at: None,
+        value: json!(setup.skill),
+        carries: vec![Part::Skill],
+    }];
+    if protocol >= steery_sdk::YAML {
+        // One MCP client serves every conversation of a Hermes process, so the header names
+        // the harness alone. Hermes reads `timeout` in seconds (`tools/mcp_tool_common.py`).
+        entries.push(Entry {
+            path: root.join("config.yaml"),
+            format: Format::Yaml,
+            at: Some("mcp_servers.steery".into()),
+            value: json!({
+                "url": setup.mcp_url,
+                "headers": {"Steery-Harness": "hermes"},
+                "timeout": setup.timeout,
+            }),
+            carries: vec![Part::Mcp],
+        });
+    } else {
+        notes.push(format!(
+            "This runtime cannot write Hermes's config.yaml: run \
+             `hermes mcp add steery --url {}`.",
+            setup.mcp_url
+        ));
+    }
     notes.push(
         "It gets the skill. Hermes itself decides when to ask and when to ask for the next \
          instruction. Nothing that Steery writes overrides that decision."
@@ -76,13 +100,7 @@ pub async fn plan(root: &Path, setup: Setup) -> Planned {
             root: root.to_owned(),
         }),
         refused: None,
-        entries: vec![Entry {
-            path: root.join("skills/steery/SKILL.md"),
-            format: Format::Text,
-            at: None,
-            value: json!(setup.skill),
-            carries: vec![Part::Skill],
-        }],
+        entries,
         notes,
         install: None,
         needs: Vec::new(),

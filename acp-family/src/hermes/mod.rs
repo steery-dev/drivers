@@ -101,9 +101,12 @@ impl Program for Driver {
     }
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
-        let root = &self.place()?.root;
+        let place = self.place()?;
+        let root = &place.root;
         match method {
-            method::SETUP_PLAN => result(setup::plan(root, steery_sdk::params(params)?).await),
+            method::SETUP_PLAN => {
+                result(setup::plan(root, steery_sdk::params(params)?, place.protocol).await)
+            }
             method::SESSIONS_LIST => {
                 result(store::Home::new(root).list(steery_sdk::params(params)?)?)
             }
