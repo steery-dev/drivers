@@ -27,10 +27,12 @@ pub fn executable(path: PathBuf) -> Option<PathBuf> {
 /// neither: their agents write their lines), 10 is 9 with `sessions/list` answering only
 /// what changed since a cursor (`steery_sdk::listing::Changes`), 11 is 10 without
 /// `recap`, which no driver answers at any version: no supported runtime asks it, 12 is 11
-/// with `touches` (the drivers send none: the runtime sweeps their conversations), and 13
-/// is 12 with a permission hook's `keeps`. Every runtime Steery supports offers 4 (it came
-/// in runtime 7.0.130; the oldest supported is later), so no driver answers an older one.
-pub const PROTOCOLS: [u32; 10] = [13, 12, 11, 10, 9, 8, 7, 6, 5, 4];
+/// with `touches` (the drivers send none: the runtime sweeps their conversations), 13 is 12
+/// with a permission hook's `keeps`, and 14 is 13 with the setup format `yaml` (a driver
+/// plans one only where it picked 14, `steery_sdk::YAML`). Every runtime Steery supports
+/// offers 4 (it came in runtime 7.0.130; the oldest supported is later), so no driver
+/// answers an older one.
+pub const PROTOCOLS: [u32; 11] = [14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4];
 
 /// The first protocol with needs: `setup/plan`'s `needs` and `needs/give`.
 pub const NEEDS: u32 = 5;
