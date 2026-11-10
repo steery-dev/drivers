@@ -33,7 +33,7 @@ short name, its tint and its mark.
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe |
-| `copilot` | Copilot | [`acp-family`](acp-family/) | observe |
+| `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -827,19 +827,20 @@ cargo test
 
 ## Copilot: `acp-family/src/copilot/`
 
-One binary, `steery-driver-copilot`, with no settings, at observe. It speaks to GitHub Copilot
+One binary, `steery-driver-copilot`, with no settings, at drive. It speaks to GitHub Copilot
 CLI only through what Copilot publishes:
 
 - its conversation files under `session-state/`
 - `hooks/*.json`, `mcp-config.json` and `skills/`
 - `copilot --headless --stdio` (Copilot's own server: JSON-RPC with `Content-Length` frames)
-- `copilot mcp list --json` and `copilot login`
+- `copilot -p` with `--output-format json` (a turn), `copilot -s` (a one-shot read),
+  `copilot --resume=<id>`, `copilot mcp list --json` and `copilot login`
 
 Copilot's home is `COPILOT_HOME`, else `~/.copilot`.
 
 Copilot's own server is a module of this crate, not a crate of its own. Only Copilot speaks
-it. Observe asks it only `auth.getStatus`. Live will use it for `session.send` and
-`session.abort`.
+it. Drive asks it `auth.getStatus`, `models.list`, `sessions.fork` and `sessions.delete`.
+Live will use it for `session.send` and `session.abort`.
 
 **Needs** (protocol 5). When `auth.getStatus` says `isAuthenticated: false`, the plan asks
 `sign-in` in two ways:
@@ -869,6 +870,36 @@ it. Observe asks it only `auth.getStatus`. Live will use it for `session.send` a
   - `preToolUse` answers `permissionDecision` (`allow`, `deny`, `ask`).
   - `permissionRequest` answers `behavior` (`allow`, `deny`). Its document names no call id.
   - Copilot drops the output of `userPromptSubmitted`, so Steery only reads it.
+- **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`, `reader`,
+  `terminal`).
+  - `held`: every Copilot that opens a conversation writes `inuse.<pid>.lock` in its folder.
+    A lock counts while its process runs and started before the lock: a killed Copilot
+    leaves its lock behind. Else the runtime looks.
+  - `idle`: the newest turn of `events.jsonl`, with its model, where `assistant.turn_end`
+    ended it. An open turn gives no sample: a run that died leaves its turn open.
+  - `models`: the server's `models.list`, with each model's `supportedReasoningEfforts` as
+    its thinking. `auto` is listed first, but a run that names no model takes the model after
+    it, so the driver lists that one first.
+  - `start`: this binary in its turn mode, which becomes
+    `copilot --output-format json --no-ask-user [--model m] [--reasoning-effort t] [--add-dir r]`
+    with the words on standard input.
+    - A continue adds `--resume=<id>`. Copilot names a resumed conversation only in its last
+      line, so the turn mode first writes `{"steery": {"named": <id>}}`. A continue is refused
+      `no-place` where its folder is gone.
+    - A fork asks the server's `sessions.fork` for a copy of the history, then resumes the copy.
+    - A worktree and a hand-over are refused `selection-unsupported`.
+    - The turn runs without `--allow-all-tools`: Copilot with no terminal denies each call that
+      its own rules and Steery's `permissionRequest` hook do not allow.
+  - `turn/read`: Copilot's lines are the events of `events.jsonl`, with the same ids, then a
+    `result` with `exitCode`. `took` is the `user.message` that carries the delivery marker.
+    Standard error gives `model-missing`, `not-found`, `selection-unsupported`, `start-failed`.
+  - `stop`: Copilot stops a turn gracefully only for the server client that runs it
+    (`session.abort`). The runtime's signals end every other turn.
+  - `receipt/*`: no door, so no mark.
+  - `reader`: `copilot -s --no-ask-user --no-custom-instructions --disable-builtin-mcps`, with
+    `--excluded-tools` for every source, or only `view`, `grep`, `glob`. The reader runs under a
+    conversation id of its own (`--session-id`), and `sessions.delete` then removes it.
+  - `terminal`: `cd '<cwd>' && copilot --resume=<id>`, with `COPILOT_HOME` where it is set.
 
 ```sh
 cd acp-family && cargo build

@@ -331,5 +331,100 @@ async fn copilot_reads_turns_words_calls_and_an_abort() {
         )
         .await;
     assert!(missing.is_err());
+
+    // Drive. `held`: a lock counts only while the process it names runs.
+    let folder = home.join("copilot/session-state").join(ID);
+    let live = folder.join(format!("inuse.{}.lock", std::process::id()));
+    std::fs::write(&live, "").unwrap();
+    let call = |method: &'static str, params: Value| {
+        let client = &client;
+        async move {
+            client
+                .call(method, params, Duration::from_secs(30))
+                .await
+                .unwrap()
+        }
+    };
+    let held = call(method::HELD, json!({"external_id": ID})).await;
+    assert_eq!(
+        held["person"]["stop"]["process"]["pid"],
+        std::process::id(),
+        "{held}"
+    );
+    std::fs::remove_file(&live).unwrap();
+    let mut gone = std::process::Command::new("true").spawn().unwrap();
+    gone.wait().unwrap();
+    std::fs::write(folder.join(format!("inuse.{}.lock", gone.id())), "").unwrap();
+    let held = call(method::HELD, json!({"external_id": ID})).await;
+    assert!(held.get("look").is_some(), "{held}");
+
+    let idle = call(method::IDLE, json!({"external_id": ID})).await;
+    assert_eq!(idle["sample"]["state"], "interrupted", "{idle}");
+    assert_eq!(idle["sample"]["model"], "claude-sonnet-5.5", "{idle}");
+
+    // `turn/read` of a continue: the turn mode's own line names the conversation, Copilot's
+    // `user.message` carries the marker, and its `result` closes the turn.
+    let marker = "steery-delivery:t.1";
+    let lines = [
+        json!({"steery": {"named": ID}}),
+        json!({"type": "user.message", "id": "r1", "parentId": "e21",
+               "timestamp": "2026-11-10T11:01:00.000Z",
+               "data": {"content": format!("Again. {marker}"), "interactionId": "i3"}}),
+        json!({"type": "assistant.turn_start", "id": "r2", "parentId": "r1",
+               "timestamp": "2026-11-10T11:01:01.000Z",
+               "data": {"turnId": "0", "interactionId": "i3"}}),
+        json!({"type": "assistant.message", "id": "r3", "parentId": "r2",
+               "timestamp": "2026-11-10T11:01:02.000Z",
+               "data": {"messageId": "a3", "content": "again", "toolRequests": []}}),
+        json!({"type": "assistant.turn_end", "id": "r4", "parentId": "r3",
+               "timestamp": "2026-11-10T11:01:03.000Z", "data": {"turnId": "0"}}),
+        json!({"type": "result", "sessionId": ID, "exitCode": 0}),
+    ];
+    let mut read = Vec::new();
+    for line in &lines {
+        read.push(
+            call(
+                method::TURN_READ,
+                json!({"turn": "t", "stream": "stdout", "line": line.to_string(),
+                       "delivery": marker}),
+            )
+            .await,
+        );
+    }
+    assert_eq!(read[0]["named"], ID, "{read:?}");
+    assert_eq!(read[1]["took"], true, "{read:?}");
+    let words: Vec<Value> = read
+        .iter()
+        .flat_map(|line| line["events"].as_array().cloned().unwrap_or_default())
+        .filter(|event| event["type"] == "words")
+        .map(|event| event["text"].clone())
+        .collect();
+    assert_eq!(words, [json!(format!("Again. {marker}")), json!("again")]);
+    let ended: Vec<&Value> = read.iter().filter_map(|line| line.get("ended")).collect();
+    assert_eq!(ended.len(), 1, "{read:?}");
+    assert_eq!(ended[0]["state"], "finished");
+
+    let refused = call(
+        method::TURN_READ,
+        json!({"turn": "u", "stream": "stderr",
+               "line": "Error: Model \"gpt-0\" from --model flag is not available."}),
+    )
+    .await;
+    assert_eq!(refused["refused"], "model-missing", "{refused}");
+
+    let terminal = call(
+        method::TERMINAL,
+        json!({"external_id": ID, "cwd": "/work/project"}),
+    )
+    .await;
+    assert_eq!(
+        terminal["command"],
+        format!(
+            "cd '/work/project' && COPILOT_HOME='{}' copilot --resume={ID}",
+            home.join("copilot").display()
+        ),
+        "{terminal}"
+    );
+
     let _ = std::fs::remove_dir_all(&home);
 }

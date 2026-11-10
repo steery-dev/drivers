@@ -4,14 +4,18 @@
 //! its files, its hooks, its CLI, and its own server (`copilot --headless --stdio`).
 
 mod calls;
+mod drive;
 mod events;
 mod home;
 mod hooks;
 mod mcp;
+mod models;
+mod reader;
 mod server;
 mod setup;
 mod sign_in;
 mod transcripts;
+mod turn;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -21,6 +25,8 @@ use steery_sdk::wire::{self, harness};
 use steery_sdk::{Error, Program, method, refusal, result};
 
 use crate::Harness;
+pub(crate) use reader::{MODE as READER_MODE, main as reader_main};
+pub(crate) use turn::{MODE as TURN_MODE, main as turn_main};
 
 /// Steery's MCP server's name in Copilot's configuration.
 pub(crate) const STEERY: &str = "steery";
@@ -46,6 +52,7 @@ const TRANSCRIPT: &str = "One JSON event on each line of `events.jsonl`, with `i
 pub struct Driver {
     place: OnceLock<Place>,
     sign_ins: sign_in::SignIns,
+    turns: turn::Turns,
     changes: steery_sdk::listing::Changes,
 }
 
@@ -164,6 +171,21 @@ impl Program for Driver {
                 result(blocking(move || hooks::read(&store, read)).await?)
             }
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
+            method::HELD => result(drive::held(self.store()?, given(params)?)?),
+            method::IDLE => result(drive::idle(self.store()?, given(params)?)?),
+            method::MODELS => result(models::models(self.store()?.root()).await?),
+            method::START => result(turn::start(self.store()?, given(params)?)?),
+            method::TURN_READ => result(self.turns.read(self.store()?, given(params)?)?),
+            method::STOP => result(drive::stop(self.store()?, given(params)?).await?),
+            method::RECEIPT_MARK => result(drive::mark(self.store()?, given(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(self.store()?, given(params)?)?),
+            method::READER => result(reader::plan(given(params)?)?),
+            method::READER_READ => result(reader::read(given(params)?)?),
+            method::TERMINAL => result(drive::terminal(
+                &self.place()?.home,
+                self.store()?,
+                given(params)?,
+            )?),
             _ => Err(Error::Unknown),
         }
     }
@@ -172,7 +194,7 @@ impl Program for Driver {
 /// Copilot as Steery reads it, on `protocol`.
 fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe],
+        levels: vec![wire::Level::Observe, wire::Level::Drive],
         // The release whose hooks, event schema and own server this driver was read against.
         minimum: Some(wire::Minimum {
             release: "1.0.107".into(),
@@ -190,14 +212,29 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             call_meta: None,
         },
         setup: setup::facts(),
-        reader: None,
+        reader: Some(wire::ReaderFacts {
+            sealed: wire::Sealed {
+                tools: true,
+                // A user's MCP servers still start, but `--excluded-tools mcp:*` or
+                // `--available-tools` leaves the read none of their tools.
+                mcp: true,
+                instructions: true,
+                // Plugins and their hooks still load; Copilot has no flag that shuts them out.
+                extensions: false,
+                history: true,
+            },
+            known: Vec::new(),
+            unnamed: true,
+        }),
         facts: wire::HarnessFacts {
             touches: false,
-            // One conversation, one `events.jsonl`, named by its id.
-            by_file: true,
-            // `--resume=<id>` appends to the same `events.jsonl` (`session.resume`).
+            // `--resume=<id>` names a conversation by its id.
+            by_file: false,
+            // `--resume` runs in the folder the conversation recorded.
             resumes_in_place: true,
             forks_beside: false,
+            // `session.resume` restores the conversation's `selectedModel` and
+            // `reasoningEffort`.
             keeps: wire::Keeps {
                 model: true,
                 thinking: true,
@@ -205,7 +242,11 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             door: None,
             checks_idle: false,
             worktrees: false,
-            acts: Vec::new(),
+            acts: vec![
+                harness::Act::Continue,
+                harness::Act::Fork,
+                harness::Act::New,
+            ],
         },
         hooks: hooks::table(protocol),
     }
