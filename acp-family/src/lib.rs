@@ -1,0 +1,17 @@
+//! Steery's drivers for the harnesses that speak the Agent Client Protocol (ACP).
+//!
+//! One library, one binary per harness. [`Harness`] names each one; each harness's driver
+//! lives in its own module and answers the program protocol for it alone. What two of them
+//! share, such as reading ACP's `session/update` records, is a module of its own.
+
+mod grok;
+mod harness;
+
+pub use harness::Harness;
+
+/// Serve the driver for `harness` on standard input and output.
+pub async fn serve(harness: Harness) -> std::io::Result<()> {
+    match harness {
+        Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+    }
+}
