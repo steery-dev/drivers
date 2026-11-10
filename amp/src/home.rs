@@ -94,13 +94,6 @@ pub(crate) fn install() -> Result<steery_sdk::wire::harness::Install, String> {
     })
 }
 
-/// Now, in milliseconds since 1970.
-pub(crate) fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
 /// What one run of `amp` printed and how it ended.
 pub(crate) struct Ran {
     pub success: bool,
@@ -112,7 +105,10 @@ pub(crate) struct Ran {
 impl Ran {
     /// The last line of its own on standard error, for a person.
     pub fn line(&self) -> Option<&str> {
-        self.said.lines().map(str::trim).rfind(|line| !line.is_empty())
+        self.said
+            .lines()
+            .map(str::trim)
+            .rfind(|line| !line.is_empty())
     }
 }
 

@@ -14,8 +14,9 @@ use steery_sdk::{Error, refusal};
 
 use crate::home::{self, Failed};
 
-/// The most threads one listing asks Amp for; a listing that fills it is not complete.
-const LIMIT: usize = 1000;
+/// The most threads one listing asks Amp for, the most `amp threads list` takes
+/// ("--limit must be an integer <= 500"); a listing that fills it is not complete.
+const LIMIT: usize = 500;
 /// How long `amp threads list` has, inside `sessions/list`'s 30 s.
 const LIST_WITHIN: Duration = Duration::from_secs(15);
 /// How long `amp threads export` has, inside `sessions/read`'s 10 s.
@@ -112,7 +113,9 @@ impl Threads {
             threads
                 .iter()
                 .filter(|(thread, _)| {
-                    kinds.get(&thread.id).is_none_or(|(updated, _)| *updated != thread.updated)
+                    kinds
+                        .get(&thread.id)
+                        .is_none_or(|(updated, _)| *updated != thread.updated)
                 })
                 .map(|(thread, _)| (thread.id.clone(), thread.updated.clone()))
                 .collect()
@@ -132,7 +135,9 @@ impl Threads {
                     let mut session = (**session).clone();
                     session.updated_at = *updated;
                     session.title = thread.title.clone().or(session.title);
-                    session.cwd = session.cwd.or_else(|| thread.tree.as_deref().and_then(file_path));
+                    session.cwd = session
+                        .cwd
+                        .or_else(|| thread.tree.as_deref().and_then(file_path));
                     listed.sessions.push(session);
                 }
             }
@@ -181,7 +186,10 @@ impl Threads {
     /// `sessions/locate`: one thread, by its id, however old.
     pub async fn locate(&self, locate: Locate) -> Result<Located, Error> {
         let binary = home::binary().ok_or_else(|| {
-            Error::refused(refusal::NOT_FOUND, "Amp is not installed here, so no thread is")
+            Error::refused(
+                refusal::NOT_FOUND,
+                "Amp is not installed here, so no thread is",
+            )
         })?;
         let thread = export(&binary, &locate.external_id).await?;
         Ok(Located {
@@ -201,7 +209,10 @@ fn kind(thread: &Value) -> Kind {
 
 /// Whether nobody was at `thread`: `amp -x` ran it.
 fn headless(thread: &Value) -> bool {
-    thread.pointer("/env/initial/platform/client").and_then(Value::as_str) == Some(HEADLESS)
+    thread
+        .pointer("/env/initial/platform/client")
+        .and_then(Value::as_str)
+        == Some(HEADLESS)
 }
 
 /// `thread`, exported, as a session.
@@ -213,9 +224,14 @@ fn session(thread: &Value) -> Session {
             .pointer("/env/initial/trees/0/uri")
             .and_then(Value::as_str)
             .and_then(file_path),
-        title: text(thread, "title").filter(|t| !t.is_empty()).map(str::to_owned),
+        title: text(thread, "title")
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned),
         created_at: created,
-        updated_at: text(thread, "updatedAt").and_then(millis).or(created).unwrap_or(0),
+        updated_at: text(thread, "updatedAt")
+            .and_then(millis)
+            .or(created)
+            .unwrap_or(0),
         transcripts: Vec::new(),
         parent: None,
         app: false,
@@ -227,7 +243,10 @@ fn session(thread: &Value) -> Session {
 /// (it is not this account's, or it is gone).
 pub(crate) async fn export(binary: &Path, id: &str) -> Result<Value, Error> {
     if !id.starts_with("T-") || id.starts_with("T--") {
-        return Err(Error::refused(refusal::NOT_FOUND, format!("{id} is not an Amp thread id")));
+        return Err(Error::refused(
+            refusal::NOT_FOUND,
+            format!("{id} is not an Amp thread id"),
+        ));
     }
     let ran = home::run(
         binary,
@@ -255,7 +274,10 @@ pub(crate) async fn export(binary: &Path, id: &str) -> Result<Value, Error> {
         return Err(Error::refused(word, line));
     }
     serde_json::from_slice(&ran.stdout).map_err(|e| {
-        Error::refused(refusal::REFUSED, format!("amp threads export printed no thread: {e}"))
+        Error::refused(
+            refusal::REFUSED,
+            format!("amp threads export printed no thread: {e}"),
+        )
     })
 }
 

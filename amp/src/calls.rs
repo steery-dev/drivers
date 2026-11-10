@@ -6,7 +6,10 @@ use steery_sdk::wire::harness::{Call, Group};
 
 /// The call `id` of `tool` with `input`.
 pub fn call(id: &str, tool: &str, input: Value) -> Call {
-    let (group, server, steery) = match tool.strip_prefix("mcp__").and_then(|rest| rest.split_once("__")) {
+    let (group, server, steery) = match tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+    {
         Some(("steery", named)) => (Group::Steery, None, Some(named.to_owned())),
         Some((server, _)) => (Group::Mcp, Some(server.to_owned()), None),
         None => (builtin(tool), None, None),

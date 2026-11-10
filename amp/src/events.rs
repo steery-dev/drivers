@@ -39,7 +39,10 @@ pub async fn read(read: Read) -> Result<Events, Error> {
         ));
     }
     let binary = home::binary().ok_or_else(|| {
-        Error::refused(refusal::NOT_FOUND, "Amp is not installed here, so no thread is")
+        Error::refused(
+            refusal::NOT_FOUND,
+            "Amp is not installed here, so no thread is",
+        )
     })?;
     let thread = threads::export(&binary, &read.external_id).await?;
     Ok(fold(&thread, read.cursor.as_deref(), read.tail))
@@ -55,8 +58,14 @@ struct Cursor {
 /// `thread`'s events after `cursor`, or its newest within `tail` bytes.
 fn fold(thread: &Value, cursor: Option<&str>, tail: Option<u64>) -> Events {
     let empty = Vec::new();
-    let messages = thread.get("messages").and_then(Value::as_array).unwrap_or(&empty);
-    let end = messages.iter().position(unfinished).unwrap_or(messages.len());
+    let messages = thread
+        .get("messages")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
+    let end = messages
+        .iter()
+        .position(unfinished)
+        .unwrap_or(messages.len());
     let messages = &messages[..end];
     let (mut from, reset) = match cursor.and_then(|c| serde_json::from_str::<Cursor>(c).ok()) {
         Some(c) if c.n == 0 => (0, false),
@@ -105,7 +114,10 @@ fn fold(thread: &Value, cursor: Option<&str>, tail: Option<u64>) -> Events {
     }
     let cursor = Cursor {
         n: upto,
-        h: upto.checked_sub(1).map(|i| hash(&messages[i])).unwrap_or_default(),
+        h: upto
+            .checked_sub(1)
+            .map(|i| hash(&messages[i]))
+            .unwrap_or_default(),
     };
     Events {
         cursor: serde_json::to_string(&cursor).unwrap_or_default(),
@@ -133,7 +145,11 @@ fn unfinished(message: &Value) -> bool {
 
 /// The content blocks of `message`.
 fn blocks(message: &Value) -> impl Iterator<Item = &Value> {
-    message.get("content").and_then(Value::as_array).into_iter().flatten()
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
 }
 
 /// What the fold knows between messages: the time, the turn that runs, and the model.
@@ -159,7 +175,11 @@ impl Folder {
             .filter_map(Value::as_str)
             .find_map(|tag| tag.strip_prefix("model:"))
             .map(str::to_owned);
-        Self { at, turn: None, model }
+        Self {
+            at,
+            turn: None,
+            model,
+        }
     }
 
     /// The events of the message at `index`, appended to `events`.
