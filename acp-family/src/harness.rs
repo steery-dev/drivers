@@ -62,7 +62,7 @@ impl Harness {
             Self::Hermes => "#4b2fd0",
             Self::Kilo => "#617a91",
             Self::Cursor => "#14120b",
-            Self::Cline => "#1C1C24",
+            Self::Cline => "#1c1c24",
         }
     }
 
