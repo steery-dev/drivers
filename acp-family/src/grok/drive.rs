@@ -6,6 +6,10 @@
 //! by the runtime itself: the words on standard input, one Claude Code stream-json record
 //! on each line of standard output ([`super::turn`]). Grok files such a run as
 //! `session_kind: headless`, which `sessions/list` excludes and every read by id serves.
+//!
+//! The turn runs with `--always-approve`: a headless Grok cancels every call its rules do
+//! not allow, and a hook's `allow` does not get past that ask. So Steery's `PreToolUse`
+//! hook and the person's `deny` rules are its gates, and `start` refuses without the hook.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,6 +44,16 @@ const IDLE_TAIL: u64 = 512 * 1024;
 pub async fn start(root: &Path, store: &Store, start: Start) -> Result<Launch, Error> {
     let binary = super::binary(root)
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "grok is not installed here"))?;
+    if !super::setup::gated(root) {
+        return Err(Error::refused(
+            refusal::REFUSED,
+            format!(
+                "Steery's PreToolUse hook is not in {}, and Grok would run every call of the \
+                 turn unasked. Set Grok Build up again",
+                super::setup::hooks_file(root).display()
+            ),
+        ));
+    }
     let resume = match (start.act, start.external_id.as_deref()) {
         (Act::Continue | Act::Fork, Some(id)) => {
             store.find(id)?;

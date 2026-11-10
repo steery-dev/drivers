@@ -4,7 +4,7 @@
 //! own, `<root>/hooks/steery.json`, beside any the person keeps there (Grok reads every
 //! `*.json` in that folder).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 use steery_driver_common::program::{lacks, others_note, release_within, version};
@@ -114,13 +114,45 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         })
         .collect();
     let hooks = Entry {
-        path: root.join("hooks/steery.json"),
+        path: hooks_file(root),
         format: Format::Json,
         at: None,
         value: json!({"hooks": hooks}),
         carries: vec![Part::Hooks],
     };
     vec![mcp, skill, hooks]
+}
+
+/// Where setup writes Steery's hooks.
+pub(crate) fn hooks_file(root: &Path) -> PathBuf {
+    root.join("hooks/steery.json")
+}
+
+/// Whether Steery's `PreToolUse` hook is in the file setup wrote, on every tool: a group
+/// with no `matcher` that runs `<hook> PreToolUse`. A turn Steery starts runs with
+/// `--always-approve`, so this hook is its only gate beside the person's `deny` rules.
+/// Grok 1.0.77 runs the call when the hook fails, crashes or times out, and a hook's
+/// `allow` does not get past Grok's own ask, which a headless run cancels.
+pub(crate) fn gated(root: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(hooks_file(root)) else {
+        return false;
+    };
+    let Ok(document) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let suffix = format!(" {}", super::hooks::BEFORE_CALL);
+    document["hooks"][super::hooks::BEFORE_CALL]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|group| group.get("matcher").is_none())
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .any(|hook| {
+            hook["type"] == "command"
+                && hook["command"]
+                    .as_str()
+                    .is_some_and(|command| command.ends_with(&suffix))
+        })
 }
 
 /// Grok Build's own installer, where `bash` and `curl` are here: it links `grok` into

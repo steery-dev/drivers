@@ -22,6 +22,9 @@ const SAYS_WAITS: u32 = 5;
 /// the runtime answers within `waits - 90`. A day: Grok reads `timeout` as whole seconds.
 const ASKS_WAITS: u32 = 86_400;
 
+/// Grok's event before a tool call: the one hook that can block it.
+pub(crate) const BEFORE_CALL: &str = "PreToolUse";
+
 /// One of Grok's hook events Steery is hooked on, by its name in Grok's hook files.
 pub(crate) struct Event {
     pub(crate) name: &'static str,
@@ -48,7 +51,7 @@ pub(crate) const EVENTS: [Event; 6] = [
         waits: SAYS_WAITS,
     },
     Event {
-        name: "PreToolUse",
+        name: BEFORE_CALL,
         kind: HookKind::BeforeCall,
         says: &[],
         waits: ASKS_WAITS,
