@@ -552,7 +552,10 @@ fn natively_extended(model: &str) -> bool {
     let family = parts.next().unwrap_or_default();
     let mut number = || parts.next().and_then(|part| part.parse::<u32>().ok());
     let major = number();
-    let version = (major.unwrap_or(0), number().filter(|minor| *minor < 100).unwrap_or(0));
+    let version = (
+        major.unwrap_or(0),
+        number().filter(|minor| *minor < 100).unwrap_or(0),
+    );
     match family {
         "fable" => true,
         "sonnet" => version >= (5, 0),

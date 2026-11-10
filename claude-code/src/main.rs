@@ -207,7 +207,10 @@ impl Program for ClaudeCode {
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = given(params)?;
                 let after = asked.after.clone();
-                result(self.changes.answer(after.as_deref(), self.store()?.list(asked)))
+                result(
+                    self.changes
+                        .answer(after.as_deref(), self.store()?.list(asked)),
+                )
             }
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),
             method::SESSIONS_READ => {
@@ -229,11 +232,9 @@ impl Program for ClaudeCode {
                     "Claude Code has no plugin door that sends its records",
                 ))
             }
-            method::MCP_LIST => result(mcp::list(
-                &self.place()?.home,
-                self.root()?,
-                given(params)?,
-            )),
+            method::MCP_LIST => {
+                result(mcp::list(&self.place()?.home, self.root()?, given(params)?))
+            }
             method::HOOK_READ => {
                 let store = Arc::clone(self.shared()?);
                 let read = given(params)?;
