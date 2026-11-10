@@ -1,5 +1,6 @@
-//! Steery's driver for Kilo at drive: it reads Kilo's conversations from its SQLite
-//! database, plans the entries that set Kilo up for Steery, lists the MCP servers Kilo
+//! Steery's driver for Kilo at live: it reads Kilo's conversations from its SQLite
+//! database, plans the entries that set Kilo up for Steery (its plugin among them, which
+//! reaches each live conversation through Steery's plugin door), lists the MCP servers Kilo
 //! resolves, starts Kilo's turns through Kilo's own ACP server, and reads the permissions
 //! those turns ask for.
 
@@ -46,7 +47,7 @@ impl Driver {
 
     fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe, wire::Level::Drive],
+            levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
             minimum: Some(wire::Minimum {
                 release: "7.8.27".into(),
                 update: Some("kilo upgrade".into()),
@@ -87,8 +88,8 @@ impl Driver {
                     model: true,
                     thinking: false,
                 },
-                door: None,
-                checks_idle: false,
+                door: Some(harness::LiveDoor::Plugin),
+                checks_idle: true,
                 worktrees: false,
                 acts: vec![
                     harness::Act::Continue,
@@ -145,7 +146,7 @@ impl Program for Driver {
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::SESSIONS_FOLD => Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
-                "Kilo's driver has no plugin door",
+                "Kilo's plugin sends no entries: the driver reads kilo.db",
             )),
             method::HELD => result(drive::held(store, &steery_sdk::params(params)?)),
             method::IDLE => result(drive::idle(store, &steery_sdk::params(params)?)),
