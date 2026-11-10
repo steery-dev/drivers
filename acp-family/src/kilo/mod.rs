@@ -1,16 +1,16 @@
-//! Steery's driver for Kilo at drive: it reads Kilo's conversations from its SQLite
-//! database, plans the entries that set Kilo up for Steery, lists the MCP servers Kilo
+//! Steery's driver for Kilo at live: it reads Kilo's conversations from its SQLite
+//! database, plans the entries that set Kilo up for Steery (its plugin among them, which
+//! reaches each live conversation through Steery's plugin door), lists the MCP servers Kilo
 //! resolves, starts Kilo's turns through Kilo's own ACP server, and reads the permissions
 //! those turns ask for.
 
 mod calls;
 mod config;
-mod drive;
+pub(crate) mod drive;
 mod events;
 mod hooks;
 mod setup;
 mod store;
-pub(crate) mod turn;
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -46,7 +46,7 @@ impl Driver {
 
     fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe, wire::Level::Drive],
+            levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
             minimum: Some(wire::Minimum {
                 release: "7.8.27".into(),
                 update: Some("kilo upgrade".into()),
@@ -87,8 +87,8 @@ impl Driver {
                     model: true,
                     thinking: false,
                 },
-                door: None,
-                checks_idle: false,
+                door: Some(harness::LiveDoor::Plugin),
+                checks_idle: true,
                 worktrees: false,
                 acts: vec![
                     harness::Act::Continue,
@@ -97,7 +97,7 @@ impl Driver {
                 ],
                 touches: false,
             },
-            hooks: hooks::table(protocol),
+            hooks: crate::turn::hooks::table(protocol),
         }
     }
 }
@@ -142,10 +142,13 @@ impl Program for Driver {
             method::SESSIONS_LOCATE => result(store.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(store.read(steery_sdk::params(params)?)?),
             method::HOOK_READ => result(hooks::read(store, steery_sdk::params(params)?)?),
-            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(crate::turn::hooks::answer(
+                "Kilo",
+                steery_sdk::params(params)?,
+            )?),
             method::SESSIONS_FOLD => Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
-                "Kilo's driver has no plugin door",
+                "Kilo's plugin sends no entries: the driver reads kilo.db",
             )),
             method::HELD => result(drive::held(store, &steery_sdk::params(params)?)),
             method::IDLE => result(drive::idle(store, &steery_sdk::params(params)?)),
@@ -160,8 +163,14 @@ impl Program for Driver {
                 &self.listed.lock().unwrap_or_else(|e| e.into_inner()),
                 steery_sdk::params(params)?,
             )?),
-            method::TURN_READ => result(drive::turn_line(steery_sdk::params(params)?)),
-            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::TURN_READ => result(crate::turn::drive::turn_line(
+                "Kilo",
+                steery_sdk::params(params)?,
+            )),
+            method::STOP => result(crate::turn::drive::stop(
+                "Kilo",
+                &steery_sdk::params(params)?,
+            )?),
             method::RECEIPT_MARK => result(drive::mark(store, &steery_sdk::params(params)?)?),
             method::RECEIPT_FIND => result(drive::find(store, &steery_sdk::params(params)?)?),
             method::TERMINAL => result(drive::terminal(store, &steery_sdk::params(params)?)?),
