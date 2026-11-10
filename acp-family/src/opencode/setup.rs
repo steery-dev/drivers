@@ -1,7 +1,8 @@
 //! `setup/plan`: what sets OpenCode 2 up for Steery, each an entry the runtime writes and
-//! records: Steery's MCP server in the global `opencode.json`, and Steery's skill in the
-//! global `skills` folder. OpenCode's agents allow every tool unless a person denies one,
-//! so Steery's tools need no approval entry.
+//! records: Steery's MCP server in the global `opencode.json`, Steery's skill in the global
+//! `skills` folder, and Steery's hook command line, in a file of its own that the turns this
+//! driver starts read. OpenCode's agents allow every tool unless a person denies one, so
+//! Steery's tools need no approval entry, and OpenCode runs no hook command itself.
 
 use std::path::Path;
 
@@ -13,6 +14,12 @@ use super::place::{self, Place};
 
 /// Steery's MCP server, as the entry names it.
 const SERVER: &str = "steery";
+
+/// Steery's hook command line, which a turn runs at a permission OpenCode asks for.
+/// OpenCode reads nothing under its config folder's `steery`.
+pub(crate) fn hook_file(config: &Path) -> std::path::PathBuf {
+    config.join(SERVER).join("hook")
+}
 
 /// The plan for this machine. Whether the release found is one Steery speaks to is the
 /// runtime's to say, from `initialize`'s minimum.
@@ -87,6 +94,13 @@ pub(crate) async fn plan(place: &Place, setup: Setup) -> Planned {
             at: None,
             value: json!(setup.skill),
             carries: vec![Part::Skill],
+        },
+        Entry {
+            path: hook_file(&place.config),
+            format: Format::Text,
+            at: None,
+            value: json!(setup.hook),
+            carries: vec![Part::Hooks],
         },
     ];
     Planned {
