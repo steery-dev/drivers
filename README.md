@@ -550,6 +550,11 @@ again has no sign-in that waits. Thus a step at that time is `not-found`.
   names `CURSOR_VERSION` in `env`, and no other Cursor variable. For either sign, `hook/read`
   gives no moment and `hook/answer` prints nothing. Thus a Cursor turn makes no Claude Code
   session, and Steery never allows or blocks Cursor's tools.
+
+  Grok Build also runs those hooks, under its own session id, with a document in Claude Code's
+  own field names. Its hook process has `GROK_HOOK_EVENT`, which every hook entry also names
+  in `env`. With it, `hook/read` gives no moment and `hook/answer` prints nothing: a Grok turn
+  makes no Claude Code session, and Steery's Grok driver keeps Grok's own hooks.
 - **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
   `reader`, `terminal`).
   - `held`: Claude Code's registry, `sessions/<pid>.json`, names the live session in a

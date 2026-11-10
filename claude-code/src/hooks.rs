@@ -28,6 +28,11 @@ const LEAD: &str = "STEERY_LEAD";
 /// does neither. The only Cursor variable the driver names: the runtime passes no other,
 /// so the sign-in token Cursor also hands its hooks (`CURSOR_ACCESS_TOKEN`) never reaches it.
 const CURSOR: &str = "CURSOR_VERSION";
+/// Grok Build also runs the hooks of Claude Code's `settings.json` files as its own, under
+/// its own session id and with Claude Code's own field names. It sets this variable for
+/// every command hook it runs (`xai-grok-hooks` `runner/command.rs`, grok 1.0.77); Claude
+/// Code never does.
+const GROK: &str = "GROK_HOOK_EVENT";
 
 /// How long Claude Code gives a hook that only says a moment happened: it writes one
 /// note, and a harness held up behind Steery is the one thing it must never cost a person.
@@ -149,9 +154,10 @@ pub fn table() -> Vec<Hook> {
             via: Via::Command,
             says: event.says.to_vec(),
             waits: Some(event.waits),
-            // Every hook is told whether Cursor runs it; only a start is handed the file a
-            // lead is appended to.
-            env: std::iter::once(CURSOR)
+            // Every hook is told whether Cursor or Grok runs it; only a start is handed the
+            // file a lead is appended to.
+            env: [CURSOR, GROK]
+                .into_iter()
                 .chain((event.kind == HookKind::SessionStart).then_some(ENV_FILE))
                 .map(str::to_owned)
                 .collect(),
@@ -162,20 +168,21 @@ pub fn table() -> Vec<Hook> {
 }
 
 /// The moment a hook's document says, or none for an event Steery is not hooked on, a
-/// document that names no conversation, or a hook Cursor runs. `store` holds Claude Code's
-/// conversations.
+/// document that names no conversation, or a hook another harness runs. `store` holds
+/// Claude Code's conversations.
 pub fn read(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
     let document = parse(&read.document)?;
     Ok(HookMoment {
-        moment: (!cursors(&document, &read.env))
+        moment: (!foreign(&document, &read.env))
             .then(|| moment(store, &read.event, &document))
             .flatten(),
     })
 }
 
-/// Cursor runs this hook, not Claude Code: its conversation is none of Claude Code's.
-fn cursors(document: &Value, env: &BTreeMap<String, String>) -> bool {
-    document.get("cursor_version").is_some() || env.contains_key(CURSOR)
+/// Cursor or Grok Build runs this hook, not Claude Code: its conversation is none of
+/// Claude Code's.
+fn foreign(document: &Value, env: &BTreeMap<String, String>) -> bool {
+    document.get("cursor_version").is_some() || env.contains_key(CURSOR) || env.contains_key(GROK)
 }
 
 fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
@@ -352,9 +359,9 @@ fn suggestion(update: &Value) -> Suggestion {
 /// What Steery decided, printed as Claude Code parses it on this event: a paragraph as
 /// `additionalContext`, or at a `Stop` as the reason the turn goes on; a decision as
 /// `PreToolUse`'s `permissionDecision` or `PermissionRequest`'s `decision`; and the lead,
-/// appended to `CLAUDE_ENV_FILE` where Claude Code named one. A hook Cursor runs is
-/// answered nothing. Always exit 0: a hook that fails is one Claude Code reports to its
-/// person.
+/// appended to `CLAUDE_ENV_FILE` where Claude Code named one. A hook that Cursor or Grok
+/// Build runs is answered nothing. Always exit 0: a hook that fails is one Claude Code
+/// reports to its person.
 pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     let HookAnswer {
         event: name,
@@ -369,7 +376,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     let event = event(&name)
         .ok_or_else(|| Error::invalid(format!("Steery has no hook on Claude Code's {name}")))?;
     let document = parse(&document)?;
-    if cursors(&document, &env) {
+    if foreign(&document, &env) {
         return Ok(HookAnswered {
             stdout: String::new(),
             exit_code: 0,

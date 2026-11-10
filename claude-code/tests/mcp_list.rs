@@ -194,6 +194,22 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
     let mut bare_call = cursor_call.clone();
     bare_call.as_object_mut().unwrap().remove("cursor_version");
     let cursor_env = json!({"CURSOR_VERSION": "2026.07.01-41b2de7", "CURSOR_ACCESS_TOKEN": "SECRET"});
+    // Grok Build 1.0.77 hands a hook Claude Code's own field names: only its environment
+    // tells it apart.
+    let grok_call = json!({
+        "session_id": "01a1c56b-5ea1-7c72-89f2-ebe06b634618",
+        "sessionId": "01a1c56b-5ea1-7c72-89f2-ebe06b634618",
+        "cwd": trusted,
+        "workspaceRoot": trusted,
+        "hook_event_name": "PreToolUse",
+        "hookEventName": "pre_tool_use",
+        "permission_mode": "bypassPermissions",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "tool_use_id": "call-19634a0c-cbd5-4ed9-bfe1-da2f776c3269-0",
+        "transcript_path": home.join(".grok/sessions/%2Fwork/01a1c56b-5ea1-7c72-89f2-ebe06b634618/updates.jsonl"),
+    });
+    let grok_env = json!({"GROK_HOOK_EVENT": "pre_tool_use"});
 
     let read = |event: &str, document: &Value, env: &Value| {
         json!({"event": event, "document": document.to_string(), "env": env})
@@ -204,6 +220,7 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
         ("SessionStart", &cursor_start, json!({})),
         ("PreToolUse", &cursor_call, json!({})),
         ("PreToolUse", &bare_call, cursor_env.clone()),
+        ("PreToolUse", &grok_call, grok_env.clone()),
     ] {
         let read = ask(&driver, method::HOOK_READ, read(event, document, &env)).await;
         assert_eq!(read, json!({}), "{event}");
@@ -220,6 +237,7 @@ async fn claude_code_lists_the_servers_a_conversation_loads_and_no_secret() {
     for (event, document, env, said) in [
         ("PreToolUse", &cursor_call, json!({}), deny()),
         ("PreToolUse", &bare_call, cursor_env.clone(), deny()),
+        ("PreToolUse", &grok_call, grok_env.clone(), deny()),
         (
             "SessionStart",
             &cursor_start,
