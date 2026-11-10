@@ -6,6 +6,7 @@
 
 mod grok;
 mod harness;
+mod opencode;
 
 pub use harness::Harness;
 
@@ -13,5 +14,6 @@ pub use harness::Harness;
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+        Harness::OpenCode => steery_sdk::serve(|_notifier| opencode::Driver::default()).await,
     }
 }
