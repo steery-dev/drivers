@@ -95,6 +95,31 @@ impl Store {
         .ok_or_else(|| not_found(id))
     }
 
+    /// The tool and input of the call `call` of a conversation, as its `tool` part keeps
+    /// them; none where Kilo keeps no such part.
+    pub fn tool(&self, id: &str, call: &str) -> Result<Option<(String, Value)>, Error> {
+        let Some(db) = self.open()? else {
+            return Ok(None);
+        };
+        let data = db
+            .query_row(
+                "select data from part where session_id = ?1 \
+                 and json_extract(data, '$.type') = 'tool' \
+                 and json_extract(data, '$.callID') = ?2 limit 1",
+                params![id, call],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| self.refused(error))?;
+        Ok(data
+            .and_then(|data| serde_json::from_str::<Value>(&data).ok())
+            .and_then(|part| {
+                let tool = part.get("tool")?.as_str()?.to_owned();
+                let input = part.pointer("/state/input").cloned().unwrap_or(Value::Null);
+                Some((tool, input))
+            }))
+    }
+
     /// The id of a conversation's newest message, `""` where it has none. Kilo's message
     /// ids grow with time, so every message written after it sorts after it.
     pub fn newest(&self, id: &str) -> Result<String, Error> {

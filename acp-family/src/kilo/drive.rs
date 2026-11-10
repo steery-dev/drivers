@@ -426,6 +426,11 @@ pub fn start(
         model: start.model,
         thinking: start.thinking,
         inbox: Some(start.folder.join("inbox")),
+        // Without setup's hook, a permission Kilo asks for is rejected.
+        hook: std::fs::read_to_string(super::setup::hook_file(store.config()))
+            .ok()
+            .map(|hook| hook.trim().to_owned())
+            .filter(|hook| !hook.is_empty()),
     };
     let mut argv = vec![program.to_string_lossy().into_owned(), "turn".to_owned()];
     argv.extend(asked.args());

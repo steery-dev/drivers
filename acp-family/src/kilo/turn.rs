@@ -8,11 +8,15 @@
 //!
 //! While the turn runs, more words told on its inbox (a unix socket in the turn's folder) go
 //! in as one more `session/prompt`, which Kilo queues behind the one running; the caller
-//! reads back `heard`. A permission Kilo asks for is rejected, as Kilo's own `kilo run`
+//! reads back `heard`. A permission Kilo asks for goes to Steery's hook (`--hook`, setup's
+//! command line), run as `<hook> session/request_permission` with the request's `params` on
+//! standard input: its standard output is Kilo's answer ([`super::hooks`]). Without a hook,
+//! or where the hook fails or says nothing, the call is rejected, as Kilo's own `kilo run`
 //! rejects one with no person at it. SIGTERM or SIGINT cancels the turn (`session/cancel`),
-//! so Kilo ends its message as aborted instead of leaving it unfinished; a second signal
-//! ends the turn at once. A request Kilo refuses before the words go in is the one line
-//! `<refusal word>: <Kilo's line>` on standard error, and the turn fails.
+//! so Kilo ends its message as aborted instead of leaving it unfinished, and every
+//! permission still asked is answered cancelled; a second signal ends the turn at once. A
+//! request Kilo refuses before the words go in is the one line `<refusal word>: <Kilo's
+//! line>` on standard error, and the turn fails.
 
 use std::collections::HashSet;
 use std::os::unix::process::CommandExt as _;
@@ -28,6 +32,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinSet;
+
+use super::hooks::{ASKS_WAITS, EVENT};
 
 /// How long a caller at the inbox has to finish writing its words.
 const WORDS_WITHIN: Duration = Duration::from_secs(10);
@@ -47,6 +54,8 @@ pub struct Asked {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub inbox: Option<PathBuf>,
+    /// Steery's hook command line, which answers the permissions Kilo asks for.
+    pub hook: Option<String>,
 }
 
 impl Asked {
@@ -68,6 +77,10 @@ impl Asked {
             args.push("--inbox".into());
             args.push(inbox.to_string_lossy().into_owned());
         }
+        if let Some(hook) = &self.hook {
+            args.push("--hook".into());
+            args.push(hook.clone());
+        }
         args
     }
 
@@ -80,6 +93,7 @@ impl Asked {
                 "--model" => asked.model = Some(value("--model")?),
                 "--thinking" => asked.thinking = Some(value("--thinking")?),
                 "--inbox" => asked.inbox = Some(PathBuf::from(value("--inbox")?)),
+                "--hook" => asked.hook = Some(value("--hook")?),
                 _ if asked.act.is_empty() => asked.act = arg,
                 _ if asked.id.is_none() => asked.id = Some(arg),
                 other => return Err(format!("unexpected argument {other}")),
@@ -94,7 +108,7 @@ impl Asked {
         if asked.kilo.as_os_str().is_empty() || !fits {
             return Err(
                 "usage: turn --kilo <binary> <new | continue <id> | fork <id>> \
-                        [--model m] [--thinking t] [--inbox path]"
+                        [--model m] [--thinking t] [--inbox path] [--hook command]"
                     .into(),
             );
         }
@@ -171,7 +185,27 @@ pub async fn run(asked: Asked) -> Result<(), String> {
             .as_ref()
             .and_then(|path| UnixListener::bind(path).ok());
         let mut cancelled: Option<tokio::time::Instant> = None;
+        // The permissions that wait on the hook, by their request ids.
+        let mut asking = JoinSet::new();
+        let mut waiting: Vec<Value> = Vec::new();
         while !prompts.is_empty() {
+            for request in std::mem::take(&mut kilo.asks) {
+                let Some(id) = request.get("id").cloned() else {
+                    continue;
+                };
+                let params = request.get("params").cloned().unwrap_or(Value::Null);
+                match (&asked.hook, cancelled) {
+                    (Some(hook), None) => {
+                        waiting.push(id.clone());
+                        asking.spawn(ask(hook.clone(), id, params));
+                    }
+                    (None, None) => {
+                        let rejection = json!({"outcome": rejected(params.get("options"))});
+                        kilo.answer(&id, rejection).await?;
+                    }
+                    (_, Some(_)) => kilo.answer(&id, CANCELLED.clone()).await?,
+                }
+            }
             let deadline = async {
                 match cancelled {
                     Some(at) => tokio::time::sleep_until(at).await,
@@ -180,9 +214,13 @@ pub async fn run(asked: Asked) -> Result<(), String> {
             };
             tokio::select! {
                 message = kilo.next() => {
-                    if let Some(id) = message?.get("id").and_then(Value::as_u64) {
+                    if let Some(id) = message?.as_ref().and_then(|m| m.get("id")).and_then(Value::as_u64) {
                         prompts.remove(&id);
                     }
+                }
+                Some(Ok((id, answer))) = asking.join_next() => {
+                    waiting.retain(|waits| *waits != id);
+                    kilo.answer(&id, answer).await?;
                 }
                 Ok((stream, _)) = accept(heard.as_ref()) => {
                     if let Some(id) = hear(&mut kilo, &session, stream).await {
@@ -191,11 +229,17 @@ pub async fn run(asked: Asked) -> Result<(), String> {
                 }
                 _ = terms.recv() => match cancelled {
                     Some(_) => break,
-                    None => cancelled = Some(kilo.cancel(&session).await?),
+                    None => {
+                        cancelled = Some(kilo.cancel(&session).await?);
+                        abandon(&mut kilo, &mut asking, &mut waiting).await?;
+                    }
                 },
                 _ = interrupts.recv() => match cancelled {
                     Some(_) => break,
-                    None => cancelled = Some(kilo.cancel(&session).await?),
+                    None => {
+                        cancelled = Some(kilo.cancel(&session).await?);
+                        abandon(&mut kilo, &mut asking, &mut waiting).await?;
+                    }
                 },
                 () = deadline => break,
             }
@@ -211,6 +255,57 @@ pub async fn run(asked: Asked) -> Result<(), String> {
     }
     kilo.close().await;
     outcome
+}
+
+/// The answer to a permission asked in a turn that is cancelled.
+static CANCELLED: std::sync::LazyLock<Value> =
+    std::sync::LazyLock::new(|| json!({"outcome": {"outcome": "cancelled"}}));
+
+/// End the hooks still running, and answer their permissions cancelled, as ACP asks of a
+/// client once it cancels.
+async fn abandon(
+    kilo: &mut Acp,
+    asking: &mut JoinSet<(Value, Value)>,
+    waiting: &mut Vec<Value>,
+) -> Result<(), String> {
+    asking.abort_all();
+    for id in waiting.drain(..) {
+        kilo.answer(&id, CANCELLED.clone()).await?;
+    }
+    Ok(())
+}
+
+/// Run Steery's hook at a permission Kilo asks for, the request's `params` on its standard
+/// input. Kilo's answer is the hook's standard output where it is an answer with an
+/// `outcome`, else a rejection: a hook that fails, says nothing, or runs past
+/// [`ASKS_WAITS`] lets no call run.
+async fn ask(hook: String, id: Value, params: Value) -> (Value, Value) {
+    let answered = async {
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("{hook} {EVENT}"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .ok()?;
+        let mut stdin = child.stdin.take()?;
+        stdin.write_all(params.to_string().as_bytes()).await.ok()?;
+        drop(stdin);
+        let waits = Duration::from_secs(ASKS_WAITS.into());
+        let output = tokio::time::timeout(waits, child.wait_with_output())
+            .await
+            .ok()?
+            .ok()?;
+        let answer: Value = serde_json::from_slice(&output.stdout).ok()?;
+        let outcome = answer.get("outcome").is_some_and(Value::is_object);
+        (output.status.success() && outcome).then_some(answer)
+    };
+    let answer = answered
+        .await
+        .unwrap_or_else(|| json!({"outcome": rejected(params.get("options"))}));
+    (id, answer)
 }
 
 async fn accept(
@@ -248,6 +343,8 @@ struct Acp {
     stdin: Option<ChildStdin>,
     lines: Lines<BufReader<ChildStdout>>,
     next: u64,
+    /// Kilo's permission requests that the turn has yet to answer, whole.
+    asks: Vec<Value>,
 }
 
 impl Acp {
@@ -275,6 +372,7 @@ impl Acp {
             stdin,
             lines: BufReader::new(stdout).lines(),
             next: 0,
+            asks: Vec::new(),
         })
     }
 
@@ -307,11 +405,11 @@ impl Acp {
         Ok(id)
     }
 
-    /// The next message from Kilo, written to standard output first. A request of Kilo's
-    /// is answered here, and the answer is not written out, so every answer on standard
-    /// output is Kilo's: a permission is rejected, anything else is a method this client
-    /// does not have.
-    async fn next(&mut self) -> Result<Value, String> {
+    /// The next message from Kilo, written to standard output first; none where it is a
+    /// permission Kilo asks for, which then waits in `asks` for the turn to answer. Any
+    /// other request of Kilo's is answered here as a method this client does not have. No
+    /// answer of this client's is written out, so every answer on standard output is Kilo's.
+    async fn next(&mut self) -> Result<Option<Value>, String> {
         loop {
             let line = self
                 .lines
@@ -330,16 +428,16 @@ impl Acp {
                 message.get("method").and_then(Value::as_str),
                 message.get("id"),
             ) {
-                let reply = match method {
-                    "session/request_permission" => json!({"jsonrpc": "2.0", "id": id,
-                        "result": {"outcome": rejected(message.pointer("/params/options"))}}),
-                    _ => json!({"jsonrpc": "2.0", "id": id,
-                        "error": {"code": -32601, "message": format!("no {method} here")}}),
-                };
+                if method == "session/request_permission" {
+                    self.asks.push(message);
+                    return Ok(None);
+                }
+                let reply = json!({"jsonrpc": "2.0", "id": id,
+                    "error": {"code": -32601, "message": format!("no {method} here")}});
                 self.write(&reply).await?;
                 continue;
             }
-            return Ok(message);
+            return Ok(Some(message));
         }
     }
 
@@ -348,7 +446,9 @@ impl Acp {
     async fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.request(method, params).await?;
         loop {
-            let message = self.next().await?;
+            let Some(message) = self.next().await? else {
+                continue;
+            };
             if message.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
@@ -376,6 +476,13 @@ impl Acp {
             "params": {"sessionId": session}}))
             .await?;
         Ok(tokio::time::Instant::now() + CANCELLED_WITHIN)
+    }
+
+    /// Answer one of Kilo's requests.
+    async fn answer(&mut self, id: &Value, result: Value) -> Result<(), String> {
+        self.write(&json!({"jsonrpc": "2.0", "id": id, "result": result}))
+            .await
+            .map(drop)
     }
 
     /// Close Kilo's input, which ends it, and end whatever of it still runs after
@@ -453,6 +560,7 @@ mod tests {
             model: Some("kilo/anthropic/claude-opus-4.5".into()),
             thinking: Some("high".into()),
             inbox: Some("/tmp/t/inbox".into()),
+            hook: Some("'/opt/steery/bin/steery' hook kilo".into()),
         };
         assert_eq!(Asked::parse(asked.args().into_iter()), Ok(asked));
         let new = |args: &[&str]| Asked::parse(args.iter().map(|arg| (*arg).to_owned()));

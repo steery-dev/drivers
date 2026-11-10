@@ -1,11 +1,13 @@
 //! Steery's driver for Kilo at drive: it reads Kilo's conversations from its SQLite
 //! database, plans the entries that set Kilo up for Steery, lists the MCP servers Kilo
-//! resolves, and starts Kilo's turns through Kilo's own ACP server.
+//! resolves, starts Kilo's turns through Kilo's own ACP server, and reads the permissions
+//! those turns ask for.
 
 mod calls;
 mod config;
 mod drive;
 mod events;
+mod hooks;
 mod setup;
 mod store;
 pub(crate) mod turn;
@@ -42,7 +44,7 @@ impl Driver {
             .ok_or_else(|| Error::invalid("`initialize` must come first"))
     }
 
-    fn info() -> wire::HarnessInfo {
+    fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
             levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
@@ -95,7 +97,7 @@ impl Driver {
                 ],
                 touches: false,
             },
-            hooks: Vec::new(),
+            hooks: hooks::table(protocol),
         }
     }
 }
@@ -113,7 +115,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol: self.place()?.protocol,
             program: Harness::Kilo.program()?,
-            harness: Some(Box::new(Self::info())),
+            harness: Some(Box::new(Self::info(protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -139,6 +141,8 @@ impl Program for Driver {
             }
             method::SESSIONS_LOCATE => result(store.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(store.read(steery_sdk::params(params)?)?),
+            method::HOOK_READ => result(hooks::read(store, steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::SESSIONS_FOLD => Err(Error::refused(
                 refusal::SELECTION_UNSUPPORTED,
                 "Kilo's driver has no plugin door",
