@@ -38,6 +38,14 @@ pub(crate) fn root(home: &Path) -> PathBuf {
         .map_or_else(|| home.join(".grok"), PathBuf::from)
 }
 
+/// The `grok` that Steery runs: the one on `PATH`, else the one its installer links in
+/// `<root>/bin`, a folder that is not yet on `PATH` right after an install.
+#[allow(dead_code)] // For setup, models, MCP and sign-in, which land next.
+pub(crate) fn binary(root: &Path) -> Option<PathBuf> {
+    steery_driver_common::program::on_path("grok")
+        .or_else(|| steery_driver_common::program::executable(root.join("bin").join("grok")))
+}
+
 impl Driver {
     fn place(&self) -> Result<&Place, Error> {
         self.place
