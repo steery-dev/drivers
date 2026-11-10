@@ -12,11 +12,13 @@
 //! command line), run as `<hook> session/request_permission` with the request's `params` on
 //! standard input: its standard output is Kilo's answer ([`super::hooks`]). Without a hook,
 //! or where the hook fails or says nothing, the call is rejected, as Kilo's own `kilo run`
-//! rejects one with no person at it. SIGTERM or SIGINT cancels the turn (`session/cancel`),
-//! so Kilo ends its message as aborted instead of leaving it unfinished, and every
-//! permission still asked is answered cancelled; a second signal ends the turn at once. A
-//! request Kilo refuses before the words go in is the one line `<refusal word>: <Kilo's
-//! line>` on standard error, and the turn fails.
+//! rejects one with no person at it. Once Kilo runs nothing more of the session, the turn
+//! runs `<hook> session/prompt`: words on its standard output go in as one more
+//! `session/prompt`, and the turn goes on. SIGTERM or SIGINT cancels the turn
+//! (`session/cancel`), so Kilo ends its message as aborted instead of leaving it unfinished,
+//! and every permission still asked is answered cancelled; a second signal ends the turn at
+//! once. A request Kilo refuses before the words go in is the one line `<refusal word>:
+//! <Kilo's line>` on standard error, and the turn fails.
 
 use std::collections::HashSet;
 use std::os::unix::process::CommandExt as _;
@@ -34,7 +36,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
 
-use super::hooks::{ASKS_WAITS, EVENT};
+use super::hooks::{ASKS_WAITS, ENDED, ENDED_WAITS, PERMISSION};
 use super::store::{Store, Turn};
 
 /// How long a caller at the inbox has to finish writing its words.
@@ -202,6 +204,11 @@ pub async fn run(asked: Asked) -> Result<(), String> {
         // when Kilo runs none of the session.
         let store = std::env::var_os("HOME").map(|home| Store::new(std::path::Path::new(&home)));
         let mut unmarked: Option<tokio::time::Instant> = None;
+        // How Kilo's answer to the newest prompt says the turn ended, and whether Steery's
+        // hook already made the turn go on.
+        let mut stopped: Option<String> = None;
+        let mut continued = false;
+        loop {
         while !prompts.is_empty()
             || store
                 .as_ref()
@@ -232,8 +239,12 @@ pub async fn run(asked: Asked) -> Result<(), String> {
             };
             tokio::select! {
                 message = kilo.next() => {
-                    if let Some(id) = message?.as_ref().and_then(|m| m.get("id")).and_then(Value::as_u64) {
-                        prompts.remove(&id);
+                    if let Some(message) = message?
+                        && let Some(id) = message.get("id").and_then(Value::as_u64)
+                        && prompts.remove(&id)
+                    {
+                        let reason = message.pointer("/result/stopReason").and_then(Value::as_str);
+                        stopped = Some(reason.unwrap_or("error").to_owned());
                     }
                 }
                 Some(Ok((id, answer))) = asking.join_next() => {
@@ -262,6 +273,17 @@ pub async fn run(asked: Asked) -> Result<(), String> {
                 () = deadline => break,
                 () = tokio::time::sleep(LOOKS_EVERY), if prompts.is_empty() => {}
             }
+        }
+        // Kilo runs nothing more of the session: Steery's hook may give it words to go on.
+        let (Some(hook), None, Some(reason)) = (&asked.hook, cancelled, stopped.take()) else {
+            break;
+        };
+        let Some(words) = go_on(hook, &session, &reason, continued).await else {
+            break;
+        };
+        continued = true;
+        unmarked = None;
+        prompts.insert(kilo.prompt(&session, &words).await?);
         }
         // The inbox closes before Kilo does: words told from here on are told to a turn
         // that is ending.
@@ -299,32 +321,47 @@ async fn abandon(
 /// `outcome`, else a rejection: a hook that fails, says nothing, or runs past
 /// [`ASKS_WAITS`] lets no call run.
 async fn ask(hook: String, id: Value, params: Value) -> (Value, Value) {
-    let answered = async {
-        let mut child = tokio::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("{hook} {EVENT}"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
-        let mut stdin = child.stdin.take()?;
-        stdin.write_all(params.to_string().as_bytes()).await.ok()?;
-        drop(stdin);
-        let waits = Duration::from_secs(ASKS_WAITS.into());
-        let output = tokio::time::timeout(waits, child.wait_with_output())
-            .await
-            .ok()?
-            .ok()?;
-        let answer: Value = serde_json::from_slice(&output.stdout).ok()?;
-        let outcome = answer.get("outcome").is_some_and(Value::is_object);
-        (output.status.success() && outcome).then_some(answer)
-    };
-    let answer = answered
+    let waits = Duration::from_secs(ASKS_WAITS.into());
+    let answer = hooked(&hook, PERMISSION, &params, waits)
         .await
+        .and_then(|stdout| serde_json::from_slice::<Value>(&stdout).ok())
+        .filter(|answer| answer.get("outcome").is_some_and(Value::is_object))
         .unwrap_or_else(|| json!({"outcome": rejected(params.get("options"))}));
     (id, answer)
+}
+
+/// Run Steery's hook at the end of the turn; the words it gives the session to go on with.
+async fn go_on(hook: &str, session: &str, reason: &str, continued: bool) -> Option<String> {
+    let document = json!({"sessionId": session, "stopReason": reason, "continued": continued});
+    let stdout = hooked(hook, ENDED, &document, ENDED_WAITS).await?;
+    let words = String::from_utf8(stdout).ok()?;
+    let words = words.trim();
+    (!words.is_empty()).then(|| words.to_owned())
+}
+
+/// Run `<hook> <event>` with the document on its standard input; its standard output, where
+/// it ends well within `waits`.
+async fn hooked(hook: &str, event: &str, document: &Value, waits: Duration) -> Option<Vec<u8>> {
+    let mut child = tokio::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!("{hook} {event}"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let mut stdin = child.stdin.take()?;
+    stdin
+        .write_all(document.to_string().as_bytes())
+        .await
+        .ok()?;
+    drop(stdin);
+    let output = tokio::time::timeout(waits, child.wait_with_output())
+        .await
+        .ok()?
+        .ok()?;
+    output.status.success().then_some(output.stdout)
 }
 
 async fn accept(
