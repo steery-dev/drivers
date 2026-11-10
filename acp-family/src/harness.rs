@@ -5,6 +5,8 @@
 pub enum Harness {
     /// xAI's Grok Build, whose executable is `grok`.
     Grok,
+    /// Kilo, whose executable is `kilo`.
+    Kilo,
 }
 
 impl Harness {
@@ -12,6 +14,7 @@ impl Harness {
     pub fn id(self) -> &'static str {
         match self {
             Self::Grok => "grok",
+            Self::Kilo => "kilo",
         }
     }
 
@@ -19,6 +22,7 @@ impl Harness {
     pub fn label(self) -> &'static str {
         match self {
             Self::Grok => "Grok Build",
+            Self::Kilo => "Kilo",
         }
     }
 
@@ -26,6 +30,7 @@ impl Harness {
     pub fn short(self) -> &'static str {
         match self {
             Self::Grok => "Gk",
+            Self::Kilo => "Kl",
         }
     }
 
@@ -33,6 +38,7 @@ impl Harness {
     pub fn tint(self) -> &'static str {
         match self {
             Self::Grok => "#1d1d1f",
+            Self::Kilo => "#617a91",
         }
     }
 
