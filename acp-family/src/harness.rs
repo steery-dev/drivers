@@ -7,6 +7,8 @@ pub enum Harness {
     Grok,
     /// GitHub Copilot CLI, whose executable is `copilot`.
     Copilot,
+    /// OpenCode 2, whose executable is `opencode`.
+    OpenCode,
     /// Nous Research's Hermes Agent, whose executable is `hermes`.
     Hermes,
     /// Kilo, whose executable is `kilo`.
@@ -21,6 +23,7 @@ impl Harness {
         match self {
             Self::Grok => "grok",
             Self::Copilot => "copilot",
+            Self::OpenCode => "opencode",
             Self::Hermes => "hermes",
             Self::Kilo => "kilo",
             Self::Cursor => "cursor",
@@ -32,6 +35,7 @@ impl Harness {
         match self {
             Self::Grok => "Grok Build",
             Self::Copilot => "Copilot",
+            Self::OpenCode => "OpenCode",
             Self::Hermes => "Hermes Agent",
             Self::Kilo => "Kilo",
             Self::Cursor => "Cursor",
@@ -43,6 +47,7 @@ impl Harness {
         match self {
             Self::Grok => "Gk",
             Self::Copilot => "Co",
+            Self::OpenCode => "Oc",
             Self::Hermes => "He",
             Self::Kilo => "Kl",
             Self::Cursor => "Cu",
@@ -54,6 +59,7 @@ impl Harness {
         match self {
             Self::Grok => "#1d1d1f",
             Self::Copilot => "#8534f3",
+            Self::OpenCode => "#211e1e",
             Self::Hermes => "#4b2fd0",
             Self::Kilo => "#617a91",
             Self::Cursor => "#14120b",

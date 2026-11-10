@@ -1,8 +1,9 @@
 //! Steery's driver for Cursor's agent CLI (`cursor-agent`) at observe: it reads Cursor's
-//! chats from their SQLite stores, plans the entries that set Cursor up for Steery, and
-//! lists the MCP servers that Cursor loads.
+//! chats from their SQLite stores, plans the entries that set Cursor up for Steery, reads
+//! its hooks' moments, and lists the MCP servers that Cursor loads.
 
 mod calls;
+mod hooks;
 mod sessions;
 mod store;
 
@@ -68,7 +69,7 @@ impl Driver {
             identity: wire::Identity {
                 executables: vec![EXECUTABLE.into(), "agent".into()],
                 package: Some("cursor-agent".into()),
-                session_variable: None,
+                session_variable: Some("CURSOR_CONVERSATION_ID".into()),
                 call_meta: None,
             },
             setup: wire::SetupFacts {
@@ -91,7 +92,7 @@ impl Driver {
                 acts: Vec::<harness::Act>::new(),
                 touches: false,
             },
-            hooks: Vec::new(),
+            hooks: hooks::table(),
         }
     }
 
@@ -133,6 +134,8 @@ impl Program for Driver {
                 let place = self.place()?;
                 result(plan(&place.home, &place.store, steery_sdk::params(params)?).await)
             }
+            method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::SESSIONS_LIST => {
                 let asked: harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
@@ -248,7 +251,7 @@ async fn plan(home: &Path, store: &Result<sessions::Store, String>, setup: Setup
             root,
         }),
         refused: None,
-        entries: vec![
+        entries: [
             Entry {
                 path: own.join("mcp.json"),
                 format: Format::Json,
@@ -263,11 +266,35 @@ async fn plan(home: &Path, store: &Result<sessions::Store, String>, setup: Setup
                 value: json!(setup.skill),
                 carries: vec![Part::Skill],
             },
-        ],
+        ]
+        .into_iter()
+        .chain(hook_entries(&own, &setup.hook))
+        .collect(),
         notes,
         install: None,
         needs: Vec::new(),
     }
+}
+
+/// Steery's hooks in `~/.cursor/hooks.json`, beside its person's own, whatever moves the
+/// chats. Cursor refuses a file with no number `version`, and knows only `1`.
+fn hook_entries(own: &Path, hook: &str) -> Vec<Entry> {
+    let path = own.join("hooks.json");
+    let version = Entry {
+        path: path.clone(),
+        format: Format::Json,
+        at: Some("/version".into()),
+        value: json!(1),
+        carries: vec![Part::Hooks],
+    };
+    let hooks = hooks::EVENTS.iter().map(|event| Entry {
+        path: path.clone(),
+        format: Format::Json,
+        at: Some(format!("/hooks/{}/-", event.name)),
+        value: json!({"command": format!("{hook} {}", event.name), "timeout": event.waits}),
+        carries: vec![Part::Hooks],
+    });
+    std::iter::once(version).chain(hooks).collect()
 }
 
 /// The servers a chat loads: the person's in `~/.cursor/mcp.json`, and with `cwd` the

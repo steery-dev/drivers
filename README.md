@@ -31,6 +31,7 @@ short name, its tint and its mark.
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
+| `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive |
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive |
@@ -73,6 +74,7 @@ agrees (PROTOCOL.md §4.1).
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
 | `copilot` | `~/.local/bin` | `bash -c "curl -fsSL https://gh.io/copilot-install \| bash"` |
+| `opencode` | `~/.opencode/bin` | `bash -c "curl -fsSL https://opencode.ai/v2/install \| bash -s -- --no-modify-path"`. OpenCode 2 only: an `opencode` that names a 1.x release does not count as found, and a note names it. |
 | `cursor` | `~/.local/bin` | `sh -c "curl -fsS https://cursor.com/install \| bash"` |
 | `amp` | `AMP_HOME/bin`, else `~/.amp/bin` (and its link `~/.local/bin/amp`) | `bash -c "curl -fsSL https://ampcode.com/install.sh \| bash"` |
 
@@ -106,6 +108,7 @@ signed in, as the harness itself says.
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
 | `copilot` | ``run `copilot login` in a terminal`` | its own server's (`copilot --headless --stdio`) `auth.getStatus` `isAuthenticated`, bound 10 s. It counts a `gh` sign-in and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`. |
+| `opencode` | ``run `opencode auth login` in a terminal`` | not told. OpenCode's free models need no account, so an empty model list never means signed out. |
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
 | `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
 
@@ -292,6 +295,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 | `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
 | `copilot` | `mcp-config.json` `mcpServers`, installed plugins' servers, built-in servers (`copilot mcp list --json`). `disabledMcpServers` in `settings.json` off. | not read: a folder's `.mcp.json`, `.github/mcp.json`, `.vscode/mcp.json` | not with `cwd` |
+| `opencode` | the system folder's, then the config folder's `opencode.json`, `opencode.jsonc` (comments and trailing commas read), then the file `OPENCODE_CONFIG` names. `mcp.servers` (OpenCode 2) over `mcp.<name>` (OpenCode 1's shape). `enabled: false` off. | each folder's `opencode.json`, `opencode.jsonc`, from `/` down to it; then each folder's `.opencode/` ones, in the same order | not with managed preferences, `OPENCODE_CONFIG_CONTENT`, a `plugin` or `plugins` list, or a module in a config folder's `plugin/` or `plugins/` |
 | `cursor` | `~/.cursor/mcp.json`, whatever `CURSOR_CONFIG_DIR` says | `.cursor/mcp.json`, listed before its person approves it in Cursor | never: plugins, team servers |
 | `amp` | `amp mcp list --json` run at `/` | the same, run in the folder (it adds `.amp/settings.json`) | never: skills, plugins and toolboxes bring servers |
 
@@ -564,7 +568,8 @@ again has no sign-in that waits. Thus a step at that time is `not-found`.
   document has `cursor_version`, and the hook's process has `CURSOR_VERSION`. Every hook entry
   names `CURSOR_VERSION` in `env`, and no other Cursor variable. For either sign, `hook/read`
   gives no moment and `hook/answer` prints nothing. Thus a Cursor turn makes no Claude Code
-  session, and Steery never allows or blocks Cursor's tools.
+  session, and the Claude Code driver never allows or blocks Cursor's tools. The `cursor`
+  driver reads Cursor's turns from its own hooks, in `~/.cursor/hooks.json`.
 - **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
   `reader`, `terminal`).
   - `held`: Claude Code's registry, `sessions/<pid>.json`, names the live session in a
