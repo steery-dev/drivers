@@ -122,11 +122,15 @@ impl crate::turn::Host for Turns {
 }
 
 /// `held`: the process Cline's mark names while it runs a turn of the conversation or
-/// queued words wait. Cline marks every turn it runs, whatever runs it, so with no live mark
-/// nobody runs one.
+/// queued words wait. Cline marks every turn it runs, whatever runs it, so with no live mark,
+/// or no such conversation, nobody runs one.
 pub fn held(place: &Place, held: &Held) -> Result<HeldBy, Error> {
     let db = place.db();
-    let row = Store::new(&db).found(&held.external_id)?;
+    let Some(row) = Store::new(&db).row(&held.external_id)? else {
+        return Ok(HeldBy::Holder(Holder::Nobody {
+            proof: "Cline has no such conversation".into(),
+        }));
+    };
     Ok(HeldBy::Holder(match row.live() {
         Some((pid, process_start)) => Holder::Person {
             door: None,

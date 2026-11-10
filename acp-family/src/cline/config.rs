@@ -58,7 +58,11 @@ mod tests {
     #[test]
     fn disabled_servers_are_not_loaded() {
         let home = std::env::temp_dir().join(format!("steery-cline-mcp-{}", std::process::id()));
-        let place = Place::new(&home);
+        let dir = home.join(".cline");
+        let place = Place {
+            mcp: dir.join("data/settings/cline_mcp_settings.json"),
+            dir,
+        };
         std::fs::create_dir_all(place.settings()).unwrap();
         std::fs::write(
             place.mcp(),

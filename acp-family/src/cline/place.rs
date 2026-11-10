@@ -7,15 +7,21 @@ use std::path::{Path, PathBuf};
 pub(crate) struct Place {
     /// Cline's own folder: `CLINE_DIR`, else `~/.cline`.
     pub dir: PathBuf,
+    /// The file of the MCP servers Cline loads: `CLINE_MCP_SETTINGS_PATH`, else the settings
+    /// folder's `cline_mcp_settings.json`.
+    pub mcp: PathBuf,
 }
 
 impl Place {
     pub fn new(home: &Path) -> Self {
-        let dir = std::env::var_os("CLINE_DIR")
-            .filter(|dir| !dir.is_empty())
+        let set = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+        let dir = set("CLINE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".cline"));
-        Self { dir }
+        let mcp = set("CLINE_MCP_SETTINGS_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dir.join("data/settings/cline_mcp_settings.json"));
+        Self { dir, mcp }
     }
 
     /// The SQLite file whose `sessions` table lists every conversation.
@@ -28,13 +34,9 @@ impl Place {
         self.dir.join("data/settings")
     }
 
-    /// The file of the MCP servers Cline loads: `CLINE_MCP_SETTINGS_PATH`, else the settings
-    /// folder's `cline_mcp_settings.json`.
+    /// The file of the MCP servers Cline loads.
     pub fn mcp(&self) -> PathBuf {
-        std::env::var_os("CLINE_MCP_SETTINGS_PATH")
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.settings().join("cline_mcp_settings.json"))
+        self.mcp.clone()
     }
 
     /// The file of Cline's providers and their keys, which say whether it is signed in.
