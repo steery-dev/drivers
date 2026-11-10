@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_driver_common::lines::{self, BATCH, Line, RECORD};
 use steery_sdk::wire::harness::{
-    Call, Clip, Compactor, Count, Event, Events, Execution, Failure, FailureKind, Group,
-    TurnState, Voice,
+    Call, Clip, Compactor, Count, Event, Events, Execution, Failure, FailureKind, Group, TurnState,
+    Voice,
 };
 use steery_sdk::{Error, refusal};
 
@@ -41,7 +41,9 @@ impl Cursor {
         serde_json::from_str::<Self>(cursor)
             .ok()
             .filter(|cursor| cursor.v == 1)
-            .ok_or_else(|| Error::invalid(format!("this driver did not give the cursor `{cursor}`")))
+            .ok_or_else(|| {
+                Error::invalid(format!("this driver did not give the cursor `{cursor}`"))
+            })
     }
 
     fn said(&self) -> String {
@@ -109,7 +111,10 @@ pub fn read(
     parent: Option<&str>,
 ) -> Result<Events, Error> {
     let unreadable = |e: std::io::Error| {
-        Error::refused(refusal::REFUSED, format!("cannot read {}: {e}", path.display()))
+        Error::refused(
+            refusal::REFUSED,
+            format!("cannot read {}: {e}", path.display()),
+        )
     };
     let open = File::open(path).map_err(unreadable)?;
     let meta = open.metadata().map_err(unreadable)?;
@@ -124,7 +129,11 @@ pub fn read(
     let (start, state, tailed) = match (tail, cursor) {
         (Some(tail), _) => {
             let from = length.saturating_sub(tail.min(BATCH));
-            (lines::first_whole(&open, from, length).map_err(unreadable)?, State::default(), true)
+            (
+                lines::first_whole(&open, from, length).map_err(unreadable)?,
+                State::default(),
+                true,
+            )
         }
         (None, Some(cursor)) => {
             let cursor = Cursor::parse(cursor)?;
@@ -325,7 +334,10 @@ impl Fold<'_> {
                 let Some(target) = update["target_prompt_index"].as_u64() else {
                     return;
                 };
-                let turns = self.state.prompt.map_or(0, |prompt| (prompt + 1).saturating_sub(target));
+                let turns = self
+                    .state
+                    .prompt
+                    .map_or(0, |prompt| (prompt + 1).saturating_sub(target));
                 self.state.prompt = target.checked_sub(1);
                 if turns > 0 {
                     self.events.push(Event::Rollback {
@@ -404,7 +416,8 @@ impl Fold<'_> {
                 });
             }
             self.state.marked |= index.is_some();
-            self.state.prompt = index.or_else(|| self.state.prompt.map_or(Some(0), |p| Some(p + 1)));
+            self.state.prompt =
+                index.or_else(|| self.state.prompt.map_or(Some(0), |p| Some(p + 1)));
             self.state.open = true;
             self.state.failure = None;
             self.events.push(Event::TurnBegan {
@@ -589,7 +602,9 @@ fn clip(content: &Value) -> Option<Clip> {
                     path: path.into(),
                     name: text("name"),
                 },
-                None => Clip::Link { url: uri.to_owned() },
+                None => Clip::Link {
+                    url: uri.to_owned(),
+                },
             })
         }
         _ => None,
@@ -708,7 +723,12 @@ fn failure(update: &Value) -> Option<Failure> {
     };
     Some(Failure {
         kind,
-        line: line.unwrap_or_default().lines().next().unwrap_or_default().to_owned(),
+        line: line
+            .unwrap_or_default()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned(),
         service: true,
         http_status: None,
         code: None,
