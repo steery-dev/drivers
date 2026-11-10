@@ -450,7 +450,7 @@ impl Fold<'_> {
 
 /// A call by OpenCode's name for its tool. OpenCode names an MCP tool
 /// `<server>_<tool>`, each part with every character outside `[A-Za-z0-9_-]` made `_`.
-fn call(id: &str, name: &str, input: Value, response: &str, servers: &[String]) -> Call {
+pub(crate) fn call(id: &str, name: &str, input: Value, response: &str, servers: &[String]) -> Call {
     let served = servers.iter().find_map(|server| {
         let prefix = format!("{}_", normalized(server));
         name.strip_prefix(&prefix).map(|tool| (server.as_str(), tool))
