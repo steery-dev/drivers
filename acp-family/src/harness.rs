@@ -11,16 +11,19 @@ pub enum Harness {
     Hermes,
     /// Kilo, whose executable is `kilo`.
     Kilo,
+    /// Cursor's agent CLI, whose executable is `cursor-agent`.
+    Cursor,
 }
 
 impl Harness {
-    /// The driver's id, which is the harness's executable.
+    /// The driver's id.
     pub fn id(self) -> &'static str {
         match self {
             Self::Grok => "grok",
             Self::Copilot => "copilot",
             Self::Hermes => "hermes",
             Self::Kilo => "kilo",
+            Self::Cursor => "cursor",
         }
     }
 
@@ -31,6 +34,7 @@ impl Harness {
             Self::Copilot => "Copilot",
             Self::Hermes => "Hermes Agent",
             Self::Kilo => "Kilo",
+            Self::Cursor => "Cursor",
         }
     }
 
@@ -41,6 +45,7 @@ impl Harness {
             Self::Copilot => "Co",
             Self::Hermes => "He",
             Self::Kilo => "Kl",
+            Self::Cursor => "Cu",
         }
     }
 
@@ -51,6 +56,7 @@ impl Harness {
             Self::Copilot => "#8534f3",
             Self::Hermes => "#4b2fd0",
             Self::Kilo => "#617a91",
+            Self::Cursor => "#14120b",
         }
     }
 
