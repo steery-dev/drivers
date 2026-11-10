@@ -148,7 +148,7 @@ function shared(a: string[], b: string[]): number {
 
 /**
  * An object's fields, else none. Kilo's bus carries events that its SDK's types do not list
- * (`message.part.delta`, `session.queue.changed`, `permission.asked`), and the door's frames
+ * (`message.part.delta`, `permission.asked`), and the door's frames
  * are the runtime's, so the plugin checks every field it reads.
  */
 function fields(value: unknown): Fields {
@@ -287,13 +287,17 @@ type Say = {
   words: string;
   mode: "steer" | "queue";
   thrown?: string;
-  /** Kilo's id for the user message that carries them, once handed. */
+  /**
+   * Kilo's ids for the user message that carries them and its text, once handed. Handed
+   * again, the words keep both, so Kilo stores them once.
+   */
   message?: string;
+  part?: string;
   queuedAt?: number;
   takenAt?: number;
   /** Handed while a turn ran: Kilo queues them until the turn yields. */
   steered: boolean;
-  /** Seen in Kilo's queue. */
+  /** Stored by Kilo while a turn ran: in its queue until the turn yields. */
   queued: boolean;
   letGo: boolean;
   modelMissing?: string;
@@ -341,6 +345,11 @@ class Door {
   /** The user message Kilo's assistant answers last. */
   parent: string | undefined;
   turns = 0;
+  /**
+   * The user messages Kilo stored while a turn ran, which wait in its queue for the turn to
+   * yield. Kilo's own `session.queue.changed` never reaches a plugin, so this follows the
+   * messages: a turn takes one when an assistant message answers it, and an abort drops all.
+   */
   queue: string[] = [];
   held: Say[] = [];
   says = new Map<string, Say>();
@@ -661,9 +670,10 @@ class Door {
   endedTurn(): void {
     const turn = this.turn;
     this.turn = undefined;
+    const last = [...this.messages.values()].reverse().find(({ info }) => info.role === "assistant");
+    const aborted = last?.info.error?.name === "MessageAbortedError";
     if (turn?.steerys) {
-      const last = [...this.messages.values()].reverse().find(({ info }) => info.role === "assistant");
-      const failure = last?.info.error?.name === "MessageAbortedError" ? undefined : last?.info.error;
+      const failure = aborted ? undefined : last?.info.error;
       this.settled.push({
         began_at: turn.began_at,
         at: Date.now(),
@@ -673,18 +683,23 @@ class Door {
       });
       while (this.settled.length > SETTLED_KEPT) this.settled.shift();
     }
-    // Words Kilo let go with the turn: handed, not taken, out of its queue.
-    for (const say of this.says.values()) {
-      if (say.message && !say.takenAt && !this.queue.includes(say.message) && say.queued) {
-        say.letGo = true;
-        for (const wake of say.wake.splice(0)) wake();
+    // An abort drops Kilo's queue; else the queued words start the next turn.
+    if (aborted) {
+      for (const message of this.queue) {
+        const say = this.byMessage.get(message);
+        if (say && !say.takenAt) {
+          say.letGo = true;
+          for (const wake of say.wake.splice(0)) wake();
+        }
       }
+      this.queue = [];
     }
     void this.handHeld();
   }
 
   /** Words in a user message Kilo wrote or started: whose they are, and when taken. */
   took(message: string): void {
+    this.queue = this.queue.filter((queued) => queued !== message);
     const say = this.byMessage.get(message);
     const continuation = this.continuations.has(message);
     if (this.turn && this.turn.first === undefined) {
@@ -738,27 +753,19 @@ class Door {
       case "session.compacted":
         if (own) this.compacting = false;
         break;
-      case "session.queue.changed": {
-        if (!own) break;
-        // Kilo's queue lists the user messages that wait for the running turn to yield; the
-        // turn takes one when an assistant message answers it (`message.updated`), and an
-        // abort empties the queue without taking any.
-        const queue = Array.isArray(props.queued) ? props.queued.filter((message): message is string => typeof message === "string") : [];
-        for (const message of queue) {
-          const say = this.byMessage.get(message);
-          if (say && !say.queued) {
-            say.queued = true;
-            for (const wake of say.wake.splice(0)) wake();
-          }
-        }
-        this.queue = queue;
-        break;
-      }
       case "message.updated": {
         const info = infoOf(props.info);
         if (!own || !info) break;
         const known = this.messages.get(info.id);
         this.messages.set(info.id, { info, parts: known?.parts ?? new Map() });
+        if (info.role === "user" && !known && this.turn && (info.created ?? 0) > this.turn.began_at) {
+          this.queue.push(info.id);
+          const say = this.byMessage.get(info.id);
+          if (say) {
+            say.queued = true;
+            for (const wake of say.wake.splice(0)) wake();
+          }
+        }
         if (info.role === "assistant") {
           // Kilo answers the user message that its turn runs on: a new parent is words taken.
           if (info.parentID && info.parentID !== this.parent) {
@@ -923,20 +930,20 @@ class Door {
       this.continued = true;
       const message = mint("msg");
       this.continuations.add(message);
-      await this.prompt(message, reminder(say));
+      await this.prompt(message, mint("prt"), reminder(say));
     })().catch(() => {});
   }
 
   // ---- the runtime's asks ---------------------------------------------------------
 
-  async prompt(message: string, words: string): Promise<void> {
+  async prompt(message: string, part: string, words: string): Promise<void> {
     const picked = this.picked;
     this.picked = undefined;
     const result = await this.client.session.promptAsync({
       path: { id: this.id },
       body: {
         messageID: message,
-        parts: [{ type: "text", text: words }],
+        parts: [{ id: part, type: "text", text: words }],
         ...(picked ? { model: { providerID: picked.providerID, modelID: picked.modelID } } : {}),
         ...(picked?.variant ? { variant: picked.variant } : {}),
       },
@@ -1030,12 +1037,13 @@ class Door {
 
   /** Hand the words to Kilo: into the running turn's queue, or to start one. */
   async hand(say: Say): Promise<void> {
-    say.message = mint("msg");
+    say.message ??= mint("msg");
+    say.part ??= mint("prt");
     say.steered = this.busy();
     say.queued = false;
     this.byMessage.set(say.message, say);
     try {
-      await this.prompt(say.message, say.words);
+      await this.prompt(say.message, say.part, say.words);
       say.queuedAt = Date.now();
     } catch (error) {
       say.modelMissing = String(error instanceof Error ? error.message : error);
@@ -1110,12 +1118,11 @@ class Door {
     if (say.takenAt || !this.busy()) return { ok: { stopped: false, running: [] } };
     const held = this.held.indexOf(say);
     if (!(await this.abort())) return { refused: "no-answer", error: "a turn still runs after 2.5 s" };
-    // Kilo drops its queue with an abort; the words go in again, once.
+    // Kilo drops its queue with an abort but keeps the message; the words go in again, once.
     if (held >= 0) this.held.splice(held, 1);
     if (!say.takenAt && !say.handedAgain) {
       say.handedAgain = true;
       say.letGo = false;
-      if (say.message) this.byMessage.delete(say.message);
       await this.hand(say);
     }
     return { ok: { stopped: true, running: [] } };
