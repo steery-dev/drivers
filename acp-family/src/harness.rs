@@ -7,6 +7,8 @@ pub enum Harness {
     Grok,
     /// Nous Research's Hermes Agent, whose executable is `hermes`.
     Hermes,
+    /// Kilo, whose executable is `kilo`.
+    Kilo,
 }
 
 impl Harness {
@@ -15,6 +17,7 @@ impl Harness {
         match self {
             Self::Grok => "grok",
             Self::Hermes => "hermes",
+            Self::Kilo => "kilo",
         }
     }
 
@@ -23,6 +26,7 @@ impl Harness {
         match self {
             Self::Grok => "Grok Build",
             Self::Hermes => "Hermes Agent",
+            Self::Kilo => "Kilo",
         }
     }
 
@@ -31,6 +35,7 @@ impl Harness {
         match self {
             Self::Grok => "Gk",
             Self::Hermes => "He",
+            Self::Kilo => "Kl",
         }
     }
 
@@ -39,6 +44,7 @@ impl Harness {
         match self {
             Self::Grok => "#1d1d1f",
             Self::Hermes => "#4b2fd0",
+            Self::Kilo => "#617a91",
         }
     }
 

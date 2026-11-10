@@ -32,6 +32,7 @@ short name, its tint and its mark.
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
+| `kilo` | Kilo | [`acp-family`](acp-family/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -67,6 +68,7 @@ agrees (PROTOCOL.md §4.1).
 | `pi` | its agent folder's `bin` (`~/.pi/agent/bin`) | `sh -c "curl -fsSL https://pi.dev/install.sh \| sh"`. Offered only where npm is here and `node --version` names 22.19 or newer within 5 s. Else refused, with the requirement that is missing. |
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
+| `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -96,6 +98,7 @@ signed in, as the harness itself says.
 | `pi` | ``run `pi` in a terminal and type /login in it`` (pi has no login command. Its `auth` prints credentials and checks readiness.) | not told |
 | `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
+| `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -136,6 +139,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 | `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
 | `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
 | `pi` | `api-key` | none |
+| `grok` | `grok-sign-in`, `api-key` (xAI, kept as `XAI_API_KEY`) | `grok login --device-auth`'s page (`accounts.x.ai/oauth2/device?user_code=…`), with its code in the step's label. A key counts where `grok models` with it, in an empty `GROK_HOME`, fetched xAI's models. |
 
 omp lists its providers' ids and names (RPC `get_login_providers`, the `omp login` picker). It
 does not list how each provider signs in. Most providers only read an API key on their prompt.
@@ -275,6 +279,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `pi` | agent folder's `mcp.json` | `.pi/mcp.json`, where `trust.json` trusts exactly that folder | never: extensions register servers |
 | `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`. `.mcp.json` where the folder is trusted and the server approved, not rejected. (`start` runs `claude --bg`, not `-p`. `claude --bg` is an interactive background session that waits on approval.) `disabledMcpServers` off. | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
+| `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
 
 ## Adding a driver
 
@@ -540,6 +545,12 @@ again has no sign-in that waits. Thus a step at that time is `not-found`.
   - a `Stop` that keeps the turn running (`decision: block`)
   - a `PreToolUse` or `PermissionRequest` decision
   - the conversation's lead, written to `CLAUDE_ENV_FILE` (`append`)
+
+  Cursor also runs the hooks in Claude Code's `settings.json` files, under its own chat id. Its
+  document has `cursor_version`, and the hook's process has `CURSOR_VERSION`. Every hook entry
+  names `CURSOR_VERSION` in `env`, and no other Cursor variable. For either sign, `hook/read`
+  gives no moment and `hook/answer` prints nothing. Thus a Cursor turn makes no Claude Code
+  session, and Steery never allows or blocks Cursor's tools.
 - **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
   `reader`, `terminal`).
   - `held`: Claude Code's registry, `sessions/<pid>.json`, names the live session in a

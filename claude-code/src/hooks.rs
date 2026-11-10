@@ -4,6 +4,7 @@
 //! on standard input, the conversation's own id in its `session_id`, and reads the
 //! hook's standard output as JSON.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -21,6 +22,12 @@ const ENV_FILE: &str = "CLAUDE_ENV_FILE";
 /// The variable naming a process's lead (PROTOCOL.md §3.3), which the runtime reads off
 /// the hook's own process.
 const LEAD: &str = "STEERY_LEAD";
+/// Cursor runs the hooks of Claude Code's `settings.json` files as its own, under its own
+/// chat id. It sets this variable only for a hook's process (`buildHookEnvironment`,
+/// `cursor-agent` 2026.07.01) and writes `cursor_version` in every document; Claude Code
+/// does neither. The only Cursor variable the driver names: the runtime passes no other,
+/// so the sign-in token Cursor also hands its hooks (`CURSOR_ACCESS_TOKEN`) never reaches it.
+const CURSOR: &str = "CURSOR_VERSION";
 
 /// How long Claude Code gives a hook that only says a moment happened: it writes one
 /// note, and a harness held up behind Steery is the one thing it must never cost a person.
@@ -142,10 +149,11 @@ pub fn table() -> Vec<Hook> {
             via: Via::Command,
             says: event.says.to_vec(),
             waits: Some(event.waits),
-            // Only a start is handed the file a lead is appended to.
-            env: (event.kind == HookKind::SessionStart)
-                .then(|| ENV_FILE.to_owned())
-                .into_iter()
+            // Every hook is told whether Cursor runs it; only a start is handed the file a
+            // lead is appended to.
+            env: std::iter::once(CURSOR)
+                .chain((event.kind == HookKind::SessionStart).then_some(ENV_FILE))
+                .map(str::to_owned)
                 .collect(),
             // Claude Code keeps both scopes (`updatedPermissions`): absent says both.
             keeps: None,
@@ -153,13 +161,21 @@ pub fn table() -> Vec<Hook> {
         .collect()
 }
 
-/// The moment a hook's document says, or none for an event Steery is not hooked on or a
-/// document that names no conversation. `store` holds Claude Code's conversations.
+/// The moment a hook's document says, or none for an event Steery is not hooked on, a
+/// document that names no conversation, or a hook Cursor runs. `store` holds Claude Code's
+/// conversations.
 pub fn read(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
     let document = parse(&read.document)?;
     Ok(HookMoment {
-        moment: moment(store, &read.event, &document),
+        moment: (!cursors(&document, &read.env))
+            .then(|| moment(store, &read.event, &document))
+            .flatten(),
     })
+}
+
+/// Cursor runs this hook, not Claude Code: its conversation is none of Claude Code's.
+fn cursors(document: &Value, env: &BTreeMap<String, String>) -> bool {
+    document.get("cursor_version").is_some() || env.contains_key(CURSOR)
 }
 
 fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
@@ -336,8 +352,9 @@ fn suggestion(update: &Value) -> Suggestion {
 /// What Steery decided, printed as Claude Code parses it on this event: a paragraph as
 /// `additionalContext`, or at a `Stop` as the reason the turn goes on; a decision as
 /// `PreToolUse`'s `permissionDecision` or `PermissionRequest`'s `decision`; and the lead,
-/// appended to `CLAUDE_ENV_FILE` where Claude Code named one. Always exit 0: a hook
-/// that fails is one Claude Code reports to its person.
+/// appended to `CLAUDE_ENV_FILE` where Claude Code named one. A hook Cursor runs is
+/// answered nothing. Always exit 0: a hook that fails is one Claude Code reports to its
+/// person.
 pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     let HookAnswer {
         event: name,
@@ -351,10 +368,18 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     } = answer;
     let event = event(&name)
         .ok_or_else(|| Error::invalid(format!("Steery has no hook on Claude Code's {name}")))?;
+    let document = parse(&document)?;
+    if cursors(&document, &env) {
+        return Ok(HookAnswered {
+            stdout: String::new(),
+            exit_code: 0,
+            append: None,
+        });
+    }
     let output = match (event.kind, decision) {
         (_, None) => say.map(|say| context(event, say)).transpose()?,
         (HookKind::BeforeCall, Some(decision)) => {
-            Some(before_call(decision, say, &parse(&document)?)?)
+            Some(before_call(decision, say, &document)?)
         }
         (HookKind::Permission, Some(decision)) => {
             if say.is_some() {
@@ -362,7 +387,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
                     "Claude Code does not read a paragraph at PermissionRequest",
                 ));
             }
-            Some(permission(decision, &parse(&document)?)?)
+            Some(permission(decision, &document)?)
         }
         (_, Some(_)) => {
             return Err(Error::invalid(format!(
