@@ -13,14 +13,30 @@ path = "src/bin/grok.rs"
 name = "steery-driver-opencode"
 path = "src/bin/opencode.rs"
 
+[[bin]]
+name = "steery-driver-hermes"
+path = "src/bin/hermes.rs"
+
+[[bin]]
+name = "steery-driver-kilo"
+path = "src/bin/kilo.rs"
+
+[[bin]]
+name = "steery-driver-cursor"
+path = "src/bin/cursor.rs"
+
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
 steery-driver-common = { path = "../common" }
+# Kilo, Hermes, Cursor and OpenCode keep their conversations in SQLite; bundled, so no system library is needed.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Cursor: whether a process still holds a chat's SQLite store open.
+libc = "0.2"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_norway = "0.9"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "process", "time", "io-util", "sync"] }
 
 # Its own workspace, so it builds alone.
