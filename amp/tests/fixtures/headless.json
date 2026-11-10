@@ -1,0 +1,6 @@
+{"v": 2, "id": "T-00000000-0000-4000-8000-000000000002", "title": null,
+ "created": 1762700100000, "updatedAt": "2025-11-09T15:02:00.000Z", "nextMessageId": 1,
+ "env": {"initial": {"tags": [], "trees": [{"uri": "file:///tmp/batch"}],
+   "platform": {"os": "darwin", "client": "CLI Execute Mode", "clientType": "cli"}}},
+ "messages": [
+  {"role": "user", "messageId": 0, "content": [{"type": "text", "text": "Say ok."}]}]}
