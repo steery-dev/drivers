@@ -2,21 +2,53 @@
 //! `$GROK_HOME/sessions/<encoded folder>/<id>/`, plans the entries that set Grok up for
 //! Steery, and reads its hooks' moments.
 
+mod events;
+mod store;
+
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
-use steery_sdk::{Error, Program};
+use steery_sdk::{Error, Program, method, refusal, result};
 
 use crate::Harness;
 
-/// The driver: the protocol it picked from `initialize`.
+/// The driver: the protocol it picked from `initialize`, where Grok keeps everything, and
+/// the listings it answered, to answer the next with only what changed.
 #[derive(Default)]
 pub struct Driver {
     protocol: OnceLock<u32>,
+    place: OnceLock<Place>,
+    changes: steery_sdk::listing::Changes,
+}
+
+/// The person's home, the runtime's config folder, and Grok's home.
+#[allow(dead_code)] // `home` and `config`: for setup.
+pub(crate) struct Place {
+    pub home: PathBuf,
+    pub config: PathBuf,
+    pub root: PathBuf,
+}
+
+/// Grok's home: `$GROK_HOME`, else `<home>/.grok`.
+pub(crate) fn root(home: &Path) -> PathBuf {
+    std::env::var_os("GROK_HOME")
+        .filter(|root| !root.is_empty())
+        .map_or_else(|| home.join(".grok"), PathBuf::from)
 }
 
 impl Driver {
+    fn place(&self) -> Result<&Place, Error> {
+        self.place
+            .get()
+            .ok_or_else(|| Error::invalid("`initialize` must come first"))
+    }
+
+    fn store(&self) -> Result<store::Store, Error> {
+        Ok(store::Store::new(&self.place()?.root))
+    }
+
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
             levels: vec![wire::Level::Observe],
@@ -74,6 +106,12 @@ impl Program for Driver {
         let protocol = steery_driver_common::program::protocol(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let _ = self.protocol.set(protocol);
+        let _ = self.place.set(Place {
+            home: params.home.clone(),
+            config: params.config.clone(),
+            root: root(&params.home),
+        });
+        self.changes.picked(protocol);
         Ok(wire::Initialized {
             protocol,
             program: Harness::Grok.program()?,
@@ -83,7 +121,23 @@ impl Program for Driver {
         })
     }
 
-    async fn call(&self, _method: &str, _params: Value) -> Result<Value, Error> {
-        Err(Error::Unknown)
+    async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
+        match method {
+            method::SESSIONS_LIST => {
+                let asked: harness::List = steery_sdk::params(params)?;
+                let after = asked.after.clone();
+                result(self.changes.answer(after.as_deref(), self.store()?.list(asked)))
+            }
+            method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
+            method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
+            method::SESSIONS_FOLD => {
+                let _: harness::Fold = steery_sdk::params(params)?;
+                Err(Error::refused(
+                    refusal::SELECTION_UNSUPPORTED,
+                    "Grok Build has no plugin door that sends its records",
+                ))
+            }
+            _ => Err(Error::Unknown),
+        }
     }
 }
