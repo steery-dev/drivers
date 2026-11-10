@@ -31,7 +31,7 @@ short name, its tint and its mark.
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
-| `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe |
+| `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe, drive |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
