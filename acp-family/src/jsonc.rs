@@ -1,15 +1,18 @@
-//! JSON with comments, as Kilo and Gemini CLI write their configuration: `//` and `/* */`
-//! comments and trailing commas allowed.
+//! JSON with comments, as Kilo, OpenCode and Gemini CLI write their configuration: `//`
+//! and `/* */` comments and trailing commas allowed.
 
 use std::path::Path;
 
 use serde_json::Value;
 
-/// A JSON-with-comments file, a leading byte-order mark allowed. None where it is missing
-/// or no such JSON.
+/// A JSON-with-comments file. None where it is missing or no such JSON.
 pub(crate) fn jsonc(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&plain(text.strip_prefix('\u{feff}').unwrap_or(&text))).ok()
+    parse(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// A JSON-with-comments text as JSON, a leading byte-order mark allowed.
+pub(crate) fn parse(text: &str) -> Result<Value, serde_json::Error> {
+    serde_json::from_str(&plain(text.strip_prefix('\u{feff}').unwrap_or(text)))
 }
 
 /// JSON with comments as plain JSON: each comment and each comma before a closing bracket

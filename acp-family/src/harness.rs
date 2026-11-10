@@ -5,6 +5,8 @@
 pub enum Harness {
     /// xAI's Grok Build, whose executable is `grok`.
     Grok,
+    /// OpenCode 2, whose executable is `opencode`.
+    OpenCode,
     /// Nous Research's Hermes Agent, whose executable is `hermes`.
     Hermes,
     /// Kilo, whose executable is `kilo`.
@@ -20,6 +22,7 @@ impl Harness {
     pub fn id(self) -> &'static str {
         match self {
             Self::Grok => "grok",
+            Self::OpenCode => "opencode",
             Self::Hermes => "hermes",
             Self::Kilo => "kilo",
             Self::Cursor => "cursor",
@@ -31,6 +34,7 @@ impl Harness {
     pub fn label(self) -> &'static str {
         match self {
             Self::Grok => "Grok Build",
+            Self::OpenCode => "OpenCode",
             Self::Hermes => "Hermes Agent",
             Self::Kilo => "Kilo",
             Self::Cursor => "Cursor",
@@ -42,6 +46,7 @@ impl Harness {
     pub fn short(self) -> &'static str {
         match self {
             Self::Grok => "Gk",
+            Self::OpenCode => "Oc",
             Self::Hermes => "He",
             Self::Kilo => "Kl",
             Self::Cursor => "Cu",
@@ -53,6 +58,7 @@ impl Harness {
     pub fn tint(self) -> &'static str {
         match self {
             Self::Grok => "#1d1d1f",
+            Self::OpenCode => "#211e1e",
             Self::Hermes => "#4b2fd0",
             Self::Kilo => "#617a91",
             Self::Cursor => "#14120b",

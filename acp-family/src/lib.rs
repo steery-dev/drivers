@@ -11,6 +11,7 @@ mod harness;
 mod hermes;
 mod jsonc;
 mod kilo;
+mod opencode;
 
 pub use harness::Harness;
 
@@ -18,8 +19,12 @@ pub use harness::Harness;
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+        Harness::OpenCode => steery_sdk::serve(|_notifier| opencode::Driver::default()).await,
         Harness::Hermes => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
-        Harness::Kilo => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
+        Harness::Kilo => match std::env::args().nth(1).as_deref() {
+            Some("turn") => kilo::turn::main(std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
+        },
         Harness::Cursor => steery_sdk::serve(|_notifier| cursor::Driver::default()).await,
         Harness::Gemini => steery_sdk::serve(|_notifier| gemini::Driver::default()).await,
     }
