@@ -34,6 +34,7 @@ short name, its tint and its mark.
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
+| `amp` | Amp | [`amp`](amp/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -71,6 +72,7 @@ agrees (PROTOCOL.md §4.1).
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
 | `cursor` | `~/.local/bin` | `sh -c "curl -fsS https://cursor.com/install \| bash"` |
+| `amp` | `AMP_HOME/bin`, else `~/.amp/bin` (and its link `~/.local/bin/amp`) | `bash -c "curl -fsSL https://ampcode.com/install.sh \| bash"` |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -102,6 +104,7 @@ signed in, as the harness itself says.
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
+| `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -143,6 +146,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 | `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
 | `pi` | `api-key` | none |
 | `grok` | `grok-sign-in`, `api-key` (xAI, kept as `XAI_API_KEY`) | `grok login --device-auth`'s page (`accounts.x.ai/oauth2/device?user_code=…`), with its code in the step's label. A key counts where `grok models` with it, in an empty `GROK_HOME`, fetched xAI's models. |
+| `amp` | `amp`, `api-key` (Amp) | the link that `amp login` prints after "Open this URL in your browser to authorize:". |
 
 omp lists its providers' ids and names (RPC `get_login_providers`, the `omp login` picker). It
 does not list how each provider signs in. Most providers only read an API key on their prompt.
@@ -284,6 +288,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 | `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
 | `cursor` | `~/.cursor/mcp.json`, whatever `CURSOR_CONFIG_DIR` says | `.cursor/mcp.json`, listed before its person approves it in Cursor | never: plugins, team servers |
+| `amp` | `amp mcp list --json` run at `/` | the same, run in the folder (it adds `.amp/settings.json`) | never: skills, plugins and toolboxes bring servers |
 
 ## Adding a driver
 
@@ -819,6 +824,69 @@ cd codex && cargo build
 steery programs test target/debug/steery-driver-codex
 cargo test
 ```
+
+## Amp: `amp/`
+
+One binary, `steery-driver-amp`, with no settings, at observe only. Amp keeps its threads on
+ampcode.com, not on this host. Thus the driver reads them only through Amp's own CLI:
+
+- `amp threads list --json` and `amp threads export <thread>`
+- `amp mcp list --json`
+- `amp login`
+
+It reads one file of Amp's own: `installationID` in Amp's `device-id.json`
+(`~/.local/share/amp`, or `$XDG_DATA_HOME/amp` on Linux). Nothing else of that folder: it also
+holds Amp's accounts and secrets. Amp's settings are `$XDG_CONFIG_HOME/amp/settings.json`, else
+`~/.config/amp/settings.json`.
+
+**Needs** (protocol 5). When `amp threads list` says Amp is not signed in (see Signing in), the
+plan asks `sign-in` in two ways:
+
+1. `amp`: `amp login`, on a terminal of the driver's. Its printed link is the step
+   `amp-return`. Where it returns to Amp's loopback listener, the address fills the step. Else
+   the person pastes Amp's code, which the driver types into the login's prompt.
+2. `api-key`: an Amp API key (`sgamp_…`, made at ampcode.com/settings/security). The driver
+   checks it with `amp threads list`, and gives it back as `AMP_API_KEY`. The runtime keeps it
+   sealed. A key in the environment wins over Amp's saved accounts.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`).
+  - `sessions/list` asks for the threads of this host's installation:
+    `amp threads list --json --include-archived --limit 500 --installation-id <id>`. A listing
+    that fills 500 is not complete. The list does not say how a thread ran. Thus the driver
+    exports each thread that is new or changed since it last listed it: at most 50 in one call,
+    8 at a time, within 10 s. A thread left unexported waits for the next call, and the listing
+    is not complete. A thread that `amp -x` ran (client `CLI Execute Mode`) had nobody at it:
+    it is `excluded`.
+  - A session names no transcript, because this host has none. Its folder is the thread's
+    first tree.
+  - `sessions/read` exports the thread whole within 8 s, under the method's 10 s bound. Amp says
+    "does not exist" for a thread that is gone or another account's: `not-found`. The driver
+    refuses an export larger than 64 MiB.
+  - The events are these: turns and how they ended (`end_turn`, `cancelled`, `error`), the
+    person's words and pictures, the agent's words and thinking, calls and their results, each
+    response's tokens, and the model. A message that Amp still writes holds the cursor back.
+    A person can edit an earlier message, which cuts the thread there. Then the cursor's last
+    message is gone, and the read starts again (`reset`).
+  - `sessions/fold` is refused `selection-unsupported`: Amp has no plugin door that sends
+    records.
+- **Setup** (`setup/plan`). The plan has two entries: the MCP entry in Amp's settings
+  (`amp.mcpServers.steery`, its URL alone), and the skill in Amp's own skills folder
+  (`skills/steery/SKILL.md` under Amp's settings folder). Amp names no thread in an MCP call's
+  `_meta`, so the entry sends no `Steery-*` header.
+- **MCP servers** (`mcp/list`): see MCP servers.
+
+How an agent in Amp learns its thread's id is not checked yet: no Amp turn has run under the
+driver. The skill tells the agent to send the `T-…` of its thread's address, or
+`AMP_THREAD_ID` where it is set.
+
+Build and check it, with Amp on `PATH`:
+
+```sh
+cd amp && cargo build
+steery programs test target/debug/steery-driver-amp
+cargo test
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
