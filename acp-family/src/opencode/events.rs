@@ -255,6 +255,7 @@ impl Fold<'_> {
             });
         }
         let ended = part["time"]["completed"].as_u64().unwrap_or(at);
+        self.inner(at, ended, call_id, response, state);
         let (ok, text) = match state["status"].as_str() {
             Some("completed") => (true, text_of(&state["content"])),
             Some("error") => {
@@ -298,6 +299,44 @@ impl Fold<'_> {
                 message: None,
                 call: Some(call_id.to_owned()),
                 clips: Vec::new(),
+            });
+        }
+    }
+
+    /// The calls that one `execute` of Code Mode made, each with the `execute` as its parent.
+    /// OpenCode keeps no id, time or result of its own for them: only the tool, its state and
+    /// the input as shown. Inside Code Mode a tool is `<namespace>.<tool>`, where a direct call
+    /// names it `<namespace>_<tool>`.
+    fn inner(&mut self, at: u64, ended: u64, parent: &str, response: &str, state: &Value) {
+        let Some(calls) = state["metadata"]["toolCalls"].as_array() else {
+            return;
+        };
+        for (index, inner) in calls.iter().enumerate() {
+            let Some(name) = inner["tool"].as_str() else {
+                continue;
+            };
+            let id = format!("{parent}/{index}");
+            let mut call = call(
+                &id,
+                &name.replacen('.', "_", 1),
+                inner.get("input").cloned().unwrap_or(Value::Null),
+                response,
+                self.servers,
+            );
+            call.parent = Some(parent.to_owned());
+            self.events.push(Event::CallBegan { at, call });
+            let ok = match inner["status"].as_str() {
+                Some("completed") => true,
+                Some("error") => false,
+                _ => continue,
+            };
+            self.events.push(Event::CallEnded {
+                at: ended,
+                id,
+                ok,
+                chars: 0,
+                tail: None,
+                waited: Vec::new(),
             });
         }
     }
@@ -463,6 +502,10 @@ fn group(name: &str) -> Group {
         "todowrite" => Group::Plan,
         "question" => Group::Ask,
         "experimental_image_generate" => Group::Media,
+        "execute" => Group::Code,
+        // Code Mode's own functions inside an `execute`: an HTTP request, and its catalog's search.
+        "fetch" => Group::Web,
+        "search" => Group::Harness,
         "skill" | "opencode" | "models" | "session_move" | "session_rename" | "schedule"
         | "schedule_create" | "schedule_delete" | "schedule_list" | "schedule_pause"
         | "schedule_resume" | "worktree_create" | "worktree_list" | "worktree_remove"
