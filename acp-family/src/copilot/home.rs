@@ -13,7 +13,10 @@ pub(crate) fn root(home: &Path) -> Result<PathBuf, String> {
             if dir.is_absolute() {
                 Ok(dir)
             } else {
-                Err(format!("COPILOT_HOME {} must be an absolute path", dir.display()))
+                Err(format!(
+                    "COPILOT_HOME {} must be an absolute path",
+                    dir.display()
+                ))
             }
         }
         None => Ok(home.join(".copilot")),
@@ -35,7 +38,12 @@ fn installer_folder() -> Option<PathBuf> {
 /// A line for a person where `copilot` is installed in more than one place here: which one
 /// Steery runs and which it does not.
 pub(crate) fn others_note(used: &Path) -> Option<String> {
-    steery_driver_common::program::others_note("copilot", "copilot", installer_folder().as_deref(), used)
+    steery_driver_common::program::others_note(
+        "copilot",
+        "copilot",
+        installer_folder().as_deref(),
+        used,
+    )
 }
 
 /// Copilot's own installer, where `bash` and `curl` are here: it installs into

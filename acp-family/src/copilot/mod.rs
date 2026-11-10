@@ -3,6 +3,7 @@
 //! Steery, and reads its hooks' moments. Copilot is reached only through what it publishes:
 //! its files, its hooks, its CLI, and its own server (`copilot --headless --stdio`).
 
+mod calls;
 mod events;
 mod home;
 mod hooks;
@@ -103,7 +104,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol: self.place()?.protocol,
             program: Harness::Copilot.program()?,
-            harness: Some(Box::new(info())),
+            harness: Some(Box::new(info(self.place()?.protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -114,9 +115,19 @@ impl Program for Driver {
         match method {
             method::SETUP_PLAN => {
                 let place = self.place()?;
-                result(setup::plan(&place.home, self.store()?.root(), given(params)?, self.needs()?).await?)
+                result(
+                    setup::plan(
+                        &place.home,
+                        self.store()?.root(),
+                        given(params)?,
+                        self.needs()?,
+                    )
+                    .await?,
+                )
             }
-            method::NEEDS_GIVE if self.needs()? => result(self.sign_ins.give(given(params)?).await?),
+            method::NEEDS_GIVE if self.needs()? => {
+                result(self.sign_ins.give(given(params)?).await?)
+            }
             method::SESSIONS_LIST => {
                 let asked: harness::List = given(params)?;
                 let after = asked.after.clone();
@@ -158,8 +169,8 @@ impl Program for Driver {
     }
 }
 
-/// Copilot as Steery reads it.
-fn info() -> wire::HarnessInfo {
+/// Copilot as Steery reads it, on `protocol`.
+fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
         levels: vec![wire::Level::Observe],
         // The release whose hooks, event schema and own server this driver was read against.
@@ -196,6 +207,6 @@ fn info() -> wire::HarnessInfo {
             worktrees: false,
             acts: Vec::new(),
         },
-        hooks: hooks::table(),
+        hooks: hooks::table(protocol),
     }
 }
