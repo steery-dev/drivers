@@ -106,11 +106,14 @@ pub trait Host {
 
     /// Whether the harness still runs a turn of `session` once every prompt the turn sent
     /// has its answer, as words another client queued into it can make it; `acp` is the pid
-    /// of the harness's ACP server, and `unmarked` the turn's own memory between looks.
+    /// of the harness's ACP server, `queued` the words whose prompt the harness answered
+    /// at once, queued behind a turn still running, which it runs later with no prompt
+    /// open, and `unmarked` the turn's own memory between looks.
     fn runs(
         &self,
         acp: Option<u32>,
         session: &str,
+        queued: &[String],
         unmarked: &mut Option<tokio::time::Instant>,
     ) -> bool;
 }
@@ -259,7 +262,8 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                 acp.call("session/set_config_option", params).await?;
             }
         }
-        let mut prompts = HashSet::from([acp.prompt(&session, &words).await?]);
+        // The prompts that wait for the harness's answer, with their words, by their ids.
+        let mut prompts = HashMap::from([(acp.prompt(&session, &words).await?, words)]);
         // Bound once the session is named: words heard before that would have no turn to
         // go into. A turn that cannot bind runs with no inbox.
         let heard = asked
@@ -277,6 +281,9 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         let mut asking = JoinSet::new();
         let mut waiting: Vec<Value> = Vec::new();
         let mut unmarked: Option<tokio::time::Instant> = None;
+        // Words whose prompt the harness answered while an older prompt still ran: it queued
+        // them, to run once that turn ends.
+        let mut queued: Vec<String> = Vec::new();
         // How the harness's answer to the newest prompt says the turn ended, and whether
         // Steery's hook already made the turn go on.
         let mut stopped: Option<String> = None;
@@ -285,15 +292,15 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         while !prompts.is_empty()
             || !steering.is_empty()
             || !later.is_empty()
-            || host.runs(acp.child.id(), &session, &mut unmarked)
+            || (cancelled.is_none() && host.runs(acp.child.id(), &session, &queued, &mut unmarked))
         {
             if prompts.is_empty() && !later.is_empty() {
                 let told = std::mem::take(&mut later);
-                let words = told.iter().map(|(words, _)| words.as_str()).collect::<Vec<_>>();
-                let said = match (cancelled, acp.prompt(&session, &words.join("\n\n")).await) {
+                let words = told.iter().map(|(words, _)| words.as_str()).collect::<Vec<_>>().join("\n\n");
+                let said = match (cancelled, acp.prompt(&session, &words).await) {
                     (Some(_), _) => "the turn is ending".to_owned(),
                     (None, Ok(id)) => {
-                        prompts.insert(id);
+                        prompts.insert(id, words);
                         HEARD.to_owned()
                     }
                     (None, Err(line)) => line,
@@ -330,9 +337,13 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                     let answered = message?;
                     let id = answered.as_ref().and_then(|message| message.get("id")?.as_u64());
                     if let (Some(message), Some(id)) = (answered, id) {
-                        if prompts.remove(&id) {
-                            let reason = message.pointer("/result/stopReason").and_then(Value::as_str);
-                            stopped = Some(reason.unwrap_or("error").to_owned());
+                        if let Some(words) = prompts.remove(&id) {
+                            if message.get("result").is_some() && prompts.keys().any(|open| *open < id) {
+                                queued.push(words);
+                            } else {
+                                let reason = message.pointer("/result/stopReason").and_then(Value::as_str);
+                                stopped = Some(reason.unwrap_or("error").to_owned());
+                            }
                         } else if let Some((words, stream)) = steering.remove(&id) {
                             match steered(acp.label, &message) {
                                 Ok(true) => reply(stream, HEARD).await,
@@ -348,8 +359,8 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                 }
                 Ok((stream, _)) = accept(heard.as_ref()) => {
                     match hear(&mut acp, host.told(), &session, stream).await {
-                        Heard::Prompted(id) => {
-                            prompts.insert(id);
+                        Heard::Prompted(id, words) => {
+                            prompts.insert(id, words);
                         }
                         Heard::Steering(id, words, stream) => {
                             steering.insert(id, (words, stream));
@@ -385,7 +396,7 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         };
         continued = true;
         unmarked = None;
-        prompts.insert(acp.prompt(&session, &words).await?);
+        prompts.insert(acp.prompt(&session, &words).await?, words);
         }
         // The inbox closes before the harness does: words told from here on are told to a
         // turn that is ending.
@@ -478,7 +489,7 @@ async fn accept(
 /// What became of words told on the inbox.
 enum Heard {
     /// They went in as a prompt of this id.
-    Prompted(u64),
+    Prompted(u64, String),
     /// The steering request of this id carries them; the caller waits for its answer.
     Steering(u64, String, UnixStream),
     /// They did not go in, and the caller heard why.
@@ -507,7 +518,7 @@ async fn hear(acp: &mut Acp, told: Told, session: &str, mut stream: UnixStream) 
     match (told, sent) {
         (Told::Prompt, Ok(id)) => {
             reply(stream, HEARD).await;
-            Heard::Prompted(id)
+            Heard::Prompted(id, words)
         }
         (Told::Steer, Ok(id)) => Heard::Steering(id, words, stream),
         (_, Err(line)) => {
@@ -521,7 +532,10 @@ async fn hear(acp: &mut Acp, told: Told, session: &str, mut stream: UnixStream) 
 /// false where no turn ran to take them, or the harness's refusal.
 fn steered(label: &str, answer: &Value) -> Result<bool, String> {
     if let Some(error) = answer.get("error") {
-        let said = error.get("message").and_then(Value::as_str).unwrap_or("refused");
+        let said = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("refused");
         return Err(format!("{label} did not take the words: {said}"));
     }
     match answer.pointer("/result/outcome").and_then(Value::as_str) {
@@ -700,7 +714,11 @@ impl Acp {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("refused");
-                return Err(format!("{}: {}'s {method}: {said}", word(error), self.label));
+                return Err(format!(
+                    "{}: {}'s {method}: {said}",
+                    word(error),
+                    self.label
+                ));
             }
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }

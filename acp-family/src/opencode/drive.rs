@@ -51,7 +51,13 @@ impl crate::turn::Host for Turns {
 
     /// OpenCode still claims the session, or words wait in its inbox for a turn to take
     /// them: the turn's private server runs the session until it releases the claim.
-    fn runs(&self, _acp: Option<u32>, session: &str, _: &mut Option<tokio::time::Instant>) -> bool {
+    fn runs(
+        &self,
+        _acp: Option<u32>,
+        session: &str,
+        _queued: &[String],
+        _: &mut Option<tokio::time::Instant>,
+    ) -> bool {
         self.db.as_deref().is_some_and(|db| {
             Store::new(db)
                 .standing(session)

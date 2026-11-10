@@ -73,13 +73,18 @@ impl Row {
         })
     }
 
-    /// Cline says a turn of it runs or waits, and the process it names is alive.
+    /// Cline says a turn of it runs or waits, in a live process: the one its mark names, or
+    /// else one that names the conversation among its arguments. Cline keeps the pid of the
+    /// process that first ran a conversation when another resumes it (`cline --id <id>`, or
+    /// this driver's turn of it), so the mark names a process gone.
     pub fn live(&self) -> Option<(u32, u64)> {
         if !matches!(self.status.as_str(), "running" | "pending") {
             return None;
         }
-        let pid = self.pid?;
-        Some((pid, steery_driver_common::kernel::started(pid)?))
+        let alive = |pid: u32| Some((pid, steery_driver_common::kernel::started(pid)?));
+        self.pid
+            .and_then(alive)
+            .or_else(|| resumer(&self.id).and_then(alive))
     }
 
     /// How the last turn ended, where no turn runs.
@@ -128,6 +133,22 @@ impl Row {
             transcripts: vec![self.messages.clone()],
         }
     }
+}
+
+/// The first live process but this one with `id` as a whole argument.
+fn resumer(id: &str) -> Option<u32> {
+    let listed = std::process::Command::new("ps")
+        .args(["-axww", "-o", "pid=,args="])
+        .output()
+        .ok()?;
+    let me = std::process::id();
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid: u32 = words.next()?.parse().ok()?;
+            (pid != me && words.any(|word| word == id)).then_some(pid)
+        })
 }
 
 /// Milliseconds since 1970 of an RFC 3339 time.

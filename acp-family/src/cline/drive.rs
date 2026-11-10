@@ -18,6 +18,7 @@ use steery_sdk::wire::harness::{
 use steery_sdk::{Error, refusal};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use super::events;
 use super::place::Place;
 use super::store::{Row, Store};
 use crate::turn::drive::{self as shared, now};
@@ -75,13 +76,16 @@ impl crate::turn::Host for Turns {
         crate::turn::Opens::Load
     }
 
-    /// Cline marks the conversation running or pending in a live process, or its newest
-    /// words have no answer yet, as between a turn and the queued words' turn after it, for
-    /// at most [`UNANSWERED_WITHIN`] with no mark.
+    /// Cline marks the conversation running or pending in a live process, or in this
+    /// turn's own server, whose resumed conversation keeps the pid of the process that first
+    /// ran it; or words it queued are not yet among the person's, or its newest words have
+    /// no answer yet, as between a turn and the queued words' turn after it, for at most
+    /// [`UNANSWERED_WITHIN`] with no mark.
     fn runs(
         &self,
-        _acp: Option<u32>,
+        acp: Option<u32>,
         session: &str,
+        queued: &[String],
         unmarked: &mut Option<tokio::time::Instant>,
     ) -> bool {
         let Some(place) = &self.place else {
@@ -91,13 +95,25 @@ impl crate::turn::Host for Turns {
         let Ok(Some(row)) = Store::new(&db).row(session) else {
             return false;
         };
-        if row.live().is_some() {
+        if row.live().is_some()
+            || (acp.is_some() && matches!(row.status.as_str(), "running" | "pending"))
+        {
             *unmarked = None;
             return true;
         }
-        let unanswered = Store::messages(&row)
-            .is_ok_and(|messages| messages.last().is_some_and(|last| last["role"] == "user"));
-        unanswered
+        let waits = Store::messages(&row).is_ok_and(|messages| {
+            messages.last().is_some_and(|last| last["role"] == "user")
+                || queued.iter().any(|words| {
+                    let words = words.trim();
+                    !messages
+                        .iter()
+                        .filter(|message| message["role"] == "user")
+                        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                        .filter_map(|block| block["text"].as_str())
+                        .any(|text| events::person(text).contains(words))
+                })
+        });
+        waits
             && unmarked
                 .get_or_insert_with(tokio::time::Instant::now)
                 .elapsed()
@@ -162,6 +178,14 @@ fn sample(row: &Row, now: u64) -> Sample {
     sample.if_unheld = true;
     sample.ended_at = Some(row.updated);
     sample.state = match row.ended() {
+        // Cline marks a cancelled turn idle too; its words then have no answer.
+        TurnState::Finished
+            if Store::messages(row).is_ok_and(|messages| {
+                messages.last().is_some_and(|last| last["role"] == "user")
+            }) =>
+        {
+            Execution::Interrupted
+        }
         TurnState::Finished => Execution::Finished,
         TurnState::Failed => {
             sample.error = Store::messages(row)
