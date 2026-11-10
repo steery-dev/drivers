@@ -6,7 +6,7 @@ license = "MIT"
 description = "Steery's driver for Amp: it reads Amp's threads through Amp's own CLI and plans Amp's setup."
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
 steery-driver-common = { path = "../common" }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
