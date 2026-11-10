@@ -34,6 +34,13 @@ pub(crate) struct Event {
     pub(crate) waits: u32,
 }
 
+impl Event {
+    /// Whether its answer decides if a call runs.
+    pub(crate) fn gates(&self) -> bool {
+        matches!(self.kind, HookKind::BeforeCall | HookKind::Permission)
+    }
+}
+
 /// Every event Copilot fires once per moment that Steery reads, in the order setup writes
 /// them. Copilot reads a hook's `additionalContext` on `sessionStart`, `postToolUse` and
 /// `subagentStart`, and goes on from an `agentStop` that a hook blocks with a reason. It
