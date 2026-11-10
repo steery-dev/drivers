@@ -34,7 +34,7 @@ short name, its tint and its mark.
 | `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive |
-| `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive |
+| `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `amp` | Amp | [`amp`](amp/) | observe |
 
@@ -268,7 +268,7 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code` and `codex` do this. omp and pi have
+  `pick` and `stop` in its driver. `claude-code`, `codex` and `copilot` do this. omp and pi have
   no door of their own, so their door is `plugin`. This repository keeps Steery's plugin in
   `pi-family/plugin/`, and `setup/plan` installs it. The plugin speaks the plugin door,
   version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
@@ -837,20 +837,21 @@ cargo test
 
 ## Copilot: `acp-family/src/copilot/`
 
-One binary, `steery-driver-copilot`, with no settings, at drive. It speaks to GitHub Copilot
+One binary, `steery-driver-copilot`, with no settings, at live. It speaks to GitHub Copilot
 CLI only through what Copilot publishes:
 
 - its conversation files under `session-state/`
 - `hooks/*.json`, `mcp-config.json` and `skills/`
 - `copilot --headless --stdio` (Copilot's own server: JSON-RPC with `Content-Length` frames)
+- the same server of a Copilot window started with `--ui-server`, on its loopback port
 - `copilot -p` with `--output-format json` (a turn), `copilot -s` (a one-shot read),
   `copilot --resume=<id>`, `copilot mcp list --json` and `copilot login`
 
 Copilot's home is `COPILOT_HOME`, else `~/.copilot`.
 
 Copilot's own server is a module of this crate, not a crate of its own. Only Copilot speaks
-it. Drive asks it `auth.getStatus`, `models.list`, `sessions.fork` and `sessions.delete`.
-Live will use it for `session.send` and `session.abort`.
+it, and it is one JSON-RPC client of about 170 lines (`rpc.rs`). Drive asks it
+`auth.getStatus`, `models.list`, `sessions.fork` and `sessions.delete`; Live asks a window's.
 
 **Needs** (protocol 5). When `auth.getStatus` says `isAuthenticated: false`, the plan asks
 `sign-in` in two ways:
@@ -909,7 +910,24 @@ Live will use it for `session.send` and `session.abort`.
   - `reader`: `copilot -s --no-ask-user --no-custom-instructions --disable-builtin-mcps`, with
     `--excluded-tools` for every source, or only `view`, `grep`, `glob`. The reader runs under a
     conversation id of its own (`--session-id`), and `sessions.delete` then removes it.
-  - `terminal`: `cd '<cwd>' && copilot --resume=<id>`, with `COPILOT_HOME` where it is set.
+  - `terminal`: `cd '<cwd>' && copilot --ui-server --resume=<id>`, with `COPILOT_HOME` where
+    it is set. The window it opens has a door.
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`), door `picks`. Copilot's door
+  is a window started with `copilot --ui-server`. Its server listens on a loopback port of its
+  process, and `session.getForeground` names the conversation it shows.
+  - `held`: a live lock's process with a listening port whose window shows the
+    conversation. Its stop is `owner`, with a token of the window and the turn's start.
+  - `say`: `session.send` with the say's id as `clientTurnId`. `queue` is `enqueue`; `steer`
+    is `immediate`, which goes in at the running turn's next model call. `immediate` is
+    refused `harness-busy` while a turn runs or words wait.
+  - `pick`: `session.model.switchTo`, or `setReasoningEffort` alone. Copilot takes any model
+    name and fails at the next turn, so the driver checks the pick against `models.list`.
+  - `stop`: `session.abort`, where the token still names the turn that runs.
+  - `session/changed`: the window's `session.eventLog.read`, waiting for new events. Copilot
+    logs no `session.idle`: an `abort`, a new turn's `user.message`, or
+    `session.metadata.isProcessing` false ends a turn. While a turn runs, the driver asks
+    `isProcessing` each second.
+  - A window that was not started with `--ui-server` has no door: `say` is refused `no-door`.
 
 ```sh
 cd acp-family && cargo build

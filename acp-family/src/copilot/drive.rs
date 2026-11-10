@@ -50,18 +50,29 @@ pub fn held(store: &Store, held: Held) -> Result<HeldBy, Error> {
 
 /// The live process that an in-use lock in `folder` names, and when it started.
 fn locked(folder: &Path) -> Option<(u32, u64)> {
-    std::fs::read_dir(folder).ok()?.flatten().find_map(|entry| {
-        let name = entry.file_name();
-        let pid: u32 = name
-            .to_str()?
-            .strip_prefix("inuse.")?
-            .strip_suffix(".lock")?
-            .parse()
-            .ok()?;
-        let written = millis(entry.metadata().ok()?.modified().ok()?);
-        let started = kernel::started(pid)?;
-        (started <= written + CLOCKS).then_some((pid, started))
-    })
+    locks(folder).into_iter().next()
+}
+
+/// Every live process that an in-use lock in `folder` names, each with when it started.
+pub fn locks(folder: &Path) -> Vec<(u32, u64)> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let pid: u32 = name
+                .to_str()?
+                .strip_prefix("inuse.")?
+                .strip_suffix(".lock")?
+                .parse()
+                .ok()?;
+            let written = millis(entry.metadata().ok()?.modified().ok()?);
+            let started = kernel::started(pid)?;
+            (started <= written + CLOCKS).then_some((pid, started))
+        })
+        .collect()
 }
 
 fn millis(time: SystemTime) -> u64 {
@@ -160,8 +171,9 @@ pub fn find(_store: &Store, _find: ReceiptFind) -> Result<Receipt, Error> {
     ))
 }
 
-/// `terminal`: `cd '<cwd>' && copilot --resume=<id>`, with `COPILOT_HOME='<root>'` before
-/// copilot where Copilot's home is not its default.
+/// `terminal`: `cd '<cwd>' && copilot --ui-server --resume=<id>`, with
+/// `COPILOT_HOME='<root>'` before copilot where Copilot's home is not its default. The
+/// window serves its own door ([`super::window`]), so Steery reaches what it opens.
 pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<TerminalCommand, Error> {
     let id = &terminal.external_id;
     store.transcript(id)?;
@@ -178,7 +190,7 @@ pub fn terminal(home: &Path, store: &Store, terminal: Terminal) -> Result<Termin
     if store.root() != home.join(".copilot") {
         command.push_str(&format!("COPILOT_HOME={} ", quoted(&text(store.root())?)));
     }
-    command.push_str(&format!("copilot --resume={id}"));
+    command.push_str(&format!("copilot --ui-server --resume={id}"));
     let line = match &terminal.holder {
         Some(Holder::Person {
             stop: HolderStop::Process { pid, .. },

@@ -420,7 +420,7 @@ async fn copilot_reads_turns_words_calls_and_an_abort() {
     assert_eq!(
         terminal["command"],
         format!(
-            "cd '/work/project' && COPILOT_HOME='{}' copilot --resume={ID}",
+            "cd '/work/project' && COPILOT_HOME='{}' copilot --ui-server --resume={ID}",
             home.join("copilot").display()
         ),
         "{terminal}"
