@@ -1,5 +1,6 @@
-//! Steery's driver for OpenCode 2 at drive: it reads OpenCode's conversations from its
-//! SQLite file, plans the entries that set OpenCode up for Steery, lists the MCP servers
+//! Steery's driver for OpenCode 2 at live: it reads OpenCode's conversations from its
+//! SQLite file, plans the entries that set OpenCode up for Steery (its plugin among them,
+//! which reaches each live conversation through Steery's plugin door), lists the MCP servers
 //! OpenCode loads, starts OpenCode's turns through its own ACP server, and reads the
 //! permissions those turns ask for. OpenCode 1 keeps other tables in the same file and gets
 //! no driver.
@@ -68,7 +69,7 @@ impl Driver {
 /// OpenCode as Steery reads it, under the protocol picked.
 fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe, wire::Level::Drive],
+        levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some("opencode upgrade".into()),
@@ -105,8 +106,8 @@ fn info(protocol: u32) -> wire::HarnessInfo {
                 model: true,
                 thinking: true,
             },
-            door: None,
-            checks_idle: false,
+            door: Some(harness::LiveDoor::Plugin),
+            checks_idle: true,
             worktrees: false,
             acts: vec![harness::Act::Continue, harness::Act::Fork, harness::Act::New],
             touches: false,
@@ -134,7 +135,7 @@ impl Program for Driver {
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         match method {
             method::SETUP_PLAN => {
-                result(setup::plan(self.place()?, steery_sdk::params(params)?).await)
+                result(setup::plan(self.place()?, steery_sdk::params(params)?).await?)
             }
             method::SESSIONS_LIST => {
                 let asked: harness::List = steery_sdk::params(params)?;
@@ -153,7 +154,7 @@ impl Program for Driver {
                 let _: harness::Fold = steery_sdk::params(params)?;
                 Err(Error::refused(
                     refusal::SELECTION_UNSUPPORTED,
-                    "OpenCode has no plugin door that sends its records",
+                    "OpenCode's plugin sends no entries: the driver reads opencode.db",
                 ))
             }
             method::HOOK_READ => result(hooks::read(self.place()?, steery_sdk::params(params)?)?),
