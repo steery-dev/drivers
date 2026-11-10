@@ -18,7 +18,7 @@ name = "steery-driver-kilo"
 path = "src/bin/kilo.rs"
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v13.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
 steery-driver-common = { path = "../common" }
 # Kilo and Hermes keep their conversations in SQLite; bundled, so no system library is needed.
 rusqlite = { version = "0.32", features = ["bundled"] }
