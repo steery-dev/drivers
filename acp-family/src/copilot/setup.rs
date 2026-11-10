@@ -53,6 +53,11 @@ pub async fn plan(_home: &Path, root: &Path, setup: Setup, needs: bool) -> Resul
             "`--version` did not answer, so the driver says nothing about this build.".into(),
         );
     }
+    notes.push(
+        "Steery reaches a Copilot window only when it starts with `copilot --ui-server`. \
+         A window that Steery opens has it; start your own windows the same way."
+            .into(),
+    );
     notes.extend(home::others_note(&binary));
     Ok(Planned {
         found: Some(Found {

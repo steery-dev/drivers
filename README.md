@@ -929,6 +929,8 @@ it, and it is one JSON-RPC client of about 170 lines (`rpc.rs`). Drive asks it
     `session.metadata.isProcessing` false ends a turn. While a turn runs, the driver asks
     `isProcessing` each second.
   - A window that was not started with `--ui-server` has no door: `say` is refused `no-door`.
+    `setup/plan` notes this. Copilot 1.0.109 accepts `--ui-server` but `--help` does not list
+    it, and no setting turns it on.
 
 ```sh
 cd acp-family && cargo build
