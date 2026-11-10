@@ -35,7 +35,8 @@ struct Folder {
 impl Folder {
     /// The folder at `dir`, or `None` where its summary does not read.
     fn read(dir: PathBuf) -> Option<Self> {
-        let summary: Value = serde_json::from_slice(&std::fs::read(dir.join(SUMMARY)).ok()?).ok()?;
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(dir.join(SUMMARY)).ok()?).ok()?;
         let text = |key: &str| {
             summary[key]
                 .as_str()
@@ -68,7 +69,9 @@ impl Folder {
     }
 
     fn sub_agent(&self) -> bool {
-        self.kind.as_deref().is_some_and(|kind| kind.starts_with("subagent"))
+        self.kind
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("subagent"))
     }
 
     fn transcript(&self) -> PathBuf {
@@ -92,7 +95,10 @@ impl Store {
     fn index(&self) -> Index {
         let mut by_id: BTreeMap<String, Folder> = BTreeMap::new();
         let mut complete = true;
-        let places = std::fs::read_dir(&self.sessions).into_iter().flatten().flatten();
+        let places = std::fs::read_dir(&self.sessions)
+            .into_iter()
+            .flatten()
+            .flatten();
         for place in places.filter(|entry| entry.path().is_dir()) {
             let Ok(folders) = std::fs::read_dir(place.path()) else {
                 complete = false;
@@ -171,7 +177,9 @@ impl Store {
                 .ok_or_else(|| not_found(child))?,
         };
         // A sub-agent's parent is its lead, not a fork: only a fork's parent copied history.
-        let parent = (!folder.sub_agent()).then_some(folder.parent.as_deref()).flatten();
+        let parent = (!folder.sub_agent())
+            .then_some(folder.parent.as_deref())
+            .flatten();
         events::read(
             &folder.transcript(),
             read.cursor.as_deref(),
@@ -191,7 +199,10 @@ fn conversation<'a>(index: &'a Index, id: &str) -> Result<&'a Folder, Error> {
 }
 
 fn not_found(id: &str) -> Error {
-    Error::refused(refusal::NOT_FOUND, format!("Grok keeps no conversation `{id}` here"))
+    Error::refused(
+        refusal::NOT_FOUND,
+        format!("Grok keeps no conversation `{id}` here"),
+    )
 }
 
 fn session(index: &Index, folder: &Folder) -> Session {
@@ -212,7 +223,10 @@ fn session(index: &Index, folder: &Folder) -> Session {
 /// sub-agent folders that name it as their parent.
 fn sub_agents(index: &Index, lead: &Folder) -> Vec<SubAgent> {
     let mut found: BTreeMap<String, SubAgent> = BTreeMap::new();
-    let metas = std::fs::read_dir(lead.dir.join("subagents")).into_iter().flatten().flatten();
+    let metas = std::fs::read_dir(lead.dir.join("subagents"))
+        .into_iter()
+        .flatten()
+        .flatten();
     for entry in metas {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
@@ -231,15 +245,18 @@ fn sub_agents(index: &Index, lead: &Folder) -> Vec<SubAgent> {
             .or_else(|| text("subagent_id"))
             .unwrap_or(name);
         let asked = text("prompt").or_else(|| text("description"));
-        found.insert(id.clone(), SubAgent {
-            name: text("subagent_type"),
-            task: asked.and_then(|asked| asked.lines().next().map(str::to_owned)),
-            started_at: text("started_at").as_deref().and_then(events::millis),
-            transcripts: transcripts(index, &id),
-            external_id: id,
-            lead: None,
-            started_by: None,
-        });
+        found.insert(
+            id.clone(),
+            SubAgent {
+                name: text("subagent_type"),
+                task: asked.and_then(|asked| asked.lines().next().map(str::to_owned)),
+                started_at: text("started_at").as_deref().and_then(events::millis),
+                transcripts: transcripts(index, &id),
+                external_id: id,
+                lead: None,
+                started_by: None,
+            },
+        );
     }
     for child in index.by_id.values() {
         if child.sub_agent() && child.parent.as_deref() == Some(lead.id.as_str()) {

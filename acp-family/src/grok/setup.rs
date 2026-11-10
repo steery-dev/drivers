@@ -13,27 +13,9 @@ use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Se
 /// The oldest release whose conversations, hooks and `[mcp_servers]` this driver reads.
 const MINIMUM: (u64, u64, u64) = (1, 0, 77);
 
-/// The moments Steery's hooks report.
-const EVENTS: [&str; 6] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "Stop",
-    "SessionEnd",
-];
-
-/// Seconds Grok gives a hook before it moves on: its own default, and less at the end,
-/// where Grok waits on the hook before it exits.
-fn timeout(event: &str) -> u32 {
-    match event {
-        "SessionEnd" => 3,
-        _ => 5,
-    }
-}
-
-/// The plan for this machine, with Grok's home `root`.
-pub async fn plan(root: &Path, setup: Setup) -> Planned {
+/// The plan for this machine, with Grok's home `root`. Where `needs` (the protocol picked
+/// has them) and Grok says it is not signed in, the plan asks for a sign-in.
+pub async fn plan(root: &Path, setup: Setup, needs: bool) -> Planned {
     let Some(binary) = super::binary(root) else {
         let (install, refused) = match install() {
             Ok(install) => (Some(install), None),
@@ -70,9 +52,18 @@ pub async fn plan(root: &Path, setup: Setup) -> Planned {
         }
         Some(_) => {}
     }
+    let mut asked = Vec::new();
     if refused.is_none() {
-        notes.extend(others_note("grok", "grok", Some(&root.join("bin")), &binary));
+        notes.extend(others_note(
+            "grok",
+            "grok",
+            Some(&root.join("bin")),
+            &binary,
+        ));
         entries = self::entries(root, &setup);
+        if needs && super::sign_in::lacking(root).await {
+            asked.push(super::sign_in::need());
+        }
     }
     Planned {
         found: Some(Found {
@@ -86,7 +77,7 @@ pub async fn plan(root: &Path, setup: Setup) -> Planned {
         entries,
         notes,
         install: None,
-        needs: Vec::new(),
+        needs: asked,
     }
 }
 
@@ -111,15 +102,15 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         value: json!(setup.skill),
         carries: vec![Part::Skill],
     };
-    let hooks: Map<String, Value> = EVENTS
+    let hooks: Map<String, Value> = super::hooks::EVENTS
         .iter()
         .map(|event| {
             let group = json!([{"hooks": [{
                 "type": "command",
-                "command": format!("{} {event}", setup.hook),
-                "timeout": timeout(event),
+                "command": format!("{} {}", setup.hook, event.name),
+                "timeout": event.waits,
             }]}]);
-            ((*event).to_owned(), group)
+            (event.name.to_owned(), group)
         })
         .collect();
     let hooks = Entry {
