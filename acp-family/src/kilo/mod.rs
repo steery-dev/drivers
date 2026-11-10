@@ -1,15 +1,17 @@
-//! Steery's driver for Kilo at observe: it reads Kilo's conversations from its SQLite
-//! database, plans the entries that set Kilo up for Steery, and lists the MCP servers Kilo
-//! resolves.
+//! Steery's driver for Kilo at drive: it reads Kilo's conversations from its SQLite
+//! database, plans the entries that set Kilo up for Steery, lists the MCP servers Kilo
+//! resolves, and starts Kilo's turns through Kilo's own ACP server.
 
 mod calls;
 mod config;
+mod drive;
 mod events;
 mod setup;
 mod store;
+pub(crate) mod turn;
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -17,11 +19,13 @@ use steery_sdk::{Error, Program, method, refusal, result};
 
 use crate::Harness;
 
-/// The driver: what `initialize` said, and the listings it answered.
+/// The driver: what `initialize` said, the listings it answered, and Kilo's models as
+/// `models` last listed them, which `start` checks a pick against.
 #[derive(Default)]
 pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
+    listed: Mutex<Vec<harness::Model>>,
 }
 
 /// The protocol the driver picked, the person's home, and Kilo's database.
@@ -40,7 +44,7 @@ impl Driver {
 
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: "7.8.27".into(),
                 update: Some("kilo upgrade".into()),
@@ -84,7 +88,11 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![
+                    harness::Act::Continue,
+                    harness::Act::Fork,
+                    harness::Act::New,
+                ],
                 touches: false,
             },
             hooks: Vec::new(),
@@ -135,6 +143,24 @@ impl Program for Driver {
                 refusal::SELECTION_UNSUPPORTED,
                 "Kilo's driver has no plugin door",
             )),
+            method::HELD => result(drive::held(store, &steery_sdk::params(params)?)),
+            method::IDLE => result(drive::idle(store, &steery_sdk::params(params)?)),
+            method::MODELS => {
+                let models = drive::models(setup::binary(&place.home).as_deref(), store).await?;
+                *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = models.models.clone();
+                result(models)
+            }
+            method::START => result(drive::start(
+                setup::binary(&place.home).as_deref(),
+                store,
+                &self.listed.lock().unwrap_or_else(|e| e.into_inner()),
+                steery_sdk::params(params)?,
+            )?),
+            method::TURN_READ => result(drive::turn_line(steery_sdk::params(params)?)),
+            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => result(drive::mark(store, &steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(store, &steery_sdk::params(params)?)?),
+            method::TERMINAL => result(drive::terminal(store, &steery_sdk::params(params)?)?),
             method::MCP_LIST => result(
                 config::list(
                     setup::binary(&place.home).as_deref(),

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::Value;
+use steery_driver_common::kernel;
 use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
@@ -21,11 +22,12 @@ const BATCH: usize = 200;
 /// How long a read waits on Kilo's own write before it gives up.
 const BUSY: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Kilo's database, and the folders it keeps its data and its configuration in.
+/// Kilo's database, and the folders it keeps its data, its configuration and its state in.
 pub struct Store {
     db: PathBuf,
     data: PathBuf,
     config: PathBuf,
+    state: PathBuf,
 }
 
 /// One `session` row.
@@ -54,6 +56,7 @@ impl Store {
             db,
             data,
             config: xdg(home, "XDG_CONFIG_HOME", ".config").join("kilo"),
+            state: xdg(home, "XDG_STATE_HOME", ".local/state").join("kilo"),
         }
     }
 
@@ -65,6 +68,104 @@ impl Store {
     /// Kilo's global configuration folder.
     pub fn config(&self) -> &Path {
         &self.config
+    }
+
+    /// Kilo's state folder: its marks of the turns that run (`session-turn/`) and the
+    /// models picked last (`model.json`).
+    pub fn state(&self) -> &Path {
+        &self.state
+    }
+
+    /// The database where it is not the one Kilo opens with no `KILO_DB`.
+    pub fn moved(&self) -> Option<&Path> {
+        (self.db != self.data.join("kilo.db")).then_some(self.db.as_path())
+    }
+
+    /// The folder a conversation ran in; `not-found` where Kilo has no such conversation.
+    pub fn directory(&self, id: &str) -> Result<Option<PathBuf>, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        db.query_row(
+            "select directory from session where id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| self.refused(error))?
+        .map(|directory| directory.map(PathBuf::from))
+        .ok_or_else(|| not_found(id))
+    }
+
+    /// The id of a conversation's newest message, `""` where it has none. Kilo's message
+    /// ids grow with time, so every message written after it sorts after it.
+    pub fn newest(&self, id: &str) -> Result<String, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        db.query_row(
+            "select (select max(m.id) from message m where m.session_id = s.id) \
+             from session s where s.id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| self.refused(error))?
+        .map(Option::unwrap_or_default)
+        .ok_or_else(|| not_found(id))
+    }
+
+    /// The person's messages after the message `after`, each as the text of its text parts.
+    pub fn said_after(&self, id: &str, after: &str) -> Result<Vec<String>, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let mut statement = db
+            .prepare(
+                "select m.id, p.data from message m join part p on p.message_id = m.id \
+                 where m.session_id = ?1 and m.id > ?2 \
+                 and json_extract(m.data, '$.role') = 'user' order by m.id, p.id",
+            )
+            .map_err(|error| self.refused(error))?;
+        let rows = statement
+            .query_map(params![id, after], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| self.refused(error))?;
+        let mut said: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            let (message, part) = row.map_err(|error| self.refused(error))?;
+            let part: Value = serde_json::from_str(&part).unwrap_or(Value::Null);
+            if part.get("type").and_then(Value::as_str) != Some("text") {
+                continue;
+            }
+            let text = part.get("text").and_then(Value::as_str).unwrap_or_default();
+            match said.last_mut() {
+                Some((last, words)) if *last == message => words.push_str(text),
+                _ => said.push((message, text.to_owned())),
+            }
+        }
+        Ok(said.into_iter().map(|(_, words)| words).collect())
+    }
+
+    /// A conversation's newest person message, when it was written, and its newest answer,
+    /// as Kilo keeps it in `data`.
+    pub fn latest(&self, id: &str) -> Result<Latest, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let newest = |role: &str| {
+            db.query_row(
+                "select time_created, data from message where session_id = ?1 \
+                 and json_extract(data, '$.role') = ?2 order by id desc limit 1",
+                params![id, role],
+                |row| Ok((millis(row.get(0)?), row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(|error| self.refused(error))
+        };
+        let asked = newest("user")?;
+        let answer = newest("assistant")?;
+        Ok(Latest {
+            asked: asked.as_ref().map(|(at, _)| *at),
+            model: asked.and_then(|(_, data)| {
+                let data: Value = serde_json::from_str(&data).ok()?;
+                data.get("model").cloned()
+            }),
+            answer: answer.and_then(|(_, data)| serde_json::from_str(&data).ok()),
+        })
     }
 
     fn open(&self) -> Result<Option<Connection>, Error> {
@@ -157,12 +258,7 @@ impl Store {
     }
 
     pub fn locate(&self, asked: Locate) -> Result<Located, Error> {
-        let not_found = || {
-            Error::refused(
-                refusal::NOT_FOUND,
-                format!("Kilo has no conversation {}", asked.external_id),
-            )
-        };
+        let not_found = || not_found(&asked.external_id);
         let db = self.open()?.ok_or_else(not_found)?;
         let rows = self.rows(&db)?;
         let tree = Tree::new(&rows);
@@ -479,6 +575,74 @@ fn headless(permission: &str) -> bool {
                     && rule.get("pattern").and_then(Value::as_str) == Some("*")
             })
         })
+}
+
+/// Kilo's refusal of a conversation it does not have.
+fn not_found(id: &str) -> Error {
+    Error::refused(refusal::NOT_FOUND, format!("Kilo has no conversation {id}"))
+}
+
+/// The newest of a conversation, as [`Store::latest`] reads it.
+pub struct Latest {
+    /// When the person's newest message was written.
+    pub asked: Option<u64>,
+    /// The model that message asked for: `{providerID, modelID}`.
+    pub model: Option<Value>,
+    /// The newest answer's `data`.
+    pub answer: Option<Value>,
+}
+
+/// A process of Kilo's that runs a turn of a conversation, as its own mark says.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Turn {
+    /// A process on this computer.
+    Here(u32),
+    /// A process on the computer of that name, which shares Kilo's state folder.
+    Elsewhere(String),
+}
+
+impl Store {
+    /// The process that runs a turn of `id` now. Kilo marks each turn with the file
+    /// `session-turn/<id>.<pid>`, which holds the computer's name, from before the turn
+    /// starts until it ends, and refreshes the file's time every 20 s. Kilo itself reads a
+    /// mark of this computer as live while its process lives, up to a day, and a mark of
+    /// another computer as live for a minute after its last refresh.
+    pub fn turn(&self, id: &str) -> Option<Turn> {
+        const ELSEWHERE: std::time::Duration = std::time::Duration::from_secs(60);
+        const HERE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+        let here = hostname();
+        let marks = std::fs::read_dir(self.state.join("session-turn")).ok()?;
+        marks.flatten().find_map(|mark| {
+            let name = mark.file_name();
+            let (session, pid) = name.to_str()?.rsplit_once('.')?;
+            let pid: u32 = pid.parse().ok().filter(|_| session == id)?;
+            let age = mark
+                .metadata()
+                .ok()?
+                .modified()
+                .ok()?
+                .elapsed()
+                .unwrap_or_default();
+            let host = std::fs::read_to_string(mark.path()).ok()?;
+            if here.as_deref() == Some(host.as_str()) {
+                let alive = i32::try_from(pid).is_ok_and(|pid| kernel::exists(pid).unwrap_or(true));
+                (alive && age <= HERE).then_some(Turn::Here(pid))
+            } else {
+                (age <= ELSEWHERE).then_some(Turn::Elsewhere(host))
+            }
+        })
+    }
+}
+
+/// This computer's name, as Kilo writes it in a mark (Node's `os.hostname()`).
+fn hostname() -> Option<String> {
+    let mut name = [0u8; 256];
+    // SAFETY: the buffer is `name.len()` bytes long.
+    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } != 0 {
+        return None;
+    }
+    let end = name.iter().position(|byte| *byte == 0)?;
+    String::from_utf8(name[..end].to_vec()).ok()
 }
 
 fn millis(value: i64) -> u64 {
