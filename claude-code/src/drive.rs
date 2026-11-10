@@ -68,7 +68,7 @@ fn now() -> u64 {
 pub fn held(root: &Path, store: &Store, held: Held) -> HeldBy {
     let dir = registry::dir(root);
     match registry::live(&dir, &held.external_id) {
-        Some(live) => HeldBy::Holder(held_by(&held.external_id, live, registry::kernel::started)),
+        Some(live) => HeldBy::Holder(held_by(&held.external_id, live, steery_driver_common::kernel::started)),
         None => HeldBy::Look(Looked {
             look: Look {
                 transcripts: store
@@ -182,8 +182,8 @@ pub async fn idle(root: &Path, store: &Store, listing: &Listing, held: Held) -> 
     let Ok(mut owners) = registry::strict(
         &registry::dir(root),
         &wanted,
-        registry::kernel::exists,
-        registry::kernel::started,
+        steery_driver_common::kernel::exists,
+        steery_driver_common::kernel::started,
     ) else {
         return Sampled { sample: None };
     };
@@ -370,7 +370,7 @@ pub async fn stop(root: &Path, store: &Store, says: &Says, stop: Stop) -> Result
     let binary = crate::binary()
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "claude is not installed here"))?;
     let left = || deadline.saturating_duration_since(tokio::time::Instant::now());
-    let running = registry::kernel::descendants(job.pid);
+    let running = steery_driver_common::kernel::descendants(job.pid);
     let out = agents::said(&binary, &["stop", &job.job], left())
         .await
         .map_err(refused)?;
@@ -415,7 +415,7 @@ pub(crate) const COMMANDS_END_WITHIN: Duration = Duration::from_millis(500);
 /// SIGKILL for whatever is still there after [`COMMANDS_END_WITHIN`] or by `deadline`,
 /// each to the process read then alone and the group it leads. What the proof says of it.
 pub(crate) async fn end_left(running: &[(u32, u64)], deadline: tokio::time::Instant) -> String {
-    let termed = registry::kernel::signal(running, libc::SIGTERM);
+    let termed = steery_driver_common::kernel::signal(running, libc::SIGTERM);
     if termed == 0 {
         return String::new();
     }
@@ -425,12 +425,12 @@ pub(crate) async fn end_left(running: &[(u32, u64)], deadline: tokio::time::Inst
         tokio::time::sleep(Duration::from_millis(50)).await;
         if running
             .iter()
-            .all(|&(pid, start)| registry::kernel::started(pid) != Some(start))
+            .all(|&(pid, start)| steery_driver_common::kernel::started(pid) != Some(start))
         {
             return format!(", and the {termed} processes it left running ended on SIGTERM");
         }
     }
-    let killed = registry::kernel::signal(running, libc::SIGKILL);
+    let killed = steery_driver_common::kernel::signal(running, libc::SIGKILL);
     format!(", and of the {termed} processes that it left running, {killed} got SIGKILL")
 }
 

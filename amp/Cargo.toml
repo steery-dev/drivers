@@ -1,0 +1,20 @@
+[package]
+name = "steery-driver-amp"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Steery's driver for Amp: it reads Amp's threads through Amp's own CLI and plans Amp's setup."
+
+[dependencies]
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
+steery-driver-common = { path = "../common" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Its own workspace, so it builds alone.
+[workspace]
