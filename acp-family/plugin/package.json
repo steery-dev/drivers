@@ -1,0 +1,13 @@
+{
+  "name": "steery-acp-family-plugin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p ."
+  },
+  "devDependencies": {
+    "@kilocode/plugin": "7.8.27",
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
+  }
+}

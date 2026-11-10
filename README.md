@@ -33,7 +33,7 @@ short name, its tint and its mark.
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
 | `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
-| `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive |
+| `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `amp` | Amp | [`amp`](amp/) | observe |
@@ -268,9 +268,10 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code`, `codex` and `copilot` do this. omp and pi have
-  no door of their own, so their door is `plugin`. This repository keeps Steery's plugin in
-  `pi-family/plugin/`, and `setup/plan` installs it. The plugin speaks the plugin door,
+  `pick` and `stop` in its driver. `claude-code`, `codex` and `copilot` do this. omp, pi and Kilo have
+  no door of their own, so their door is `plugin`. This repository keeps Steery's plugin for
+  omp and pi in `pi-family/plugin/` and Kilo's in `acp-family/plugin/kilo.ts`, and
+  `setup/plan` installs it. The plugin speaks the plugin door,
   version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
   uses the live methods only on conversations that Steery started. The runtime never steers a
   conversation that a person started.
