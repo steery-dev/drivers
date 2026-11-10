@@ -3,6 +3,8 @@
 //! Steery, and reads its hooks' moments.
 
 mod events;
+mod hooks;
+mod mcp;
 mod setup;
 mod store;
 
@@ -25,9 +27,9 @@ pub struct Driver {
 }
 
 /// The person's home, the runtime's config folder, and Grok's home.
-#[allow(dead_code)] // `home` and `config`: for setup.
 pub(crate) struct Place {
     pub home: PathBuf,
+    #[allow(dead_code)] // For setup.
     pub config: PathBuf,
     pub root: PathBuf,
 }
@@ -104,7 +106,7 @@ impl Driver {
                 acts: Vec::<harness::Act>::new(),
                 touches: false,
             },
-            hooks: Vec::new(),
+            hooks: hooks::table(),
         }
     }
 }
@@ -148,6 +150,12 @@ impl Program for Driver {
                     "Grok Build has no plugin door that sends its records",
                 ))
             }
+            method::MCP_LIST => {
+                let place = self.place()?;
+                result(mcp::list(&place.home, &place.root, steery_sdk::params(params)?).await?)
+            }
+            method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             _ => Err(Error::Unknown),
         }
     }
