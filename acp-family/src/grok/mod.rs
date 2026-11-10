@@ -3,6 +3,8 @@
 //! Steery, and reads its hooks' moments.
 
 mod events;
+mod models;
+mod sign_in;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -14,13 +16,15 @@ use steery_sdk::{Error, Program, method, refusal, result};
 
 use crate::Harness;
 
-/// The driver: the protocol it picked from `initialize`, where Grok keeps everything, and
-/// the listings it answered, to answer the next with only what changed.
+/// The driver: the protocol it picked from `initialize`, where Grok keeps everything, the
+/// listings it answered, to answer the next with only what changed, and the sign-in that
+/// waits for its person.
 #[derive(Default)]
 pub struct Driver {
     protocol: OnceLock<u32>,
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
+    sign_ins: sign_in::SignIns,
 }
 
 /// The person's home, the runtime's config folder, and Grok's home.
@@ -40,7 +44,6 @@ pub(crate) fn root(home: &Path) -> PathBuf {
 
 /// The `grok` that Steery runs: the one on `PATH`, else the one its installer links in
 /// `<root>/bin`, a folder that is not yet on `PATH` right after an install.
-#[allow(dead_code)] // For setup, models, MCP and sign-in, which land next.
 pub(crate) fn binary(root: &Path) -> Option<PathBuf> {
     steery_driver_common::program::on_path("grok")
         .or_else(|| steery_driver_common::program::executable(root.join("bin").join("grok")))
@@ -57,6 +60,13 @@ impl Driver {
         Ok(store::Store::new(&self.place()?.root))
     }
 
+    /// Whether the protocol picked has needs.
+    fn needs(&self) -> bool {
+        self.protocol
+            .get()
+            .is_some_and(|&protocol| protocol >= steery_driver_common::program::NEEDS)
+    }
+
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
             levels: vec![wire::Level::Observe],
@@ -64,7 +74,7 @@ impl Driver {
                 release: "1.0.77".into(),
                 update: Some("grok update".into()),
             }),
-            sign_in: Some("run `grok login`".into()),
+            sign_in: Some("run `grok login` in a terminal".into()),
             knowing: "Grok Build gives no identifier of its own to the agent. The Steery server\n\
                       names the identifier when the connection names the conversation: the\n\
                       instructions that the server announces hold that `harness` and\n\
@@ -144,6 +154,14 @@ impl Program for Driver {
                     refusal::SELECTION_UNSUPPORTED,
                     "Grok Build has no plugin door that sends its records",
                 ))
+            }
+            method::MODELS => {
+                let _: wire::Empty = steery_sdk::params(params)?;
+                result(models::list(&self.place()?.root).await?)
+            }
+            method::NEEDS_GIVE if self.needs() => {
+                let give: harness::Give = steery_sdk::params(params)?;
+                result(self.sign_ins.give(&self.place()?.root, give).await?)
             }
             _ => Err(Error::Unknown),
         }
