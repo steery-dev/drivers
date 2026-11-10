@@ -423,10 +423,145 @@ impl<'a> Store<'a> {
         }
         Ok(rows)
     }
+
+    /// Where a conversation stands for drive: OpenCode's execution claim on it, how its
+    /// last turn ended, its newest answer and the person's newest words.
+    pub fn standing(&self, id: &str) -> Result<Standing, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let row = db
+            .query_row(
+                "select s.time_suspended, s.time_idle, s.idle_outcome,
+                        (select count(*) from session_inbox i where i.session_id = s.id),
+                        (select max(m.time_created) from session_message m
+                          where m.session_id = s.id and m.type = 'user'),
+                        (select m.data from session_message m
+                          where m.session_id = s.id and m.type = 'assistant'
+                          order by m.seq desc limit 1)
+                 from session_v2 s where s.id = ?1",
+                params![id],
+                |row| {
+                    let answer: Option<String> = row.get(5)?;
+                    Ok(Standing {
+                        claimed: row.get::<_, Option<i64>>(0)?.map(|at| at.max(0) as u64),
+                        idle: row.get::<_, Option<i64>>(1)?.map(|at| at.max(0) as u64),
+                        outcome: row.get(2)?,
+                        queued: row.get::<_, i64>(3)? > 0,
+                        asked: row.get::<_, Option<i64>>(4)?.map(|at| at.max(0) as u64),
+                        answer: answer.and_then(|data| serde_json::from_str(&data).ok()),
+                    })
+                },
+            )
+            .optional()
+            .map_err(|e| self.unreadable(e))?;
+        row.ok_or_else(|| not_found(id))
+    }
+
+    /// The folder a conversation runs in.
+    pub fn directory(&self, id: &str) -> Result<Option<std::path::PathBuf>, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let directory: Option<String> = db
+            .query_row(
+                "select directory from session_v2 where id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.unreadable(e))?;
+        directory
+            .map(|directory| Some(directory.into()))
+            .ok_or_else(|| not_found(id))
+    }
+
+    /// The `seq` of a conversation's newest message, as a receipt's mark.
+    pub fn newest(&self, id: &str) -> Result<String, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let newest: Option<Option<i64>> = db
+            .query_row(
+                "select (select max(m.seq) from session_message m where m.session_id = s.id)
+                 from session_v2 s where s.id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.unreadable(e))?;
+        let newest = newest.ok_or_else(|| not_found(id))?;
+        Ok(newest.unwrap_or(BEFORE).to_string())
+    }
+
+    /// The person's words in a conversation after the mark ([`Self::newest`]): its messages,
+    /// and the words waiting in its inbox for the turn to take them.
+    pub fn said_after(&self, id: &str, mark: &str) -> Result<Vec<String>, Error> {
+        let after: i64 = mark
+            .parse()
+            .map_err(|_| Error::invalid(format!("`{mark}` is not a mark of OpenCode's")))?;
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let mut statement = db
+            .prepare(
+                "select json_extract(data, '$.text') from session_message
+                  where session_id = ?1 and type = 'user' and seq > ?2
+                 union all
+                 select json_extract(payload, '$.text') from session_inbox
+                  where session_id = ?1",
+            )
+            .map_err(|e| self.unreadable(e))?;
+        let said = statement
+            .query_map(params![id, after], |row| row.get::<_, Option<String>>(0))
+            .map_err(|e| self.unreadable(e))?
+            .filter_map(Result::transpose)
+            .collect::<Result<_, _>>()
+            .map_err(|e| self.unreadable(e))?;
+        Ok(said)
+    }
+
+    /// The call `call` of a conversation's assistant messages: its tool's name, its input,
+    /// and the message that makes it.
+    pub fn tool(&self, id: &str, call: &str) -> Result<Option<(String, Value, String)>, Error> {
+        let db = self.open()?.ok_or_else(|| not_found(id))?;
+        let found = db
+            .query_row(
+                "select json_extract(c.value, '$.name'), json_extract(c.value, '$.state.input'),
+                        m.id
+                 from session_message m, json_each(m.data, '$.content') c
+                 where m.session_id = ?1 and m.type = 'assistant'
+                   and json_extract(c.value, '$.type') = 'tool'
+                   and json_extract(c.value, '$.id') = ?2
+                 order by m.seq desc limit 1",
+                params![id, call],
+                |row| {
+                    let input: Option<String> = row.get(1)?;
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        input
+                            .and_then(|input| serde_json::from_str(&input).ok())
+                            .unwrap_or(Value::Null),
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| self.unreadable(e))?;
+        Ok(found)
+    }
 }
 
 fn not_found(id: &str) -> Error {
     Error::refused(refusal::NOT_FOUND, format!("OpenCode 2 has no conversation `{id}` here"))
+}
+
+/// Where a conversation stands for drive ([`Store::standing`]).
+pub(crate) struct Standing {
+    /// When OpenCode's claim to run a turn of it was taken (`time_suspended`): set while a
+    /// turn runs, and left behind by a process that died in one.
+    pub claimed: Option<u64>,
+    /// When its last turn ended, and how (`succeeded`, `failed`, `interrupted`).
+    pub idle: Option<u64>,
+    pub outcome: Option<String>,
+    /// Words wait in its inbox for a turn to take them.
+    pub queued: bool,
+    /// When the person last said something.
+    pub asked: Option<u64>,
+    /// Its newest assistant message's JSON.
+    pub answer: Option<Value>,
 }
 
 /// The conversations by id, and each one's sub-agents.

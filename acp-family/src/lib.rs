@@ -11,6 +11,7 @@ mod harness;
 mod hermes;
 mod kilo;
 mod opencode;
+mod turn;
 
 pub use harness::Harness;
 
@@ -27,10 +28,15 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
                 _ => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
             }
         }
-        Harness::OpenCode => steery_sdk::serve(|_notifier| opencode::Driver::default()).await,
+        Harness::OpenCode => match std::env::args().nth(1).as_deref() {
+            Some("turn") => {
+                turn::main(opencode::drive::Turns::new(), std::env::args().skip(2)).await
+            }
+            _ => steery_sdk::serve(|_notifier| opencode::Driver::default()).await,
+        },
         Harness::Hermes => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
         Harness::Kilo => match std::env::args().nth(1).as_deref() {
-            Some("turn") => kilo::turn::main(std::env::args().skip(2)).await,
+            Some("turn") => turn::main(kilo::drive::Turns::new(), std::env::args().skip(2)).await,
             _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
         },
         Harness::Cursor => steery_sdk::serve(|_notifier| cursor::Driver::default()).await,
