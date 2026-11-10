@@ -21,6 +21,9 @@ use super::events::{Fold, Row, State};
 /// The most rows that one read answers.
 const BATCH: i64 = 200;
 
+/// The `seq` before every row: rows OpenCode 2 imported from OpenCode 1 start at 0.
+const BEFORE: i64 = -1;
+
 /// Where a read stands: the `seq` and id of the last row read, and what the rows so far
 /// carry on.
 #[derive(Serialize, Deserialize)]
@@ -227,7 +230,7 @@ impl<'a> Store<'a> {
             (None, Some(cursor)) => {
                 let cursor = Cursor::parse(cursor)?;
                 let held = match &cursor.id {
-                    None => cursor.seq == 0,
+                    None => cursor.seq == BEFORE,
                     Some(row) => db
                         .query_row(
                             "select count(*) from session_message
@@ -242,15 +245,15 @@ impl<'a> Store<'a> {
                     (cursor.seq, cursor.st, false)
                 } else {
                     reset = true;
-                    (0, State::default(), false)
+                    (BEFORE, State::default(), false)
                 }
             }
-            (None, None) => (0, State::default(), false),
+            (None, None) => (BEFORE, State::default(), false),
         };
         // Rows at or before the newest `idle` row are settled, whatever they say.
         let settled: i64 = db
             .query_row(
-                "select coalesce(max(seq), 0) from session_message
+                "select coalesce(max(seq), -1) from session_message
                  where session_id = ?1 and type = 'idle' and seq < ?2",
                 params![id, end],
                 |row| row.get(0),
@@ -275,14 +278,15 @@ impl<'a> Store<'a> {
             fold.row(row);
             last = Some((row.seq, row.id.clone()));
         }
-        if !more && !stopped
-            && let Some((parent, at)) = fold.fork
-        {
-            fold.forked(parent, at);
+        if !more && !stopped {
+            fold.end_imported();
+            if let Some((parent, at)) = fold.fork {
+                fold.forked(parent, at);
+            }
         }
         let (seq, row) = match last {
             Some((seq, row)) => (seq, Some(row)),
-            None if from == 0 => (0, None),
+            None if from == BEFORE => (BEFORE, None),
             None => (from, self.row_id(&db, id, from)?),
         };
         Ok(Events {
@@ -296,7 +300,7 @@ impl<'a> Store<'a> {
             events: fold.events,
             more: more && !stopped,
             reset,
-            whole: from == 0,
+            whole: from == BEFORE,
             after: if tailed { None } else { row },
         })
     }
@@ -323,7 +327,7 @@ impl<'a> Store<'a> {
             .query(params![session, end])
             .map_err(|e| self.unreadable(e))?;
         let mut total = 0u64;
-        let mut start = 0;
+        let mut start = BEFORE;
         let mut count = 0;
         while let Some(row) = rows.next().map_err(|e| self.unreadable(e))? {
             let seq: i64 = row.get(0).map_err(|e| self.unreadable(e))?;
@@ -335,16 +339,29 @@ impl<'a> Store<'a> {
             }
             start = seq - 1;
         }
-        Ok(start.max(0))
+        Ok(start)
     }
 
     /// The rows after `from` and before `end`, their parts and blobs joined.
     fn rows(&self, db: &Connection, session: &str, from: i64, end: i64) -> Result<Vec<Row>, Error> {
-        let mut statement = db
-            .prepare(
-                "select seq, id, type, time_created, data from session_message
-                 where session_id = ?1 and seq > ?2 and seq < ?3 order by seq limit ?4",
+        // OpenCode 2's first run copies OpenCode 1's messages, ids kept, and leaves `message`.
+        let v1: bool = db
+            .query_row(
+                "select count(*) > 0 from sqlite_master where type = 'table' and name = 'message'",
+                [],
+                |found| found.get(0),
             )
+            .map_err(|e| self.unreadable(e))?;
+        let imported = if v1 {
+            "exists(select 1 from message where message.id = session_message.id)"
+        } else {
+            "0"
+        };
+        let mut statement = db
+            .prepare(&format!(
+                "select seq, id, type, time_created, data, {imported} from session_message
+                 where session_id = ?1 and seq > ?2 and seq < ?3 order by seq limit ?4"
+            ))
             .map_err(|e| self.unreadable(e))?;
         let rows = statement
             .query_map(params![session, from, end, BATCH], |row| {
@@ -356,6 +373,7 @@ impl<'a> Store<'a> {
                     created: row.get::<_, i64>(3)?.max(0) as u64,
                     data: serde_json::from_str(&data).unwrap_or(Value::Null),
                     blobs: Vec::new(),
+                    imported: row.get(5)?,
                 })
             })
             .map_err(|e| self.unreadable(e))?;

@@ -1,9 +1,10 @@
 //! OpenCode's message rows, read as Steery's events. A row of `session_message` is one
 //! message: `user`, `assistant`, `idle`, `compaction`, `shell` and a few the person never
-//! reads. An `idle` row ends the turn that the prompts before it began.
+//! reads. An `idle` row ends the turn that the prompts before it began. OpenCode 1 wrote
+//! no `idle` rows, so a turn that OpenCode 2 imported from it ends at its last reply.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use steery_sdk::wire::harness::{
     Call, Clip, Compactor, Count, Event, Execution, Failure, FailureKind, Group, TurnState, Voice,
 };
@@ -17,6 +18,8 @@ pub(crate) struct Row {
     pub data: Value,
     /// Its attachments' bytes from `blob`, base64, by the hash of their `media:` ref.
     pub blobs: Vec<(String, String)>,
+    /// A row that OpenCode 2's first run copied from OpenCode 1's `message` table.
+    pub imported: bool,
 }
 
 impl Row {
@@ -57,6 +60,9 @@ pub(crate) struct State {
     pub inherited: bool,
     #[serde(default)]
     pub forked: bool,
+    /// When the last reply of an open imported turn completed: where that turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_end: Option<u64>,
 }
 
 /// Rows folded into events.
@@ -77,6 +83,9 @@ impl Fold<'_> {
             } else {
                 self.forked(parent, at);
             }
+        }
+        if !row.imported || row.kind == "user" {
+            self.end_imported();
         }
         let data = &row.data;
         let at = data["time"]["created"].as_u64().unwrap_or(row.created);
@@ -99,6 +108,14 @@ impl Fold<'_> {
                 at,
                 parent: parent.to_owned(),
             });
+        }
+    }
+
+    /// The end of an imported turn, at its last reply: failed where that reply failed.
+    pub fn end_imported(&mut self) {
+        if let Some(at) = self.state.imported_end.take() {
+            let outcome = if self.state.failure.is_some() { "failed" } else { "succeeded" };
+            self.idle(at, &json!({ "outcome": outcome }));
         }
     }
 
@@ -185,6 +202,9 @@ impl Fold<'_> {
         }
         if let Some(error) = data.get("error").filter(|e| e.is_object()) {
             self.state.failure = Some(failure(error, at, &data["model"]));
+        }
+        if row.imported {
+            self.state.imported_end = Some(data["time"]["completed"].as_u64().unwrap_or(at));
         }
         let tokens = &data["tokens"];
         if tokens.is_object() {

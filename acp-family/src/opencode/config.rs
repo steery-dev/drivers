@@ -148,8 +148,10 @@ pub(crate) fn mcp(place: &Place, asked: McpList) -> McpServers {
             complete = false;
             continue;
         };
-        // A plugin's `config` hook can add servers too.
-        if document["plugin"].as_array().is_some_and(|plugins| !plugins.is_empty()) {
+        // A plugin's `config` hook can add servers too: OpenCode 1's `plugin` list, OpenCode
+        // 2's `plugins`.
+        let listed = |key: &str| document[key].as_array().is_some_and(|list| !list.is_empty());
+        if listed("plugin") || listed("plugins") {
             complete = false;
         }
         for (name, server) in servers(&document) {
@@ -163,6 +165,18 @@ pub(crate) fn mcp(place: &Place, asked: McpList) -> McpServers {
             loaded.push((name.clone(), url, on));
         }
     }
+    // Or a module in a config folder's `plugin` or `plugins` folder.
+    let mut folders: Vec<&Path> = watch.iter().filter_map(|file| file.parent()).collect();
+    folders.dedup();
+    if folders
+        .into_iter()
+        .filter(|folder| {
+            *folder == place.config || *folder == system() || folder.ends_with(".opencode")
+        })
+        .any(holds_plugins)
+    {
+        complete = false;
+    }
     McpServers {
         servers: loaded
             .into_iter()
@@ -172,6 +186,19 @@ pub(crate) fn mcp(place: &Place, asked: McpList) -> McpServers {
         complete,
         watch,
     }
+}
+
+/// A config folder with a module OpenCode loads as a plugin: a `.ts` or `.js` file, or a
+/// folder, in its `plugin` or `plugins` folder.
+fn holds_plugins(folder: &Path) -> bool {
+    ["plugin", "plugins"].iter().any(|name| {
+        std::fs::read_dir(folder.join(name)).is_ok_and(|entries| {
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                path.is_dir() || path.extension().is_some_and(|ext| ext == "ts" || ext == "js")
+            })
+        })
+    })
 }
 
 /// The macOS managed preferences that OpenCode reads, where an administrator deployed them.
