@@ -25,6 +25,29 @@ const ASKS_WAITS: u32 = 86_400;
 /// Grok's event before a tool call: the one hook that can block it.
 pub(crate) const BEFORE_CALL: &str = "PreToolUse";
 
+/// What follows `<hook> PreToolUse` in Grok's hook file. Grok runs a call whose hook exits
+/// other than 0 or 2 (1.0.77), so where Steery's hook fails (the runtime gone, the binary
+/// moved) this exits 2, Grok's block, with standard error as its reason. It does so only
+/// in a turn Steery started: `STEERY_STARTED` names a turn and the pid of grok's parent
+/// (PROTOCOL.md §3.3). Grok is the hook's parent, so a person's own Grok, even one that
+/// inherited the variable, keeps Grok's own behaviour. Grok skips a hook whose command
+/// names an unset variable without a modifier, so each read has one.
+const GUARD: &str = r#" || { s=$?; p=$(ps -o ppid= -p "${PPID:-0}" | tr -d " "); case "${STEERY_STARTED:-}" in "$p":turn*) echo "Steery's hook failed (exit $s) in a turn Steery started, so the call is blocked" >&2; exit 2;; esac; exit $s; }"#;
+
+/// The command setup writes for `event`, after the runtime's `hook` command.
+pub(crate) fn command(hook: &str, event: &str) -> String {
+    if event == BEFORE_CALL {
+        format!("{hook} {event}{GUARD}")
+    } else {
+        format!("{hook} {event}")
+    }
+}
+
+/// Whether `command` is the one setup writes for [`BEFORE_CALL`], for any `hook`.
+pub(crate) fn guards(command: &str) -> bool {
+    command.ends_with(&format!(" {BEFORE_CALL}{GUARD}"))
+}
+
 /// One of Grok's hook events Steery is hooked on, by its name in Grok's hook files.
 pub(crate) struct Event {
     pub(crate) name: &'static str,

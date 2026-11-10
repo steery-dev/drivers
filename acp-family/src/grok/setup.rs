@@ -107,7 +107,7 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         .map(|event| {
             let group = json!([{"hooks": [{
                 "type": "command",
-                "command": format!("{} {}", setup.hook, event.name),
+                "command": super::hooks::command(&setup.hook, event.name),
                 "timeout": event.waits,
             }]}]);
             (event.name.to_owned(), group)
@@ -129,10 +129,10 @@ pub(crate) fn hooks_file(root: &Path) -> PathBuf {
 }
 
 /// Whether Steery's `PreToolUse` hook is in the file setup wrote, on every tool: a group
-/// with no `matcher` that runs `<hook> PreToolUse`. A turn Steery starts runs with
-/// `--always-approve`, so this hook is its only gate beside the person's `deny` rules.
-/// Grok 1.0.77 runs the call when the hook fails, crashes or times out, and a hook's
-/// `allow` does not get past Grok's own ask, which a headless run cancels.
+/// with no `matcher` that runs the command setup writes ([`super::hooks::guards`]). A turn
+/// Steery starts runs with `--always-approve`, so this hook is its only gate beside the
+/// person's `deny` rules, and a hook's `allow` does not get past Grok's own ask, which a
+/// headless run cancels. Grok 1.0.77 still runs the call when the hook times out.
 pub(crate) fn gated(root: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(hooks_file(root)) else {
         return false;
@@ -140,7 +140,6 @@ pub(crate) fn gated(root: &Path) -> bool {
     let Ok(document) = serde_json::from_str::<Value>(&text) else {
         return false;
     };
-    let suffix = format!(" {}", super::hooks::BEFORE_CALL);
     document["hooks"][super::hooks::BEFORE_CALL]
         .as_array()
         .into_iter()
@@ -149,9 +148,7 @@ pub(crate) fn gated(root: &Path) -> bool {
         .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
         .any(|hook| {
             hook["type"] == "command"
-                && hook["command"]
-                    .as_str()
-                    .is_some_and(|command| command.ends_with(&suffix))
+                && hook["command"].as_str().is_some_and(super::hooks::guards)
         })
 }
 
