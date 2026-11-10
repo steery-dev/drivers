@@ -3,6 +3,8 @@
 //! Steery, and reads its hooks' moments.
 
 mod events;
+mod hooks;
+mod mcp;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -24,9 +26,9 @@ pub struct Driver {
 }
 
 /// The person's home, the runtime's config folder, and Grok's home.
-#[allow(dead_code)] // `home` and `config`: for setup.
 pub(crate) struct Place {
     pub home: PathBuf,
+    #[allow(dead_code)] // For setup.
     pub config: PathBuf,
     pub root: PathBuf,
 }
@@ -40,7 +42,6 @@ pub(crate) fn root(home: &Path) -> PathBuf {
 
 /// The `grok` that Steery runs: the one on `PATH`, else the one its installer links in
 /// `<root>/bin`, a folder that is not yet on `PATH` right after an install.
-#[allow(dead_code)] // For setup, models, MCP and sign-in, which land next.
 pub(crate) fn binary(root: &Path) -> Option<PathBuf> {
     steery_driver_common::program::on_path("grok")
         .or_else(|| steery_driver_common::program::executable(root.join("bin").join("grok")))
@@ -104,7 +105,7 @@ impl Driver {
                 acts: Vec::<harness::Act>::new(),
                 touches: false,
             },
-            hooks: Vec::new(),
+            hooks: hooks::table(),
         }
     }
 }
@@ -145,6 +146,12 @@ impl Program for Driver {
                     "Grok Build has no plugin door that sends its records",
                 ))
             }
+            method::MCP_LIST => {
+                let place = self.place()?;
+                result(mcp::list(&place.home, &place.root, steery_sdk::params(params)?).await?)
+            }
+            method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             _ => Err(Error::Unknown),
         }
     }
