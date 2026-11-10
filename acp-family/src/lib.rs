@@ -19,7 +19,10 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
         Harness::Copilot => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
         Harness::Hermes => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
-        Harness::Kilo => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
+        Harness::Kilo => match std::env::args().nth(1).as_deref() {
+            Some("turn") => kilo::turn::main(std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
+        },
         Harness::Cursor => steery_sdk::serve(|_notifier| cursor::Driver::default()).await,
     }
 }
