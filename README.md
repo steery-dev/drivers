@@ -32,6 +32,7 @@ short name, its tint and its mark.
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe |
+| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -68,6 +69,7 @@ agrees (PROTOCOL.md §4.1).
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
+| `gemini` | npm's global folder (`npm prefix -g`) | `npm install -g @google/gemini-cli`. Offered only where npm is here and `node --version` names 20 or newer within 5 s. Else refused, with the requirement that is missing. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:

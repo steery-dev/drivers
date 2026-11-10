@@ -282,6 +282,7 @@ name = "steery-driver-acp-family"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "memchr",
  "rusqlite",
  "serde",
  "serde_json",

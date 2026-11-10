@@ -1,0 +1,37 @@
+[
+  {
+    "sessionId": "df636b9c-090c-436e-a92e-7e8798e4b943",
+    "messageId": 0,
+    "type": "user",
+    "message": "first prompt list files",
+    "timestamp": "2026-11-10T11:43:30.152Z"
+  },
+  {
+    "sessionId": "df636b9c-090c-436e-a92e-7e8798e4b943",
+    "messageId": 1,
+    "type": "user",
+    "message": "second prompt list files",
+    "timestamp": "2026-11-10T11:43:40.391Z"
+  },
+  {
+    "sessionId": "df636b9c-090c-436e-a92e-7e8798e4b943",
+    "messageId": 2,
+    "type": "user",
+    "message": "/compress",
+    "timestamp": "2026-11-10T11:43:49.992Z"
+  },
+  {
+    "sessionId": "df636b9c-090c-436e-a92e-7e8798e4b943",
+    "messageId": 3,
+    "type": "user",
+    "message": "third prompt after compress",
+    "timestamp": "2026-11-10T11:44:07.515Z"
+  },
+  {
+    "sessionId": "df636b9c-090c-436e-a92e-7e8798e4b943",
+    "messageId": 4,
+    "type": "user",
+    "message": "/quit",
+    "timestamp": "2026-11-10T11:44:16.872Z"
+  }
+]

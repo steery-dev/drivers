@@ -7,6 +7,8 @@ pub enum Harness {
     Grok,
     /// Kilo, whose executable is `kilo`.
     Kilo,
+    /// Google's Gemini CLI, whose executable is `gemini`.
+    Gemini,
 }
 
 impl Harness {
@@ -15,6 +17,7 @@ impl Harness {
         match self {
             Self::Grok => "grok",
             Self::Kilo => "kilo",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -23,6 +26,7 @@ impl Harness {
         match self {
             Self::Grok => "Grok Build",
             Self::Kilo => "Kilo",
+            Self::Gemini => "Gemini CLI",
         }
     }
 
@@ -31,6 +35,7 @@ impl Harness {
         match self {
             Self::Grok => "Gk",
             Self::Kilo => "Kl",
+            Self::Gemini => "Gm",
         }
     }
 
@@ -39,6 +44,7 @@ impl Harness {
         match self {
             Self::Grok => "#1d1d1f",
             Self::Kilo => "#617a91",
+            Self::Gemini => "#4285f4",
         }
     }
 
