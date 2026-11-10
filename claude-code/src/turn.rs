@@ -719,7 +719,7 @@ async fn halt(binary: &Path, root: &Path, job: Option<&String>, signal: &str) ->
     let running = crate::registry::living(&crate::registry::dir(root))
         .find(|session| session.job_id.as_deref() == Some(job.as_str()))
         .and_then(|session| u32::try_from(session.pid).ok())
-        .map(crate::registry::kernel::descendants)
+        .map(steery_driver_common::kernel::descendants)
         .unwrap_or_default();
     match agents::said(binary, &["stop", job], HALT_WITHIN).await {
         Ok(out) if out.status.success() => {
