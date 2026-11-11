@@ -37,6 +37,7 @@ short name, its tint and its mark.
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive |
+| `goose` | Goose | [`acp-family`](acp-family/) | observe |
 | `amp` | Amp | [`amp`](amp/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -79,6 +80,7 @@ agrees (PROTOCOL.md §4.1).
 | `cursor` | `~/.local/bin` | `sh -c "curl -fsS https://cursor.com/install \| bash"` |
 | `amp` | `AMP_HOME/bin`, else `~/.amp/bin` (and its link `~/.local/bin/amp`) | `bash -c "curl -fsSL https://ampcode.com/install.sh \| bash"` |
 | `cline` | npm's global folder | `npm install --global cline`, offered where npm is on `PATH` |
+| `goose` | `GOOSE_BIN_DIR`, else `~/.local/bin` | `bash -c "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \| CONFIGURE=false bash"`, offered where bash, curl and tar are on `PATH` |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -114,6 +116,7 @@ signed in, as the harness itself says.
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
 | `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
 | `cline` | ``run `cline auth` in a terminal`` | `models` starts `cline --acp`: `session/new` refused with ACP `-32000` (auth required) means not signed in. |
+| `goose` | ``run `goose configure` in a terminal`` | not told (the driver has no `models` at observe) |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -304,6 +307,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `cursor` | `~/.cursor/mcp.json`, whatever `CURSOR_CONFIG_DIR` says | `.cursor/mcp.json`, listed before its person approves it in Cursor | never: plugins, team servers |
 | `amp` | `amp mcp list --json` run at `/` | the same, run in the folder (it adds `.amp/settings.json`) | never: skills, plugins and toolboxes bring servers |
 | `cline` | Cline's MCP settings file: `CLINE_MCP_SETTINGS_PATH`, else `<CLINE_DIR or ~/.cline>/data/settings/cline_mcp_settings.json`. `mcpServers.<name>`, nested `transport` or flat shape. `disabled: true` off. | the same file: Cline reads none per folder | not when the file is not JSON |
+| `goose` | `/etc/goose/config.yaml`, the files `GOOSE_ADDITIONAL_CONFIG_FILES` names, then `<GOOSE_PATH_ROOT>/config` or `<XDG_CONFIG_HOME or ~/.config>/goose`'s `config.yaml`, a later file's entry over an earlier's. `extensions.<key>` of type `stdio`, `streamable_http` or `builtin`; `enabled: false` off. | the same files: Goose reads none per folder | never: plugins and recipes bring extensions |
 
 ## Adding a driver
 
