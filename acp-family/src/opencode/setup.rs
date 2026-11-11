@@ -12,7 +12,6 @@ use serde_json::json;
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
-use super::config;
 use super::place::{self, Place};
 
 /// Steery's MCP server, as the entry names it.
@@ -147,7 +146,9 @@ pub(crate) async fn plan(place: &Place, setup: Setup) -> Result<Planned, Error> 
 /// a JSON writer does not.
 fn strict(settings: &Path) -> Option<String> {
     let text = std::fs::read_to_string(settings).ok()?;
-    if serde_json::from_str::<serde_json::Value>(&text).is_ok() || config::parse(&text).is_err() {
+    if serde_json::from_str::<serde_json::Value>(&text).is_ok()
+        || crate::jsonc::parse(&text).is_err()
+    {
         return None;
     }
     Some(format!(

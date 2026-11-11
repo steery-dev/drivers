@@ -551,6 +551,7 @@ dependencies = [
  "futures-util",
  "libc",
  "listeners",
+ "memchr",
  "rusqlite",
  "serde",
  "serde_json",
