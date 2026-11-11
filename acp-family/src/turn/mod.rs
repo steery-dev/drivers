@@ -124,6 +124,10 @@ pub trait Host {
         queued: &[String],
         unmarked: &mut Option<tokio::time::Instant>,
     ) -> bool;
+
+    /// The harness opened `session` for the turn, before any words go in: a harness whose
+    /// store does not tell a driven conversation from a headless one marks it here.
+    fn opened(&self, _session: &str) {}
 }
 
 /// What a turn is asked to do, as its command line says it.
@@ -265,6 +269,7 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                     .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?
             }
         };
+        host.opened(&session);
         for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
             if let Some(value) = value {
                 let params = json!({"sessionId": session, "configId": option, "value": value});
