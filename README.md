@@ -39,7 +39,7 @@ short name, its tint and its mark.
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive, live |
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe |
-| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
+| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver

@@ -6,12 +6,15 @@
 //!
 //! The chat file does not say whether a person was at it. Gemini's terminal writes each
 //! prompt that a person typed to `<project>/logs.json`, and a run with `-p` or `--acp`
-//! does not: a conversation whose id is there is listed, and one that is not is excluded.
+//! does not. A turn that Steery runs speaks to `--acp` for its person, and leaves the
+//! conversation's id in `<root>/steery/started/` ([`started`]). A conversation whose id is
+//! in either place is listed, and one that is in neither is excluded.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 
 use memchr::memmem;
 use serde_json::Value;
@@ -30,10 +33,20 @@ const LOGS: &str = "logs.json";
 const TITLE: usize = 100;
 /// How deep sub-agents that start sub-agents are followed.
 const DEPTH: usize = 4;
+/// How long a mark of a turn Steery started stays once its conversation is gone: a turn
+/// marks its conversation as Gemini opens it, before its file can be read.
+const MARK_STAYS: Duration = Duration::from_secs(3_600);
+
+/// Where a turn Steery runs leaves the id of each conversation it opened, one empty file
+/// for each. Gemini reads nothing under its root's `steery`.
+pub(crate) fn started(root: &Path) -> PathBuf {
+    root.join("steery").join("started")
+}
 
 /// Gemini's conversations under its root, and what was read of each file.
 pub struct Store {
     tmp: PathBuf,
+    started: PathBuf,
     scans: Mutex<HashMap<PathBuf, Scan>>,
     logs: Mutex<HashMap<PathBuf, Logged>>,
 }
@@ -97,6 +110,8 @@ struct Conversation {
 struct Index {
     projects: Vec<Project>,
     by_id: BTreeMap<String, Conversation>,
+    /// The conversations that a turn Steery ran opened.
+    started: BTreeSet<String>,
     complete: bool,
 }
 
@@ -104,6 +119,7 @@ impl Store {
     pub fn new(root: &Path) -> Self {
         Self {
             tmp: root.join("tmp"),
+            started: started(root),
             scans: Mutex::default(),
             logs: Mutex::default(),
         }
@@ -113,6 +129,7 @@ impl Store {
         let mut index = Index {
             projects: Vec::new(),
             by_id: BTreeMap::new(),
+            started: BTreeSet::new(),
             complete: true,
         };
         // A file that is gone is forgotten.
@@ -176,7 +193,33 @@ impl Store {
                 }
             }
         }
+        self.marks(&mut index);
         index
+    }
+
+    /// The marks of the turns Steery ran, into `index`. A mark whose conversation is gone
+    /// from a complete index is removed once it is [`MARK_STAYS`] old.
+    fn marks(&self, index: &mut Index) {
+        let entries = std::fs::read_dir(&self.started)
+            .into_iter()
+            .flatten()
+            .flatten();
+        for entry in entries {
+            let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let old = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| SystemTime::now().duration_since(at).ok())
+                .is_some_and(|age| age >= MARK_STAYS);
+            if index.complete && old && !index.by_id.contains_key(&id) {
+                let _ = std::fs::remove_file(entry.path());
+                continue;
+            }
+            index.started.insert(id);
+        }
     }
 
     /// What `file` says of its conversation, read on from where the last read stopped.
@@ -234,7 +277,7 @@ impl Store {
             if !conversation.head.person {
                 continue;
             }
-            if index.typed(conversation) {
+            if index.listed(conversation) {
                 sessions.push(self.session(&index, conversation));
             } else {
                 excluded.push(conversation.id.clone());
@@ -262,6 +305,20 @@ impl Store {
         Ok(Located {
             session: self.session(&index, conversation),
         })
+    }
+
+    /// The files of the conversation `id`, oldest first (never none), and the folder it ran
+    /// in.
+    pub fn files(&self, id: &str) -> Result<(Vec<PathBuf>, Option<PathBuf>), Error> {
+        let index = self.index();
+        let conversation = index.conversation(id)?;
+        if conversation.files.is_empty() {
+            return Err(not_found(id));
+        }
+        Ok((
+            conversation.files.clone(),
+            index.projects[conversation.project].cwd.clone(),
+        ))
     }
 
     /// `sessions/read`.
@@ -363,19 +420,20 @@ impl Store {
 }
 
 impl Index {
-    /// A person typed into the conversation.
-    fn typed(&self, conversation: &Conversation) -> bool {
-        self.projects[conversation.project]
-            .typed
-            .as_ref()
-            .is_some_and(|typed| typed.contains(&conversation.id))
+    /// A person typed into the conversation, or a turn Steery ran opened it.
+    fn listed(&self, conversation: &Conversation) -> bool {
+        self.started.contains(&conversation.id)
+            || self.projects[conversation.project]
+                .typed
+                .as_ref()
+                .is_some_and(|typed| typed.contains(&conversation.id))
     }
 
-    /// The conversation `id` names: one that a person typed into.
+    /// The conversation `id` names: one that is listed.
     fn conversation(&self, id: &str) -> Result<&Conversation, Error> {
         self.by_id
             .get(id)
-            .filter(|conversation| conversation.head.person && self.typed(conversation))
+            .filter(|conversation| conversation.head.person && self.listed(conversation))
             .ok_or_else(|| not_found(id))
     }
 }
@@ -536,7 +594,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn not_found(id: &str) -> Error {
     Error::refused(
         refusal::NOT_FOUND,
-        format!("Gemini CLI keeps no conversation `{id}` that a person typed into here"),
+        format!("Gemini CLI keeps no conversation `{id}` that a person ran here"),
     )
 }
 

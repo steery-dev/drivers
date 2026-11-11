@@ -52,6 +52,9 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             Some("turn") => turn::main(goose::drive::Turns, std::env::args().skip(2)).await,
             _ => steery_sdk::serve(|_notifier| goose::Driver::default()).await,
         },
-        Harness::Gemini => steery_sdk::serve(|_notifier| gemini::Driver::default()).await,
+        Harness::Gemini => match std::env::args().nth(1).as_deref() {
+            Some("turn") => turn::main(gemini::drive::Turns::new(), std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| gemini::Driver::default()).await,
+        },
     }
 }
