@@ -38,7 +38,10 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             }
             _ => steery_sdk::serve(|_notifier| opencode::Driver::default()).await,
         },
-        Harness::Hermes => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
+        Harness::Hermes => match std::env::args().nth(1).as_deref() {
+            Some("turn") => turn::main(hermes::drive::Turns::new(), std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
+        },
         Harness::Kilo => match std::env::args().nth(1).as_deref() {
             Some("turn") => turn::main(kilo::drive::Turns::new(), std::env::args().skip(2)).await,
             _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
