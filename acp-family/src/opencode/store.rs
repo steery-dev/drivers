@@ -11,9 +11,7 @@ use base64::Engine as _;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steery_sdk::wire::harness::{
-    Events, List, Listed, Locate, Located, Read, Session, SubAgent,
-};
+use steery_sdk::wire::harness::{Events, List, Listed, Locate, Located, Read, Session, SubAgent};
 use steery_sdk::{Error, refusal};
 
 use super::events::{Fold, Row, State};
@@ -41,7 +39,9 @@ impl Cursor {
         serde_json::from_str::<Self>(cursor)
             .ok()
             .filter(|cursor| cursor.v == 1)
-            .ok_or_else(|| Error::invalid(format!("this driver did not give the cursor `{cursor}`")))
+            .ok_or_else(|| {
+                Error::invalid(format!("this driver did not give the cursor `{cursor}`"))
+            })
     }
 
     fn said(&self) -> String {
@@ -135,7 +135,8 @@ impl<'a> Store<'a> {
                 })
             })
             .map_err(|e| self.unreadable(e))?;
-        rows.collect::<Result<_, _>>().map_err(|e| self.unreadable(e))
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| self.unreadable(e))
     }
 
     /// `sessions/list`: each lead conversation; its sub-agents are listed under it.
@@ -160,7 +161,10 @@ impl<'a> Store<'a> {
                 continue;
             }
             let session = tree.session(conversation);
-            if list.seen_since.is_none_or(|since| session.updated_at >= since) {
+            if list
+                .seen_since
+                .is_none_or(|since| session.updated_at >= since)
+            {
                 sessions.push(session);
             }
         }
@@ -192,7 +196,11 @@ impl<'a> Store<'a> {
 
     /// `sessions/read`: the events of a conversation, or of one of its sub-agents. `servers`
     /// names the MCP servers that OpenCode loads in a folder, to tell their tools apart.
-    pub fn read(&self, read: Read, servers: impl FnOnce(&Path) -> Vec<String>) -> Result<Events, Error> {
+    pub fn read(
+        &self,
+        read: Read,
+        servers: impl FnOnce(&Path) -> Vec<String>,
+    ) -> Result<Events, Error> {
         let db = self.open()?.ok_or_else(|| not_found(&read.external_id))?;
         let all = self.conversations(&db)?;
         let tree = Tree::new(&all);
@@ -231,15 +239,16 @@ impl<'a> Store<'a> {
                 let cursor = Cursor::parse(cursor)?;
                 let held = match &cursor.id {
                     None => cursor.seq == BEFORE,
-                    Some(row) => db
-                        .query_row(
+                    Some(row) => {
+                        db.query_row(
                             "select count(*) from session_message
                              where session_id = ?1 and seq = ?2 and id = ?3",
                             params![id, cursor.seq, row],
                             |found| found.get::<_, i64>(0),
                         )
                         .map_err(|e| self.unreadable(e))?
-                        > 0,
+                            > 0
+                    }
                 };
                 if held && cursor.seq < end {
                     (cursor.seq, cursor.st, false)
@@ -262,7 +271,10 @@ impl<'a> Store<'a> {
         let rows = self.rows(&db, id, from, end)?;
         let servers = servers(Path::new(&lead.directory));
         let mut fold = Fold {
-            fork: conversation.fork.as_deref().map(|fork| (fork, conversation.created)),
+            fork: conversation
+                .fork
+                .as_deref()
+                .map(|fork| (fork, conversation.created)),
             state,
             events: Vec::new(),
             servers: &servers,
@@ -316,7 +328,13 @@ impl<'a> Store<'a> {
     }
 
     /// The `seq` to read after, so that the rows read hold about the newest `tail` bytes.
-    fn tail_start(&self, db: &Connection, session: &str, end: i64, tail: u64) -> Result<i64, Error> {
+    fn tail_start(
+        &self,
+        db: &Connection,
+        session: &str,
+        end: i64,
+        tail: u64,
+    ) -> Result<i64, Error> {
         let mut statement = db
             .prepare(
                 "select seq, length(data) from session_message
@@ -377,7 +395,9 @@ impl<'a> Store<'a> {
                 })
             })
             .map_err(|e| self.unreadable(e))?;
-        let mut rows: Vec<Row> = rows.collect::<Result<_, _>>().map_err(|e| self.unreadable(e))?;
+        let mut rows: Vec<Row> = rows
+            .collect::<Result<_, _>>()
+            .map_err(|e| self.unreadable(e))?;
         let mut parts = db
             .prepare("select data from session_part where message_id = ?1 order by ordinal")
             .map_err(|e| self.unreadable(e))?;
@@ -396,7 +416,8 @@ impl<'a> Store<'a> {
                         .collect();
                     if !stored.is_empty() {
                         let inline = row.data["content"].as_array().cloned().unwrap_or_default();
-                        row.data["content"] = Value::Array(stored.into_iter().chain(inline).collect());
+                        row.data["content"] =
+                            Value::Array(stored.into_iter().chain(inline).collect());
                     }
                 }
                 "user" => {
@@ -431,9 +452,8 @@ impl<'a> Store<'a> {
         let Some(db) = self.open()? else {
             return Ok(None);
         };
-        db
-            .query_row(
-                "select s.time_suspended, s.time_idle, s.idle_outcome,
+        db.query_row(
+            "select s.time_suspended, s.time_idle, s.idle_outcome,
                         (select count(*) from session_inbox i where i.session_id = s.id),
                         (select max(m.time_created) from session_message m
                           where m.session_id = s.id and m.type = 'user'),
@@ -441,21 +461,21 @@ impl<'a> Store<'a> {
                           where m.session_id = s.id and m.type = 'assistant'
                           order by m.seq desc limit 1)
                  from session_v2 s where s.id = ?1",
-                params![id],
-                |row| {
-                    let answer: Option<String> = row.get(5)?;
-                    Ok(Standing {
-                        claimed: row.get::<_, Option<i64>>(0)?.map(|at| at.max(0) as u64),
-                        idle: row.get::<_, Option<i64>>(1)?.map(|at| at.max(0) as u64),
-                        outcome: row.get(2)?,
-                        queued: row.get::<_, i64>(3)? > 0,
-                        asked: row.get::<_, Option<i64>>(4)?.map(|at| at.max(0) as u64),
-                        answer: answer.and_then(|data| serde_json::from_str(&data).ok()),
-                    })
-                },
-            )
-            .optional()
-            .map_err(|e| self.unreadable(e))
+            params![id],
+            |row| {
+                let answer: Option<String> = row.get(5)?;
+                Ok(Standing {
+                    claimed: row.get::<_, Option<i64>>(0)?.map(|at| at.max(0) as u64),
+                    idle: row.get::<_, Option<i64>>(1)?.map(|at| at.max(0) as u64),
+                    outcome: row.get(2)?,
+                    queued: row.get::<_, i64>(3)? > 0,
+                    asked: row.get::<_, Option<i64>>(4)?.map(|at| at.max(0) as u64),
+                    answer: answer.and_then(|data| serde_json::from_str(&data).ok()),
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| self.unreadable(e))
     }
 
     /// The folder a conversation runs in.
@@ -547,7 +567,10 @@ impl<'a> Store<'a> {
 }
 
 fn not_found(id: &str) -> Error {
-    Error::refused(refusal::NOT_FOUND, format!("OpenCode 2 has no conversation `{id}` here"))
+    Error::refused(
+        refusal::NOT_FOUND,
+        format!("OpenCode 2 has no conversation `{id}` here"),
+    )
 }
 
 /// Where a conversation stands for drive ([`Store::standing`]).
@@ -578,7 +601,10 @@ impl<'a> Tree<'a> {
         let mut children: HashMap<&str, Vec<&Conversation>> = HashMap::new();
         for conversation in all {
             if let Some(parent) = &conversation.parent {
-                children.entry(parent.as_str()).or_default().push(conversation);
+                children
+                    .entry(parent.as_str())
+                    .or_default()
+                    .push(conversation);
             }
         }
         Self { by_id, children }

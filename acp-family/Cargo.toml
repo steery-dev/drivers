@@ -33,10 +33,14 @@ path = "src/bin/cursor.rs"
 name = "steery-driver-cline"
 path = "src/bin/cline.rs"
 
+[[bin]]
+name = "steery-driver-goose"
+path = "src/bin/goose.rs"
+
 [dependencies]
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
 steery-driver-common = { path = "../common" }
-# Kilo, Hermes, Cursor, OpenCode and Cline keep their conversations in SQLite; bundled, so no system library is needed.
+# Kilo, Hermes, Cursor, OpenCode, Cline and Goose keep their conversations in SQLite; bundled, so no system library is needed.
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Cursor: whether a process still holds a chat's SQLite store open.
 libc = "0.2"

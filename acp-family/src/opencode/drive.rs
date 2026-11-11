@@ -59,11 +59,9 @@ impl crate::turn::Host for Turns {
         _: &mut Option<tokio::time::Instant>,
     ) -> bool {
         self.db.as_deref().is_some_and(|db| {
-            Store::new(db)
-                .standing(session)
-                .is_ok_and(|standing| {
-                    standing.is_some_and(|standing| standing.claimed.is_some() || standing.queued)
-                })
+            Store::new(db).standing(session).is_ok_and(|standing| {
+                standing.is_some_and(|standing| standing.claimed.is_some() || standing.queued)
+            })
         })
     }
 }

@@ -17,6 +17,8 @@ pub enum Harness {
     Cursor,
     /// Cline's CLI, whose executable is `cline`.
     Cline,
+    /// Goose, whose executable is `goose`.
+    Goose,
 }
 
 impl Harness {
@@ -30,6 +32,7 @@ impl Harness {
             Self::Kilo => "kilo",
             Self::Cursor => "cursor",
             Self::Cline => "cline",
+            Self::Goose => "goose",
         }
     }
 
@@ -43,6 +46,7 @@ impl Harness {
             Self::Kilo => "Kilo",
             Self::Cursor => "Cursor",
             Self::Cline => "Cline",
+            Self::Goose => "Goose",
         }
     }
 
@@ -56,6 +60,7 @@ impl Harness {
             Self::Kilo => "Kl",
             Self::Cursor => "Cu",
             Self::Cline => "Cl",
+            Self::Goose => "Go",
         }
     }
 
@@ -69,6 +74,7 @@ impl Harness {
             Self::Kilo => "#617a91",
             Self::Cursor => "#14120b",
             Self::Cline => "#1c1c24",
+            Self::Goose => "#101010",
         }
     }
 

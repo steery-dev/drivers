@@ -68,6 +68,9 @@ pub enum Told {
     /// Into the running turn, through [`STEERING`]; where no turn runs any more, as one
     /// more `session/prompt`. The harness refuses a second prompt while one runs.
     Steer,
+    /// As one prompt once the harness has answered every prompt: it refuses a second prompt
+    /// while one runs, and has no stable way to steer words into the running turn.
+    After,
 }
 
 /// How a continue opens the conversation it goes on with.
@@ -102,6 +105,11 @@ pub trait Host {
     /// How a continue opens its conversation.
     fn opens(&self) -> Opens {
         Opens::Resume
+    }
+
+    /// The config option that sets the session's thinking level.
+    fn thinking(&self) -> &'static str {
+        "effort"
     }
 
     /// Whether the harness still runs a turn of `session` once every prompt the turn sent
@@ -256,7 +264,7 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                     .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?
             }
         };
-        for (option, value) in [("model", &asked.model), ("effort", &asked.thinking)] {
+        for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
             if let Some(value) = value {
                 let params = json!({"sessionId": session, "configId": option, "value": value});
                 acp.call("session/set_config_option", params).await?;
@@ -273,8 +281,9 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         // Words told on the inbox that wait for the harness to say whether it steered them
         // in, with the caller who told them, by the steering request's id.
         let mut steering: HashMap<u64, (String, UnixStream)> = HashMap::new();
-        // Words the harness would not steer in, as no turn ran: they go in as one prompt once
-        // the harness answered every prompt, as it takes no second prompt while one runs.
+        // Words that wait to go in as one prompt once the harness answered every prompt, as
+        // it takes no second prompt while one runs: words it would not steer in, as no turn
+        // ran, and every word told to a harness that takes them only after ([`Told::After`]).
         let mut later: Vec<(String, UnixStream)> = Vec::new();
         let mut cancelled: Option<tokio::time::Instant> = None;
         // The permissions that wait on the hook, by their request ids.
@@ -365,6 +374,7 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                         Heard::Steering(id, words, stream) => {
                             steering.insert(id, (words, stream));
                         }
+                        Heard::Later(words, stream) => later.push((words, stream)),
                         Heard::Not => {}
                     }
                 }
@@ -492,6 +502,8 @@ enum Heard {
     Prompted(u64, String),
     /// The steering request of this id carries them; the caller waits for its answer.
     Steering(u64, String, UnixStream),
+    /// They wait to go in once the harness answered every prompt; the caller hears then.
+    Later(String, UnixStream),
     /// They did not go in, and the caller heard why.
     Not,
 }
@@ -514,14 +526,15 @@ async fn hear(acp: &mut Acp, told: Told, session: &str, mut stream: UnixStream) 
     let sent = match told {
         Told::Prompt => acp.prompt(session, &words).await,
         Told::Steer => acp.steer(session, &words).await,
+        Told::After => return Heard::Later(words, stream),
     };
-    match (told, sent) {
-        (Told::Prompt, Ok(id)) => {
+    match sent {
+        Ok(id) if told == Told::Prompt => {
             reply(stream, HEARD).await;
             Heard::Prompted(id, words)
         }
-        (Told::Steer, Ok(id)) => Heard::Steering(id, words, stream),
-        (_, Err(line)) => {
+        Ok(id) => Heard::Steering(id, words, stream),
+        Err(line) => {
             reply(stream, &line).await;
             Heard::Not
         }

@@ -76,7 +76,9 @@ pub(crate) async fn plan(place: &Place, setup: Setup) -> Result<Planned, Error> 
     };
     let mut notes = Vec::new();
     if binary.release.is_none() {
-        notes.push("`--version` named no release, so the driver says nothing about this build.".into());
+        notes.push(
+            "`--version` named no release, so the driver says nothing about this build.".into(),
+        );
     }
     if let Some(first) = &first {
         notes.push(format!(

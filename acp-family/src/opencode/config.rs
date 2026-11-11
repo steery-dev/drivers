@@ -46,7 +46,11 @@ pub(crate) fn files(place: &Place, cwd: Option<&Path>) -> Vec<PathBuf> {
             .collect();
         let named = |folder: &Path| NAMES.map(|name| folder.join(name));
         found.extend(project.iter().flat_map(|folder| named(folder)));
-        found.extend(project.iter().flat_map(|folder| named(&folder.join(".opencode"))));
+        found.extend(
+            project
+                .iter()
+                .flat_map(|folder| named(&folder.join(".opencode"))),
+        );
     }
     found
 }
@@ -109,7 +113,9 @@ pub(crate) fn parse(text: &str) -> Result<Value, serde_json::Error> {
 /// An entry with only `enabled` is one OpenCode 2 drops.
 fn servers(document: &Value) -> Vec<(&String, &Map<String, Value>)> {
     fn typed(server: &Value) -> Option<&Map<String, Value>> {
-        server.as_object().filter(|server| server.contains_key("type"))
+        server
+            .as_object()
+            .filter(|server| server.contains_key("type"))
     }
     let Some(mcp) = document.get("mcp").and_then(Value::as_object) else {
         return Vec::new();
@@ -150,7 +156,11 @@ pub(crate) fn mcp(place: &Place, asked: McpList) -> McpServers {
         };
         // A plugin's `config` hook can add servers too: OpenCode 1's `plugin` list, OpenCode
         // 2's `plugins`.
-        let listed = |key: &str| document[key].as_array().is_some_and(|list| !list.is_empty());
+        let listed = |key: &str| {
+            document[key]
+                .as_array()
+                .is_some_and(|list| !list.is_empty())
+        };
         if listed("plugin") || listed("plugins") {
             complete = false;
         }
@@ -195,7 +205,10 @@ fn holds_plugins(folder: &Path) -> bool {
         std::fs::read_dir(folder.join(name)).is_ok_and(|entries| {
             entries.flatten().any(|entry| {
                 let path = entry.path();
-                path.is_dir() || path.extension().is_some_and(|ext| ext == "ts" || ext == "js")
+                path.is_dir()
+                    || path
+                        .extension()
+                        .is_some_and(|ext| ext == "ts" || ext == "js")
             })
         })
     })
@@ -208,7 +221,9 @@ fn managed() -> Option<PathBuf> {
     }
     let user = std::env::var("USER").unwrap_or_default();
     [
-        PathBuf::from(format!("/Library/Managed Preferences/{user}/ai.opencode.managed.plist")),
+        PathBuf::from(format!(
+            "/Library/Managed Preferences/{user}/ai.opencode.managed.plist"
+        )),
         PathBuf::from("/Library/Managed Preferences/ai.opencode.managed.plist"),
     ]
     .into_iter()

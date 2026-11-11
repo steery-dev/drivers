@@ -114,7 +114,11 @@ impl Fold<'_> {
     /// The end of an imported turn, at its last reply: failed where that reply failed.
     pub fn end_imported(&mut self) {
         if let Some(at) = self.state.imported_end.take() {
-            let outcome = if self.state.failure.is_some() { "failed" } else { "succeeded" };
+            let outcome = if self.state.failure.is_some() {
+                "failed"
+            } else {
+                "succeeded"
+            };
             self.idle(at, &json!({ "outcome": outcome }));
         }
     }
@@ -235,7 +239,9 @@ impl Fold<'_> {
         let name = part["name"].as_str().unwrap_or_default();
         let state = &part["state"];
         let input = match &state["input"] {
-            Value::String(text) => serde_json::from_str(text).unwrap_or(Value::String(text.clone())),
+            Value::String(text) => {
+                serde_json::from_str(text).unwrap_or(Value::String(text.clone()))
+            }
             other => other.clone(),
         };
         self.events.push(Event::CallBegan {
@@ -261,7 +267,10 @@ impl Fold<'_> {
             Some("error") => {
                 let text = text_of(&state["content"]);
                 let text = if text.trim().is_empty() {
-                    state["error"]["message"].as_str().unwrap_or_default().to_owned()
+                    state["error"]["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
                 } else {
                     text
                 };
@@ -285,7 +294,11 @@ impl Fold<'_> {
                     at: ended,
                     external_id: child.to_owned(),
                     call: Some(call_id.to_owned()),
-                    state: Some(if ok { Execution::Finished } else { Execution::Failed }),
+                    state: Some(if ok {
+                        Execution::Finished
+                    } else {
+                        Execution::Failed
+                    }),
                     error: (!ok).then(|| text.lines().next().unwrap_or_default().to_owned()),
                 });
             }
@@ -425,7 +438,10 @@ impl Fold<'_> {
         let Some(ended) = data["time"]["completed"].as_u64() else {
             return;
         };
-        let text = data["output"]["output"].as_str().unwrap_or_default().to_owned();
+        let text = data["output"]["output"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         self.events.push(Event::CallEnded {
             at: ended,
             id: id.clone(),
@@ -453,7 +469,8 @@ impl Fold<'_> {
 pub(crate) fn call(id: &str, name: &str, input: Value, response: &str, servers: &[String]) -> Call {
     let served = servers.iter().find_map(|server| {
         let prefix = format!("{}_", normalized(server));
-        name.strip_prefix(&prefix).map(|tool| (server.as_str(), tool))
+        name.strip_prefix(&prefix)
+            .map(|tool| (server.as_str(), tool))
     });
     let (tool, group, server, steery) = match served {
         Some(("steery", tool)) => (
@@ -486,7 +503,13 @@ pub(crate) fn call(id: &str, name: &str, input: Value, response: &str, servers: 
 /// OpenCode's spelling of a name inside a tool's name.
 pub(crate) fn normalized(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -559,10 +582,13 @@ fn failure(error: &Value, at: u64, model: &Value) -> Failure {
     let status = error["status"].as_u64().and_then(|s| u16::try_from(s).ok());
     let kind_of = match kind {
         "provider.auth" => FailureKind::SignIn,
-        "provider.rate-limit" | "provider.quota" | "provider.free-limit" | "provider.go-limit"
-        | "provider.budget-limit" | "provider.model-budget-limit" | "provider.chatgpt-limit" => {
-            FailureKind::RateLimit
-        }
+        "provider.rate-limit"
+        | "provider.quota"
+        | "provider.free-limit"
+        | "provider.go-limit"
+        | "provider.budget-limit"
+        | "provider.model-budget-limit"
+        | "provider.chatgpt-limit" => FailureKind::RateLimit,
         _ => match status {
             Some(401) => FailureKind::SignIn,
             Some(429 | 503 | 529) => FailureKind::RateLimit,
