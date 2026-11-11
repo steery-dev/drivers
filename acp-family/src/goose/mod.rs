@@ -1,18 +1,21 @@
-//! Steery's driver for Goose at observe: it reads Goose's conversations from its SQLite
-//! file, plans the entries that set Goose up for Steery, and lists the MCP servers Goose
-//! loads.
+//! Steery's driver for Goose at drive: it reads Goose's conversations from its SQLite file,
+//! plans the entries that set Goose up for Steery, lists the MCP servers Goose loads, starts
+//! Goose's turns through its own ACP server, and reads the permissions those turns ask for.
 
 mod config;
+pub(crate) mod drive;
 mod events;
+mod hooks;
 mod place;
 mod setup;
 mod store;
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
-use steery_sdk::{Error, Program, method, result};
+use steery_sdk::{Error, Program, method, refusal, result};
 
 use crate::Harness;
 use place::Place;
@@ -40,11 +43,15 @@ the conversations (`parent_session_id` names a sub-agent's lead); each message i
 `userVisible`. Goose writes a conversation's rows anew whole when it changes one.";
 
 /// The driver: the protocol it picked and where Goose keeps everything, both from
-/// `initialize`, and the listings it answered, to answer the next with only what changed.
+/// `initialize`, the listings it answered, to answer the next with only what changed,
+/// Goose's models as `models` last listed them, which `start` checks a pick against, and
+/// whether that listing found Goose signed out.
 #[derive(Default)]
 pub struct Driver {
     place: OnceLock<(u32, Place)>,
     changes: steery_sdk::listing::Changes,
+    listed: Mutex<Vec<harness::Model>>,
+    signed_out: AtomicBool,
 }
 
 impl Driver {
@@ -59,10 +66,10 @@ impl Driver {
     }
 }
 
-/// Goose as Steery reads it.
-fn info() -> wire::HarnessInfo {
+/// Goose as Steery reads it, under the protocol picked.
+fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe],
+        levels: vec![wire::Level::Observe, wire::Level::Drive],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some("goose update".into()),
@@ -86,6 +93,7 @@ fn info() -> wire::HarnessInfo {
         reader: None,
         facts: wire::HarnessFacts {
             by_file: false,
+            // A continue loads the conversation in the folder it ran in.
             resumes_in_place: true,
             forks_beside: false,
             keeps: wire::Keeps {
@@ -95,10 +103,10 @@ fn info() -> wire::HarnessInfo {
             door: None,
             checks_idle: false,
             worktrees: false,
-            acts: Vec::<harness::Act>::new(),
+            acts: vec![harness::Act::Continue, harness::Act::New],
             touches: false,
         },
-        hooks: Vec::new(),
+        hooks: crate::turn::hooks::table(protocol),
     }
 }
 
@@ -111,7 +119,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol,
             program: Harness::Goose.program()?,
-            harness: Some(Box::new(info())),
+            harness: Some(Box::new(info(protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -144,6 +152,58 @@ impl Program for Driver {
                         .read(steery_sdk::params(params)?, || config::server_names(place))?,
                 )
             }
+            method::SESSIONS_FOLD => {
+                let _: harness::Fold = steery_sdk::params(params)?;
+                Err(Error::refused(
+                    refusal::SELECTION_UNSUPPORTED,
+                    "Goose has no plugin door that sends its records",
+                ))
+            }
+            method::HOOK_READ => result(hooks::read(self.place()?, steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(crate::turn::hooks::answer(
+                "Goose",
+                steery_sdk::params(params)?,
+            )?),
+            method::HELD => result(drive::held(self.place()?, &steery_sdk::params(params)?)?),
+            method::IDLE => result(drive::idle(self.place()?, &steery_sdk::params(params)?)),
+            method::MODELS => {
+                let models = drive::models(self.place()?).await?;
+                *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = models.models.clone();
+                self.signed_out
+                    .store(models.signed_in == Some(false), Ordering::Relaxed);
+                result(models)
+            }
+            method::START => {
+                let listed = self
+                    .listed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                result(drive::start(
+                    self.place()?,
+                    &listed,
+                    self.signed_out.load(Ordering::Relaxed),
+                    steery_sdk::params(params)?,
+                )?)
+            }
+            method::TURN_READ => result(crate::turn::drive::turn_line(
+                "Goose",
+                steery_sdk::params(params)?,
+            )),
+            method::STOP => result(crate::turn::drive::stop(
+                "Goose",
+                &steery_sdk::params(params)?,
+            )?),
+            method::RECEIPT_MARK => {
+                result(drive::mark(self.place()?, &steery_sdk::params(params)?)?)
+            }
+            method::RECEIPT_FIND => {
+                result(drive::find(self.place()?, &steery_sdk::params(params)?)?)
+            }
+            method::TERMINAL => result(drive::terminal(
+                self.place()?,
+                &steery_sdk::params(params)?,
+            )?),
             method::MCP_LIST => result(config::mcp(self.place()?, steery_sdk::params(params)?)),
             _ => Err(Error::Unknown),
         }

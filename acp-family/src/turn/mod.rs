@@ -70,10 +70,6 @@ pub enum Told {
     Steer,
     /// As one prompt once the harness has answered every prompt: it refuses a second prompt
     /// while one runs, and has no stable way to steer words into the running turn.
-    #[expect(
-        dead_code,
-        reason = "Goose's turns tell words this way; its Drive slice uses it"
-    )]
     After,
 }
 

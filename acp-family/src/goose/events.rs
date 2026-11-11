@@ -85,6 +85,13 @@ pub(crate) struct State {
     provider: Option<String>,
 }
 
+impl State {
+    /// A turn began and has not ended.
+    pub fn open(&self) -> bool {
+        self.turn.is_some()
+    }
+}
+
 /// Rows folded into events.
 pub(crate) struct Fold<'a> {
     pub state: State,

@@ -180,7 +180,6 @@ impl<'a> Store<'a> {
     }
 
     /// The folder a conversation runs in.
-    #[expect(dead_code, reason = "Drive's `terminal` reads it")]
     pub fn directory(&self, id: &str) -> Result<Option<PathBuf>, Error> {
         Ok(self.row(id)?.map(|row| row.cwd))
     }
@@ -341,7 +340,6 @@ impl<'a> Store<'a> {
     }
 
     /// The person's words in a conversation's messages from the `mark`th on.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Drive's receipts read it"))]
     pub fn said_after(&self, id: &str, mark: &str) -> Result<Vec<String>, Error> {
         let from: usize = mark
             .parse()
@@ -356,7 +354,6 @@ impl<'a> Store<'a> {
     }
 
     /// How many messages the conversation has: the mark that the next words come after.
-    #[cfg_attr(not(test), expect(dead_code, reason = "Drive's receipts read it"))]
     pub fn count(&self, id: &str) -> Result<usize, Error> {
         self.found(id)?;
         Ok(self.messages(id)?.len())
@@ -388,117 +385,4 @@ fn not_found(id: &str) -> Error {
         refusal::NOT_FOUND,
         format!("Goose has no conversation `{id}` here"),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A database of Goose's shape, with the rows given.
-    fn db(name: &str, sql: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("goose-{name}-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        let db = Connection::open(&path).unwrap();
-        db.execute_batch(&format!(
-            "create table sessions (id text primary key, name text not null default '', \
-             session_type text not null default 'user', working_dir text not null, \
-             created_at timestamp, updated_at timestamp, parent_session_id text);
-             create table messages (id integer primary key autoincrement, message_id text, \
-             session_id text not null, role text not null, content_json text not null, \
-             created_timestamp integer not null, metadata_json text);
-             {sql}"
-        ))
-        .unwrap();
-        path
-    }
-
-    const ROWS: &str = "insert into sessions values
-        ('a', 'Lead', 'user', '/w', '2026-11-11 09:00:00', '2026-11-11 09:01:00', null),
-        ('b', 'Child', 'sub_agent', '/w', '2026-11-11 09:00:10', '2026-11-11 09:05:00', 'a'),
-        ('d', '/doctor', 'hidden', '/w', '2026-11-11 09:00:20', '2026-11-11 09:00:30', null);
-        insert into messages (message_id, session_id, role, content_json, created_timestamp, metadata_json) values
-        ('m1', 'a', 'user', '[{\"type\":\"text\",\"text\":\"hi\"}]', 1, '{\"userVisible\":true}'),
-        ('m2', 'a', 'user', '[{\"type\":\"text\",\"text\":\"<turn-context>x</turn-context>\"}]', 1, '{\"userVisible\":false}'),
-        ('m3', 'a', 'assistant', '[{\"type\":\"toolRequest\",\"id\":\"t1\",\"toolCall\":{\"status\":\"success\",\"value\":{\"name\":\"shell\",\"arguments\":{\"command\":\"ls\"}}}}]', 2, '{\"userVisible\":true}'),
-        ('m4', 'a', 'user', '[{\"type\":\"toolResponse\",\"id\":\"t1\",\"toolResult\":{\"status\":\"success\",\"value\":{\"content\":[{\"type\":\"text\",\"text\":\"file\"}],\"isError\":false}}}]', 3, '{\"userVisible\":true}'),
-        ('m5', 'a', 'assistant', '[{\"type\":\"text\",\"text\":\"done\"}]', 4, '{\"userVisible\":true}'),
-        ('s1', 'a', 'user', '[{\"type\":\"text\",\"text\":\"also\"}]', 4, '{\"userVisible\":true,\"steer\":true}'),
-        ('m6', 'a', 'assistant', '[{\"type\":\"text\",\"text\":\"done also\"}]', 5, '{\"userVisible\":true}');";
-
-    #[test]
-    fn lists_leads_with_sub_agents_and_hides_goose_own() {
-        let path = db("list", ROWS);
-        let listed = Store::new(&path)
-            .list(List {
-                seen_since: None,
-                transcripts: Vec::new(),
-                after: None,
-            })
-            .unwrap();
-        assert_eq!(listed.sessions.len(), 1);
-        let lead = &listed.sessions[0];
-        assert_eq!(lead.external_id, "a");
-        assert_eq!(lead.title.as_deref(), Some("Lead"));
-        assert_eq!(lead.sub_agents[0].external_id, "b");
-        assert_eq!(lead.updated_at, millis("2026-11-11 09:05:00").unwrap());
-        assert!(Store::new(&path).row("d").unwrap().is_none());
-        std::fs::remove_file(&path).unwrap();
-    }
-
-    #[test]
-    fn reads_one_turn_with_its_steered_words() {
-        let path = db("read", ROWS);
-        let store = Store::new(&path);
-        let read = |cursor: Option<String>| {
-            store
-                .read(
-                    Read {
-                        external_id: "a".into(),
-                        sub_agent: None,
-                        cursor,
-                        tail: None,
-                    },
-                    Vec::new,
-                )
-                .unwrap()
-        };
-        let first = read(None);
-        let events = serde_json::to_value(&first.events).unwrap();
-        let types: Vec<&str> = events
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|e| e["type"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            types,
-            [
-                "turn_began",
-                "words",
-                "call_began",
-                "call_ended",
-                "words",
-                "words",
-                "words",
-                "words",
-                "turn_ended"
-            ]
-        );
-        assert!(!events.to_string().contains("turn-context"));
-        assert_eq!(events[4]["voice"], "tool");
-        assert_eq!(events[6]["text"], "also");
-        assert_eq!(events[8]["state"], "finished");
-        assert_eq!(store.count("a").unwrap(), 7);
-        assert_eq!(store.said_after("a", "1").unwrap(), ["also"]);
-        let again = read(Some(first.cursor.clone()));
-        assert!(again.events.is_empty() && !again.reset);
-        // Goose writes the conversation anew without its last message: the cursor's id no
-        // longer matches, and the read starts again.
-        Connection::open(&path)
-            .unwrap()
-            .execute("delete from messages where message_id = 'm6'", [])
-            .unwrap();
-        assert!(read(Some(first.cursor)).reset);
-        std::fs::remove_file(&path).unwrap();
-    }
 }

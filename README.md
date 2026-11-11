@@ -37,7 +37,7 @@ short name, its tint and its mark.
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive |
-| `goose` | Goose | [`acp-family`](acp-family/) | observe |
+| `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -116,7 +116,7 @@ signed in, as the harness itself says.
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
 | `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
 | `cline` | ``run `cline auth` in a terminal`` | `models` starts `cline --acp`: `session/new` refused with ACP `-32000` (auth required) means not signed in. |
-| `goose` | ``run `goose configure` in a terminal`` | not told (the driver has no `models` at observe) |
+| `goose` | ``run `goose configure` in a terminal`` | `models` starts `goose acp`: `session/new` refused with `Failed to resolve provider and model` means not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
