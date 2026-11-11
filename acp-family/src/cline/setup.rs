@@ -41,7 +41,12 @@ pub(crate) async fn plan(place: &Place, setup: Setup) -> Planned {
         };
     };
     let release = steery_driver_common::program::version(&binary).await;
-    let mut notes = Vec::new();
+    let mut notes = vec![
+        "Live goes through Cline's hub (`cline hub ensure`). A Cline window joins the hub only \
+         where it finds one running, and in `--yolo` or `--sandbox` never: such a window runs \
+         its turns itself and has no door, so `say` is refused `no-door`."
+            .to_owned(),
+    ];
     if release.is_none() {
         notes.push(
             "`--version` named no release, so the driver says nothing about this build.".into(),

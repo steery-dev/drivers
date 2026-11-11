@@ -36,7 +36,7 @@ short name, its tint and its mark.
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
-| `cline` | Cline | [`acp-family`](acp-family/) | observe, drive |
+| `cline` | Cline | [`acp-family`](acp-family/) | observe, drive, live |
 | `amp` | Amp | [`amp`](amp/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -940,6 +940,42 @@ it, and it is one JSON-RPC client of about 170 lines (`rpc.rs`). Drive asks it
 ```sh
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-copilot
+cargo test
+```
+
+## Cline: `acp-family/src/cline/`
+
+One binary, `steery-driver-cline`, from release 3.0.74. Cline keeps its conversations in
+`<CLINE_DIR or ~/.cline>/data/db/sessions.db` (table `sessions`), with each one's messages in
+`data/sessions/<id>/<id>.messages.json`. The driver starts Cline's turns through its own ACP
+server (`cline --acp`).
+
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`), door `picks`. Cline's door is
+  its hub: a websocket server on a loopback port that `cline hub ensure` starts. The lock file
+  `<CLINE_DIR>/data/locks/hub/production.json` names its `url` and `authToken`.
+  - A `cline` window joins the hub only where one already runs. In `--yolo` or `--sandbox`
+    it never joins. Such a window runs its turns itself and has no door: `say` is refused
+    `no-door`. `setup/plan` notes this, and `terminal` runs `cline hub ensure` first.
+  - `held`: a `cli` client of the hub that takes part in the conversation. Its stop is
+    `owner`, with a token of the hub's pid and the turn's start. Else Drive's `held`.
+  - `say`: `session.send_input`. `queue` is delivery `queue`; `steer` is `steer`, which goes
+    in at the running turn's next model call. `immediate` is refused `harness-busy` while a
+    turn runs or words wait. The hub's `session.pending_prompts` events match the words to
+    the say's id.
+  - `pick`: `session.update_connection` with `modelId`. The hub takes any name, so the driver
+    checks the pick against `models`. Cline lists no thinking levels over ACP, so a thinking
+    pick is refused `selection-unsupported`.
+  - `stop`: `run.abort`, where the token still names the turn that runs. The proof is the
+    conversation going idle.
+  - `session/changed`: the hub's event stream (`stream.subscribe` for the conversation).
+    `run.started` and `session.updated` status say when a turn starts and ends;
+    `tool.started` and `tool.finished` say its calls.
+  - The window's footer keeps the model it opened with after a `pick`. The next turn runs on
+    the picked model.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-cline
 cargo test
 ```
 
