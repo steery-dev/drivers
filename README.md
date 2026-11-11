@@ -34,6 +34,7 @@ short name, its tint and its mark.
 | `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
+| `copilot` | Copilot | [`acp-family`](acp-family/) | observe |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe |
@@ -73,6 +74,7 @@ agrees (PROTOCOL.md §4.1).
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
+| `copilot` | `~/.local/bin` | `bash -c "curl -fsSL https://gh.io/copilot-install \| bash"` |
 | `opencode` | `~/.opencode/bin` | `bash -c "curl -fsSL https://opencode.ai/v2/install \| bash -s -- --no-modify-path"`. OpenCode 2 only: an `opencode` that names a 1.x release does not count as found, and a note names it. |
 | `cursor` | `~/.local/bin` | `sh -c "curl -fsS https://cursor.com/install \| bash"` |
 | `amp` | `AMP_HOME/bin`, else `~/.amp/bin` (and its link `~/.local/bin/amp`) | `bash -c "curl -fsSL https://ampcode.com/install.sh \| bash"` |
@@ -107,6 +109,7 @@ signed in, as the harness itself says.
 | `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
+| `copilot` | ``run `copilot login` in a terminal`` | its own server's (`copilot --headless --stdio`) `auth.getStatus` `isAuthenticated`, bound 10 s. It counts a `gh` sign-in and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`. |
 | `opencode` | ``run `opencode auth login` in a terminal`` | not told. OpenCode's free models need no account, so an empty model list never means signed out. |
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
 | `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
@@ -149,6 +152,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 |---|---|---|
 | `claude-code` | `claude-sign-in`, `api-key` | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
 | `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
+| `copilot` | `copilot-sign-in`, `github-token` (`copilot login --with-token`) | GitHub's device page (`copilot login --device-code`), with its code in the step's label |
 | `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
 | `pi` | `api-key` | none |
 | `grok` | `grok-sign-in`, `api-key` (xAI, kept as `XAI_API_KEY`) | `grok login --device-auth`'s page (`accounts.x.ai/oauth2/device?user_code=…`), with its code in the step's label. A key counts where `grok models` with it, in an empty `GROK_HOME`, fetched xAI's models. |
@@ -295,6 +299,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`. `.mcp.json` where the folder is trusted and the server approved, not rejected. (`start` runs `claude --bg`, not `-p`. `claude --bg` is an interactive background session that waits on approval.) `disabledMcpServers` off. | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 | `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
+| `copilot` | `mcp-config.json` `mcpServers`, installed plugins' servers, built-in servers (`copilot mcp list --json`). `disabledMcpServers` in `settings.json` off. | not read: a folder's `.mcp.json`, `.github/mcp.json`, `.vscode/mcp.json` | not with `cwd` |
 | `opencode` | the system folder's, then the config folder's `opencode.json`, `opencode.jsonc` (comments and trailing commas read), then the file `OPENCODE_CONFIG` names. `mcp.servers` (OpenCode 2) over `mcp.<name>` (OpenCode 1's shape). `enabled: false` off. | each folder's `opencode.json`, `opencode.jsonc`, from `/` down to it; then each folder's `.opencode/` ones, in the same order | not with managed preferences, `OPENCODE_CONFIG_CONTENT`, a `plugin` or `plugins` list, or a module in a config folder's `plugin/` or `plugins/` |
 | `cursor` | `~/.cursor/mcp.json`, whatever `CURSOR_CONFIG_DIR` says | `.cursor/mcp.json`, listed before its person approves it in Cursor | never: plugins, team servers |
 | `amp` | `amp mcp list --json` run at `/` | the same, run in the folder (it adds `.amp/settings.json`) | never: skills, plugins and toolboxes bring servers |
@@ -833,6 +838,57 @@ Build and check it, with Codex on `PATH`:
 ```sh
 cd codex && cargo build
 steery programs test target/debug/steery-driver-codex
+cargo test
+```
+
+## Copilot: `acp-family/src/copilot/`
+
+One binary, `steery-driver-copilot`, with no settings, at observe. It speaks to GitHub Copilot
+CLI only through what Copilot publishes:
+
+- its conversation files under `session-state/`
+- `hooks/*.json`, `mcp-config.json` and `skills/`
+- `copilot --headless --stdio` (Copilot's own server: JSON-RPC with `Content-Length` frames)
+- `copilot mcp list --json` and `copilot login`
+
+Copilot's home is `COPILOT_HOME`, else `~/.copilot`.
+
+Copilot's own server is a module of this crate, not a crate of its own. Only Copilot speaks
+it. Observe asks it only `auth.getStatus`. Live will use it for `session.send` and
+`session.abort`.
+
+**Needs** (protocol 5). When `auth.getStatus` says `isAuthenticated: false`, the plan asks
+`sign-in` in two ways:
+
+1. `copilot-sign-in`: `copilot login --device-code`. Its page and one-time code are the step.
+2. `github-token`: a GitHub token. `copilot login --with-token` reads it on standard input,
+   and Copilot keeps it.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads
+  `session-state/<id>/events.jsonl`: one event on each line, each naming the event before it
+  in `parentId`. `workspace.yaml` beside it gives the folder and the times. A resume
+  (`--resume=<id>`) appends to the same file. The driver does not list a run whose
+  `client_name` is `sdk`: a program started it through Copilot's SDK. The events are turns
+  and how they ended (`abort`: interrupted), the person's and the agent's words, reasoning,
+  calls and their results, each response's tokens, compactions, models and sub-agents.
+- **Setup** (`setup/plan`). The plan has these entries:
+  - The MCP entry in `mcp-config.json` (`mcpServers.steery`).
+  - Steery's skill, `skills/steery/SKILL.md`.
+  - Steery's own hooks file, `hooks/steery.json`. Copilot loads every file in `hooks/`, so the
+    person's hooks stay where they are. Each hook runs the runtime's hook line with `|| true`:
+    Copilot reads a non-zero exit at `preToolUse` as a denied call.
+- **Hooks** (`hook/read`, `hook/answer`), in Copilot's camelCase form: `sessionStart`,
+  `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure`,
+  `permissionRequest`, `notification`, `agentStop`, `sessionEnd`, `subagentStart`.
+  - `sessionStart` gives Steery's paragraph as `additionalContext`, the only output Copilot
+    reads there. This is how the agent learns its conversation's id.
+  - `preToolUse` answers `permissionDecision` (`allow`, `deny`, `ask`).
+  - `permissionRequest` answers `behavior` (`allow`, `deny`). Its document names no call id.
+  - Copilot drops the output of `userPromptSubmitted`, so Steery only reads it.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-copilot
 cargo test
 ```
 

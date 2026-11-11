@@ -5,6 +5,7 @@
 //! share, such as reading ACP's `session/update` records, is a module of its own.
 
 mod cline;
+mod copilot;
 mod cursor;
 mod grok;
 mod harness;
@@ -19,6 +20,7 @@ pub use harness::Harness;
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+        Harness::Copilot => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
         Harness::OpenCode => match std::env::args().nth(1).as_deref() {
             Some("turn") => {
                 turn::main(opencode::drive::Turns::new(), std::env::args().skip(2)).await
