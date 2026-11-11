@@ -96,7 +96,11 @@ pub async fn models(binary: Option<PathBuf>, home: &Path, root: &Path) -> Result
         .unwrap_or_default();
     Err(Error::refused(
         refusal::REFUSED,
-        format!("cursor-agent models exited with {}: {}", output.status, last.trim()),
+        format!(
+            "cursor-agent models exited with {}: {}",
+            output.status,
+            last.trim()
+        ),
     ))
 }
 
@@ -440,7 +444,9 @@ pub fn terminal(store: &Store, terminal: Terminal) -> Result<TerminalCommand, Er
 fn plain_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
-        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 /// One literal POSIX shell word.

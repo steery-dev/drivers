@@ -153,7 +153,9 @@ impl Store {
 
     /// The store of chat `id`, a person's or a run's.
     pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
-        self.find(id).map(|folder| folder.store()).ok_or_else(not_found)
+        self.find(id)
+            .map(|folder| folder.store())
+            .ok_or_else(not_found)
     }
 
     /// The words of the person in each turn of chat `id`, oldest first.
