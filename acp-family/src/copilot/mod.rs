@@ -8,14 +8,17 @@ mod drive;
 mod events;
 mod home;
 mod hooks;
+mod live;
 mod mcp;
 mod models;
 mod reader;
+mod rpc;
 mod server;
 mod setup;
 mod sign_in;
 mod transcripts;
 mod turn;
+mod window;
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -47,13 +50,13 @@ const TRANSCRIPT: &str = "One JSON event on each line of `events.jsonl`, with `i
 
 /// The driver: the protocol it picked from `initialize`, where Copilot keeps everything, the
 /// sign-ins it started that wait for their person, and the listings it answered, to answer
-/// the next with only what changed.
-#[derive(Default)]
+/// the next with only what changed, and the Copilot windows whose own door it follows.
 pub struct Driver {
     place: OnceLock<Place>,
     sign_ins: sign_in::SignIns,
     turns: turn::Turns,
     changes: steery_sdk::listing::Changes,
+    live: Arc<live::Live>,
 }
 
 /// The protocol the driver picked, the person's home, and Copilot's home with its
@@ -65,6 +68,16 @@ struct Place {
 }
 
 impl Driver {
+    pub fn new(notifier: steery_sdk::Notifier) -> Self {
+        Self {
+            place: OnceLock::new(),
+            sign_ins: sign_in::SignIns::default(),
+            turns: turn::Turns::default(),
+            changes: steery_sdk::listing::Changes::default(),
+            live: Arc::new(live::Live::new(notifier)),
+        }
+    }
+
     /// Whether the protocol picked has needs.
     fn needs(&self) -> Result<bool, Error> {
         Ok(self.place()?.protocol >= steery_driver_common::program::NEEDS)
@@ -171,12 +184,29 @@ impl Program for Driver {
                 result(blocking(move || hooks::read(&store, read)).await?)
             }
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
-            method::HELD => result(drive::held(self.store()?, given(params)?)?),
+            method::HELD => {
+                let held: harness::Held = given(params)?;
+                match self.live.held(self.store()?, &held.external_id).await {
+                    Some(holder) => result(harness::HeldBy::Holder(holder)),
+                    None => result(drive::held(self.store()?, held)?),
+                }
+            }
+            method::SAY => result(self.live.say(self.store()?, given(params)?).await?),
+            method::PICK => result(self.live.pick(self.store()?, given(params)?).await?),
             method::IDLE => result(drive::idle(self.store()?, given(params)?)?),
             method::MODELS => result(models::models(self.store()?.root()).await?),
             method::START => result(turn::start(self.store()?, given(params)?)?),
             method::TURN_READ => result(self.turns.read(self.store()?, given(params)?)?),
-            method::STOP => result(drive::stop(self.store()?, given(params)?).await?),
+            method::STOP => {
+                let stop: harness::Stop = given(params)?;
+                match stop.holder {
+                    harness::Holder::Person {
+                        stop: harness::HolderStop::Owner(_),
+                        ..
+                    } => result(self.live.stop(self.store()?, &stop).await?),
+                    _ => result(drive::stop(self.store()?, stop).await?),
+                }
+            }
             method::RECEIPT_MARK => result(drive::mark(self.store()?, given(params)?)?),
             method::RECEIPT_FIND => result(drive::find(self.store()?, given(params)?)?),
             method::READER => result(reader::plan(given(params)?)?),
@@ -194,7 +224,7 @@ impl Program for Driver {
 /// Copilot as Steery reads it, on `protocol`.
 fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe, wire::Level::Drive],
+        levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
         // The release whose hooks, event schema and own server this driver was read against.
         minimum: Some(wire::Minimum {
             release: "1.0.107".into(),
@@ -239,7 +269,7 @@ fn info(protocol: u32) -> wire::HarnessInfo {
                 model: true,
                 thinking: true,
             },
-            door: None,
+            door: Some(harness::LiveDoor::Picks),
             checks_idle: false,
             worktrees: false,
             acts: vec![

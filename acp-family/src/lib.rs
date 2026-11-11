@@ -26,7 +26,7 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             match args.next() {
                 Some(mode) if mode == copilot::TURN_MODE => copilot::turn_main(args).await,
                 Some(mode) if mode == copilot::READER_MODE => copilot::reader_main(args).await,
-                _ => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
+                _ => steery_sdk::serve(copilot::Driver::new).await,
             }
         }
         Harness::OpenCode => match std::env::args().nth(1).as_deref() {
