@@ -1,7 +1,8 @@
 //! The Hermes driver, run as the runtime runs it, over standard input and output, against a
 //! Hermes home of its own: a `state.db` holding a conversation compacted in place and then
 //! rotated into a continuation, a sub-agent it delegated to and a run with no person; and a
-//! `config.yaml` whose MCP servers carry secrets spelled `SECRET`.
+//! `config.yaml` whose MCP servers carry secrets spelled `SECRET`; and, where Hermes's
+//! installer puts it, a `hermes` that answers `--version`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -79,6 +80,14 @@ fn home(root: &Path) {
         "model:\n  default: m1\nmcp_servers:\n  steery:\n    url: https://user:SECRET@mcp.steery.dev/mcp?token=SECRET\n    headers:\n      Authorization: Bearer SECRET\n  files:\n    command: npx\n    env:\n      KEY: SECRET\n  off:\n    url: http://127.0.0.1:9/x\n    enabled: false\n",
     )
     .unwrap();
+    let hermes = root.join(".local/bin/hermes");
+    std::fs::create_dir_all(hermes.parent().unwrap()).unwrap();
+    std::fs::write(
+        &hermes,
+        "#!/bin/sh\necho 'Hermes Agent v0.23.1 (2026.9.24)'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hermes, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let db = Connection::open(root.join("state.db")).unwrap();
     db.execute_batch(SCHEMA).unwrap();
     let session = |id: &str, source: &str, parent: Option<&str>, config: Value, at: f64| {
@@ -274,7 +283,7 @@ fn home(root: &Path) {
     message(&db, m("one", "user", "one shot", "ou1", 1041.0), &[]);
 }
 
-async fn start(root: &Path) -> Client {
+async fn start(root: &Path, protocol: u32) -> Client {
     let client = Client::spawn(
         Path::new("/usr/bin/env"),
         &[
@@ -288,7 +297,7 @@ async fn start(root: &Path) -> Client {
     .await
     .unwrap();
     let offered = wire::InitializeParams {
-        protocol: vec![13],
+        protocol: vec![protocol],
         runtime: wire::Runtime {
             release: "7.0.0".into(),
             os: std::env::consts::OS.into(),
@@ -298,7 +307,10 @@ async fn start(root: &Path) -> Client {
         config: root.join(".config/steery"),
         settings: Default::default(),
     };
-    assert_eq!(client.initialize(&offered).await.unwrap().protocol, 13);
+    assert_eq!(
+        client.initialize(&offered).await.unwrap().protocol,
+        protocol
+    );
     client
 }
 
@@ -320,7 +332,7 @@ async fn hermes_reads_its_conversations_from_state_db() {
     let root = std::env::temp_dir().join(format!("steery-hermes-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     home(&root);
-    let driver = start(&root).await;
+    let driver = start(&root, steery_sdk::YAML).await;
 
     let listed = driver
         .call(method::SESSIONS_LIST, json!({"transcripts": []}), WAIT)
@@ -474,6 +486,60 @@ async fn hermes_reads_its_conversations_from_state_db() {
     );
     assert!(!mcp.to_string().contains("SECRET"));
 
+    // Picked 14: Steery's server is a `yaml` entry under `mcp_servers.steery`, beside the skill.
+    let asked = json!({
+        "mcp_url": "http://127.0.0.1:7/mcp",
+        "skill": "# Steery",
+        "hook": "steery hook hermes",
+        "door": "http://127.0.0.1:7/door",
+        "release": "7.1.212",
+        "timeout": 600,
+    });
+    let planned = driver
+        .call(method::SETUP_PLAN, asked.clone(), WAIT)
+        .await
+        .unwrap();
+    assert_eq!(planned["found"]["release"], "0.23.1", "{planned}");
+    assert_eq!(
+        planned["entries"],
+        json!([
+            {
+                "path": root.join("skills/steery/SKILL.md"),
+                "format": "text",
+                "value": "# Steery",
+                "carries": ["skill"],
+            },
+            {
+                "path": root.join("config.yaml"),
+                "format": "yaml",
+                "at": "mcp_servers.steery",
+                "value": {
+                    "url": "http://127.0.0.1:7/mcp",
+                    "headers": {"Steery-Harness": "hermes"},
+                    "timeout": 600,
+                },
+                "carries": ["mcp"],
+            },
+        ])
+    );
     driver.shutdown().await.unwrap();
+
+    // Picked 13: no `yaml` entry, which the runtime would refuse; the plan says the command.
+    let older = start(&root, 13).await;
+    let planned = older.call(method::SETUP_PLAN, asked, WAIT).await.unwrap();
+    let formats: Vec<_> = planned["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["format"].clone())
+        .collect();
+    assert_eq!(formats, [json!("text")]);
+    assert!(
+        planned["notes"]
+            .to_string()
+            .contains("hermes mcp add steery --url http://127.0.0.1:7/mcp"),
+        "{planned}"
+    );
+    older.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
