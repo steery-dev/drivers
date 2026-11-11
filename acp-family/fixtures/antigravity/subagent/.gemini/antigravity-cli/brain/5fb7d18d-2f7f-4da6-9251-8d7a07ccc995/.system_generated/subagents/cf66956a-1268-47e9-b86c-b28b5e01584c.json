@@ -1,0 +1,1 @@
+{"conversationId":"cf66956a-1268-47e9-b86c-b28b5e01584c", "subagentDescriptor":{"typeName":"research", "role":"Folder reader"}, "state":"SUBAGENT_STATE_ALIVE", "spawnStepIndex":2, "workspaceUris":["file:///tmp/agyc/subagent/work"]}
