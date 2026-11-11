@@ -1,7 +1,8 @@
-//! Steery's driver for Google's Antigravity CLI at observe: it reads Antigravity's
+//! Steery's driver for Google's Antigravity CLI at drive: it reads Antigravity's
 //! conversations from `<root>/brain/<id>/`, plans the entries that set Antigravity up for
 //! Steery, reads its hooks' moments, lists the MCP servers it loads and the models it
-//! offers.
+//! offers, and starts Antigravity's turns through its own ACP server.
+pub(crate) mod drive;
 mod events;
 mod hooks;
 mod mcp;
@@ -10,13 +11,13 @@ mod setup;
 mod store;
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
+use crate::Harness;
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
 use steery_sdk::{Error, Program, method, refusal, result};
-
-use crate::Harness;
 
 /// The oldest release whose transcripts, hooks and settings this driver reads.
 pub(crate) const MINIMUM: &str = "1.5.5";
@@ -25,11 +26,15 @@ pub(crate) const MINIMUM: &str = "1.5.5";
 /// command its shell tool runs.
 pub(crate) const SESSION_VARIABLE: &str = "ANTIGRAVITY_CONVERSATION_ID";
 
-/// The driver: what `initialize` said, and the listings it answered.
+/// The driver: what `initialize` said, the listings it answered, Antigravity's models as
+/// `models` last listed them, which `start` checks a pick against, and whether that listing
+/// found Antigravity signed out.
 #[derive(Default)]
 pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
+    listed: Mutex<Vec<harness::Model>>,
+    signed_out: AtomicBool,
 }
 
 /// The person's home, Antigravity's root, and what was read of its conversations.
@@ -68,9 +73,9 @@ impl Driver {
         Ok(&self.place()?.store)
     }
 
-    fn info() -> wire::HarnessInfo {
+    fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: MINIMUM.into(),
                 update: Some("agy update".into()),
@@ -116,10 +121,14 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![harness::Act::Continue, harness::Act::New],
                 touches: false,
             },
-            hooks: hooks::table(),
+            // Antigravity's own hooks, and the moments of a turn this driver runs.
+            hooks: hooks::table()
+                .into_iter()
+                .chain(crate::turn::hooks::table(protocol))
+                .collect(),
         }
     }
 }
@@ -138,7 +147,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol,
             program: Harness::Antigravity.program()?,
-            harness: Some(Box::new(Self::info())),
+            harness: Some(Box::new(Self::info(protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -168,16 +177,68 @@ impl Program for Driver {
                 result(setup::plan(&place.home, &place.root, steery_sdk::params(params)?).await)
             }
             method::MCP_LIST => result(mcp::list(&self.place()?.home, steery_sdk::params(params)?)),
-            method::HOOK_READ => result(hooks::read(
-                &self.place()?.root,
-                steery_sdk::params(params)?,
-            )?),
-            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::HOOK_READ => {
+                let read: harness::HookRead = steery_sdk::params(params)?;
+                if [crate::turn::hooks::PERMISSION, crate::turn::hooks::ENDED]
+                    .contains(&read.event.as_str())
+                {
+                    result(hooks::turn(self.store()?, read)?)
+                } else {
+                    result(hooks::read(&self.place()?.root, read)?)
+                }
+            }
+            method::HOOK_ANSWER => {
+                let answer: harness::HookAnswer = steery_sdk::params(params)?;
+                if [crate::turn::hooks::PERMISSION, crate::turn::hooks::ENDED]
+                    .contains(&answer.event.as_str())
+                {
+                    result(crate::turn::hooks::answer(drive::LABEL, answer)?)
+                } else {
+                    result(hooks::answer(answer)?)
+                }
+            }
             method::MODELS => {
                 let _: wire::Empty = steery_sdk::params(params)?;
                 let place = self.place()?;
-                result(models::list(&place.home, &place.root).await?)
+                let models = models::list(&place.home, &place.root).await?;
+                *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = models.models.clone();
+                self.signed_out
+                    .store(models.signed_in == Some(false), Ordering::Relaxed);
+                result(models)
             }
+            method::HELD => result(drive::held(self.place()?, &steery_sdk::params(params)?)?),
+            method::IDLE => result(drive::idle(self.place()?, &steery_sdk::params(params)?)),
+            method::START => {
+                let listed = self
+                    .listed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                result(drive::start(
+                    self.place()?,
+                    &listed,
+                    self.signed_out.load(Ordering::Relaxed),
+                    steery_sdk::params(params)?,
+                )?)
+            }
+            method::TURN_READ => result(crate::turn::drive::turn_line(
+                drive::LABEL,
+                steery_sdk::params(params)?,
+            )),
+            method::STOP => result(crate::turn::drive::stop(
+                drive::LABEL,
+                &steery_sdk::params(params)?,
+            )?),
+            method::RECEIPT_MARK => {
+                result(drive::mark(self.place()?, &steery_sdk::params(params)?)?)
+            }
+            method::RECEIPT_FIND => {
+                result(drive::find(self.place()?, &steery_sdk::params(params)?)?)
+            }
+            method::TERMINAL => result(drive::terminal(
+                self.place()?,
+                &steery_sdk::params(params)?,
+            )?),
             _ => Err(Error::Unknown),
         }
     }

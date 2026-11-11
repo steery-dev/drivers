@@ -9,8 +9,10 @@
 //! typed to `<root>/history.jsonl`, and a run with `-p` writes none. A prompt there names
 //! its conversation, except the first prompt of a new one, which names only its folder and
 //! time; that conversation is the one in the folder whose first step came within
-//! [`FIRST_STEP`] of it. A conversation a person typed into is listed, one that is not is
-//! excluded, and a sub-agent's run is listed under its lead, never on its own.
+//! [`FIRST_STEP`] of it. A conversation that a turn this driver ran opened has an empty file
+//! of its id in `<root>/steery/driven/` ([`drove`]), as an ACP session writes no history. A
+//! conversation a person typed into or drove is listed, any other is excluded, and a
+//! sub-agent's run is listed under its lead, never on its own.
 //!
 //! While Antigravity runs a conversation, it holds an exclusive `flock` on
 //! `<root>/presence/<id>.lock`, and releases it when it ends; the file stays. A sub-agent's
@@ -37,6 +39,9 @@ const HISTORY: &str = "history.jsonl";
 const PRESENCE: &str = "presence";
 pub(super) const BRAIN: &str = "brain";
 pub(super) const TRANSCRIPT: &str = ".system_generated/logs/transcript_full.jsonl";
+
+/// The folder of the conversations that a turn this driver ran opened.
+const DRIVEN: &str = "steery/driven";
 
 /// How far after a typed prompt its new conversation's first step may come. The terminal
 /// writes the prompt to its history before it opens the conversation: 0.7 s before, as
@@ -154,17 +159,36 @@ impl Store {
         )
     }
 
-    fn transcript(&self, id: &str) -> PathBuf {
+    pub(super) fn transcript(&self, id: &str) -> PathBuf {
         self.root.join(BRAIN).join(id).join(TRANSCRIPT)
+    }
+
+    /// The presence lock of the conversation `id`, which the process that runs it holds.
+    pub(super) fn lock(&self, id: &str) -> PathBuf {
+        self.root.join(PRESENCE).join(format!("{id}.lock"))
     }
 
     /// Whether Antigravity runs the conversation `id`: whether a process holds its
     /// presence lock. The probe takes a shared lock and drops it at once.
-    fn running(&self, id: &str) -> bool {
-        let Ok(file) = File::open(self.root.join(PRESENCE).join(format!("{id}.lock"))) else {
+    pub(super) fn running(&self, id: &str) -> bool {
+        let Ok(file) = File::open(self.lock(id)) else {
             return false;
         };
         held(&file)
+    }
+
+    /// The folder the conversation `id` ran in, where the database names one.
+    pub(super) fn folder(&self, id: &str) -> Result<Option<PathBuf>, Error> {
+        let rows = self.rows().map_err(|error| {
+            Error::refused(
+                refusal::REFUSED,
+                format!("cannot read Antigravity's {DATABASE}: {error}"),
+            )
+        })?;
+        Ok(rows
+            .into_iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.cwd))
     }
 
     fn session(&self, index: &Index, row: &Row) -> Session {
@@ -295,9 +319,14 @@ impl Store {
             .collect()
     }
 
-    /// The conversations that `history.jsonl` says a person typed into.
+    /// The conversations that `history.jsonl` says a person typed into, and those a turn
+    /// this driver ran opened.
     fn typed(&self, rows: &BTreeMap<String, Row>) -> HashSet<String> {
-        let mut typed = HashSet::new();
+        let mut typed: HashSet<String> = std::fs::read_dir(self.root.join(DRIVEN))
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .collect();
         let Ok(file) = File::open(self.root.join(HISTORY)) else {
             return typed;
         };
@@ -451,8 +480,15 @@ fn sqlite_millis(at: &str) -> Option<u64> {
 fn not_found(id: &str) -> Error {
     Error::refused(
         refusal::NOT_FOUND,
-        format!("Antigravity keeps no conversation `{id}` that a person typed into here"),
+        format!("Antigravity keeps no conversation `{id}` that a person typed into or drove here"),
     )
+}
+
+/// Mark the conversation `id` as one a turn this driver ran opened ([`DRIVEN`]).
+pub(super) fn drove(root: &Path, id: &str) -> std::io::Result<()> {
+    let driven = root.join(DRIVEN);
+    std::fs::create_dir_all(&driven)?;
+    File::create(driven.join(id)).map(drop)
 }
 
 #[cfg(test)]
