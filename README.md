@@ -31,10 +31,12 @@ short name, its tint and its mark.
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
 | `grok` | Grok Build | [`acp-family`](acp-family/) | observe, drive |
-| `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe, drive |
+| `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
+| `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
+| `cline` | Cline | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -72,9 +74,11 @@ agrees (PROTOCOL.md §4.1).
 | `claude-code` | `~/.local/bin` | `bash -c "curl -fsSL https://claude.ai/install.sh \| bash"` |
 | `codex` | `CODEX_INSTALL_DIR`, else `~/.local/bin` | `sh -c "curl -fsSL https://chatgpt.com/codex/install.sh \| CODEX_NON_INTERACTIVE=1 sh"` |
 | `grok` | `~/.grok/bin` | `bash -c "curl -fsSL https://x.ai/cli/install.sh \| bash"` |
+| `copilot` | `~/.local/bin` | `bash -c "curl -fsSL https://gh.io/copilot-install \| bash"` |
 | `opencode` | `~/.opencode/bin` | `bash -c "curl -fsSL https://opencode.ai/v2/install \| bash -s -- --no-modify-path"`. OpenCode 2 only: an `opencode` that names a 1.x release does not count as found, and a note names it. |
 | `cursor` | `~/.local/bin` | `sh -c "curl -fsS https://cursor.com/install \| bash"` |
 | `amp` | `AMP_HOME/bin`, else `~/.amp/bin` (and its link `~/.local/bin/amp`) | `bash -c "curl -fsSL https://ampcode.com/install.sh \| bash"` |
+| `cline` | npm's global folder | `npm install --global cline`, offered where npm is on `PATH` |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -105,9 +109,11 @@ signed in, as the harness itself says.
 | `claude-code` | ``run `claude auth login` in a terminal`` | `claude auth status --json`'s `loggedIn` |
 | `codex` | ``run `codex login` in a terminal`` | `codex login status`. Exit 0: signed in. Exit 1 with `Not logged in`: not signed in. |
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
+| `copilot` | ``run `copilot login` in a terminal`` | its own server's (`copilot --headless --stdio`) `auth.getStatus` `isAuthenticated`, bound 10 s. It counts a `gh` sign-in and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`. |
 | `opencode` | ``run `opencode auth login` in a terminal`` | not told. OpenCode's free models need no account, so an empty model list never means signed out. |
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
 | `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
+| `cline` | ``run `cline auth` in a terminal`` | `models` starts `cline --acp`: `session/new` refused with ACP `-32000` (auth required) means not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -146,6 +152,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 |---|---|---|
 | `claude-code` | `claude-sign-in`, `api-key` | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
 | `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
+| `copilot` | `copilot-sign-in`, `github-token` (`copilot login --with-token`) | GitHub's device page (`copilot login --device-code`), with its code in the step's label |
 | `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
 | `pi` | `api-key` | none |
 | `grok` | `grok-sign-in`, `api-key` (xAI, kept as `XAI_API_KEY`) | `grok login --device-auth`'s page (`accounts.x.ai/oauth2/device?user_code=…`), with its code in the step's label. A key counts where `grok models` with it, in an empty `GROK_HOME`, fetched xAI's models. |
@@ -264,10 +271,11 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code` and `codex` do this. omp, pi and Kilo have
-  no door of their own, so their door is `plugin`. This repository keeps Steery's plugin for
-  omp and pi in `pi-family/plugin/` and Kilo's in `acp-family/plugin/kilo.ts`, and
-  `setup/plan` installs it. The plugin speaks the plugin door,
+  `pick` and `stop` in its driver. `claude-code`, `codex` and `copilot` do this. omp, pi, Kilo
+  and OpenCode have no door of their own, so their door is `plugin`. This repository keeps
+  Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in `acp-family/plugin/kilo.ts`
+  and OpenCode's in `acp-family/plugin/opencode.ts`, and `setup/plan` installs it. The plugin
+  speaks the plugin door,
   version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
   uses the live methods only on conversations that Steery started. The runtime never steers a
   conversation that a person started.
@@ -291,9 +299,11 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `claude-code` | `~/.claude.json` `mcpServers` | local scope `projects["<folder>"]`. `.mcp.json` where the folder is trusted and the server approved, not rejected. (`start` runs `claude --bg`, not `-p`. `claude --bg` is an interactive background session that waits on approval.) `disabledMcpServers` off. | not with managed configuration, a plugin on, or a claude.ai sign-in |
 | `codex` | `codex mcp list --json` run at `/` | the same, run in the folder | never: account connectors |
 | `grok` | `grok inspect --json` run at `/`: `config.toml`, `~/.claude.json`, `~/.cursor/mcp.json`. A server imported from another tool and turned off there is left out. | the same, run in the folder: `.grok/config.toml` where trusted, `.mcp.json` | never: plugins, servers an ACP client forwards |
+| `copilot` | `mcp-config.json` `mcpServers`, installed plugins' servers, built-in servers (`copilot mcp list --json`). `disabledMcpServers` in `settings.json` off. | not read: a folder's `.mcp.json`, `.github/mcp.json`, `.vscode/mcp.json` | not with `cwd` |
 | `opencode` | the system folder's, then the config folder's `opencode.json`, `opencode.jsonc` (comments and trailing commas read), then the file `OPENCODE_CONFIG` names. `mcp.servers` (OpenCode 2) over `mcp.<name>` (OpenCode 1's shape). `enabled: false` off. | each folder's `opencode.json`, `opencode.jsonc`, from `/` down to it; then each folder's `.opencode/` ones, in the same order | not with managed preferences, `OPENCODE_CONFIG_CONTENT`, a `plugin` or `plugins` list, or a module in a config folder's `plugin/` or `plugins/` |
 | `cursor` | `~/.cursor/mcp.json`, whatever `CURSOR_CONFIG_DIR` says | `.cursor/mcp.json`, listed before its person approves it in Cursor | never: plugins, team servers |
 | `amp` | `amp mcp list --json` run at `/` | the same, run in the folder (it adds `.amp/settings.json`) | never: skills, plugins and toolboxes bring servers |
+| `cline` | Cline's MCP settings file: `CLINE_MCP_SETTINGS_PATH`, else `<CLINE_DIR or ~/.cline>/data/settings/cline_mcp_settings.json`. `mcpServers.<name>`, nested `transport` or flat shape. `disabled: true` off. | the same file: Cline reads none per folder | not when the file is not JSON |
 
 ## Adding a driver
 
@@ -828,6 +838,108 @@ Build and check it, with Codex on `PATH`:
 ```sh
 cd codex && cargo build
 steery programs test target/debug/steery-driver-codex
+cargo test
+```
+
+## Copilot: `acp-family/src/copilot/`
+
+One binary, `steery-driver-copilot`, with no settings, at live. It speaks to GitHub Copilot
+CLI only through what Copilot publishes:
+
+- its conversation files under `session-state/`
+- `hooks/*.json`, `mcp-config.json` and `skills/`
+- `copilot --headless --stdio` (Copilot's own server: JSON-RPC with `Content-Length` frames)
+- the same server of a Copilot window started with `--ui-server`, on its loopback port
+- `copilot -p` with `--output-format json` (a turn), `copilot -s` (a one-shot read),
+  `copilot --resume=<id>`, `copilot mcp list --json` and `copilot login`
+
+Copilot's home is `COPILOT_HOME`, else `~/.copilot`.
+
+Copilot's own server is a module of this crate, not a crate of its own. Only Copilot speaks
+it, and it is one JSON-RPC client of about 170 lines (`rpc.rs`). Drive asks it
+`auth.getStatus`, `models.list`, `sessions.fork` and `sessions.delete`; Live asks a window's.
+
+**Needs** (protocol 5). When `auth.getStatus` says `isAuthenticated: false`, the plan asks
+`sign-in` in two ways:
+
+1. `copilot-sign-in`: `copilot login --device-code`. Its page and one-time code are the step.
+2. `github-token`: a GitHub token. `copilot login --with-token` reads it on standard input,
+   and Copilot keeps it.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads
+  `session-state/<id>/events.jsonl`: one event on each line, each naming the event before it
+  in `parentId`. `workspace.yaml` beside it gives the folder and the times. A resume
+  (`--resume=<id>`) appends to the same file. The driver does not list a run whose
+  `client_name` is `sdk`: a program started it through Copilot's SDK. The events are turns
+  and how they ended (`abort`: interrupted), the person's and the agent's words, reasoning,
+  calls and their results, each response's tokens, compactions, models and sub-agents.
+- **Setup** (`setup/plan`). The plan has these entries:
+  - The MCP entry in `mcp-config.json` (`mcpServers.steery`).
+  - Steery's skill, `skills/steery/SKILL.md`.
+  - Steery's own hooks file, `hooks/steery.json`. Copilot loads every file in `hooks/`, so the
+    person's hooks stay where they are. Each hook runs the runtime's hook line with `|| true`:
+    Copilot reads a non-zero exit at `preToolUse` as a denied call.
+- **Hooks** (`hook/read`, `hook/answer`), in Copilot's camelCase form: `sessionStart`,
+  `userPromptSubmitted`, `preToolUse`, `postToolUse`, `postToolUseFailure`,
+  `permissionRequest`, `notification`, `agentStop`, `sessionEnd`, `subagentStart`.
+  - `sessionStart` gives Steery's paragraph as `additionalContext`, the only output Copilot
+    reads there. This is how the agent learns its conversation's id.
+  - `preToolUse` answers `permissionDecision` (`allow`, `deny`, `ask`).
+  - `permissionRequest` answers `behavior` (`allow`, `deny`). Its document names no call id.
+  - Copilot drops the output of `userPromptSubmitted`, so Steery only reads it.
+- **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`, `reader`,
+  `terminal`).
+  - `held`: every Copilot that opens a conversation writes `inuse.<pid>.lock` in its folder.
+    A lock counts while its process runs and started before the lock: a killed Copilot
+    leaves its lock behind. Else the runtime looks.
+  - `idle`: the newest turn of `events.jsonl`, with its model, where `assistant.turn_end`
+    ended it. An open turn gives no sample: a run that died leaves its turn open.
+  - `models`: the server's `models.list`, with each model's `supportedReasoningEfforts` as
+    its thinking. `auto` is listed first, but a run that names no model takes the model after
+    it, so the driver lists that one first.
+  - `start`: this binary in its turn mode, which becomes
+    `copilot --output-format json --no-ask-user [--model m] [--reasoning-effort t] [--add-dir r]`
+    with the words on standard input.
+    - A continue adds `--resume=<id>`. Copilot names a resumed conversation only in its last
+      line, so the turn mode first writes `{"steery": {"named": <id>}}`. A continue is refused
+      `no-place` where its folder is gone.
+    - A fork asks the server's `sessions.fork` for a copy of the history, then resumes the copy.
+    - A worktree and a hand-over are refused `selection-unsupported`.
+    - The turn runs without `--allow-all-tools`: Copilot with no terminal denies each call that
+      its own rules and Steery's `permissionRequest` hook do not allow.
+  - `turn/read`: Copilot's lines are the events of `events.jsonl`, with the same ids, then a
+    `result` with `exitCode`. `took` is the `user.message` that carries the delivery marker.
+    Standard error gives `model-missing`, `not-found`, `selection-unsupported`, `start-failed`.
+  - `stop`: Copilot stops a turn gracefully only for the server client that runs it
+    (`session.abort`). The runtime's signals end every other turn.
+  - `receipt/*`: no door, so no mark.
+  - `reader`: `copilot -s --no-ask-user --no-custom-instructions --disable-builtin-mcps`, with
+    `--excluded-tools` for every source, or only `view`, `grep`, `glob`. The reader runs under a
+    conversation id of its own (`--session-id`), and `sessions.delete` then removes it.
+  - `terminal`: `cd '<cwd>' && copilot --ui-server --resume=<id>`, with `COPILOT_HOME` where
+    it is set. The window it opens has a door.
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`), door `picks`. Copilot's door
+  is a window started with `copilot --ui-server`. Its server listens on a loopback port of its
+  process, and `session.getForeground` names the conversation it shows.
+  - `held`: a live lock's process with a listening port whose window shows the
+    conversation. Its stop is `owner`, with a token of the window and the turn's start.
+  - `say`: `session.send` with the say's id as `clientTurnId`. `queue` is `enqueue`; `steer`
+    is `immediate`, which goes in at the running turn's next model call. `immediate` is
+    refused `harness-busy` while a turn runs or words wait.
+  - `pick`: `session.model.switchTo`, or `setReasoningEffort` alone. Copilot takes any model
+    name and fails at the next turn, so the driver checks the pick against `models.list`.
+  - `stop`: `session.abort`, where the token still names the turn that runs.
+  - `session/changed`: the window's `session.eventLog.read`, waiting for new events. Copilot
+    logs no `session.idle`: an `abort`, a new turn's `user.message`, or
+    `session.metadata.isProcessing` false ends a turn. While a turn runs, the driver asks
+    `isProcessing` each second.
+  - A window that was not started with `--ui-server` has no door: `say` is refused `no-door`.
+    `setup/plan` notes this. Copilot 1.0.109 accepts `--ui-server` but `--help` does not list
+    it, and no setting turns it on.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-copilot
 cargo test
 ```
 

@@ -4,6 +4,8 @@
 //! lives in its own module and answers the program protocol for it alone. What two of them
 //! share, such as reading ACP's `session/update` records, is a module of its own.
 
+mod cline;
+mod copilot;
 mod cursor;
 mod grok;
 mod harness;
@@ -14,10 +16,19 @@ mod turn;
 
 pub use harness::Harness;
 
-/// Serve the driver for `harness` on standard input and output.
+/// Serve the driver for `harness` on standard input and output. Copilot's binary is also
+/// the turn mode that its `start` plans: `<binary> turn ...`.
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+        Harness::Copilot => {
+            let mut args = std::env::args().skip(1);
+            match args.next() {
+                Some(mode) if mode == copilot::TURN_MODE => copilot::turn_main(args).await,
+                Some(mode) if mode == copilot::READER_MODE => copilot::reader_main(args).await,
+                _ => steery_sdk::serve(copilot::Driver::new).await,
+            }
+        }
         Harness::OpenCode => match std::env::args().nth(1).as_deref() {
             Some("turn") => {
                 turn::main(opencode::drive::Turns::new(), std::env::args().skip(2)).await
@@ -30,5 +41,9 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
         },
         Harness::Cursor => steery_sdk::serve(|_notifier| cursor::Driver::default()).await,
+        Harness::Cline => match std::env::args().nth(1).as_deref() {
+            Some("turn") => turn::main(cline::drive::Turns::new(), std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| cline::Driver::default()).await,
+        },
     }
 }
