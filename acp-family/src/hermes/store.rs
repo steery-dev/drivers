@@ -100,6 +100,8 @@ struct Store {
     infos: HashMap<String, Info>,
     /// The ids of each chain, oldest first, by its first id.
     chains: HashMap<String, Vec<String>>,
+    /// The home the store is of: Hermes's home or a profile's, the folder of its `state.db`.
+    home: PathBuf,
 }
 
 impl Store {
@@ -165,6 +167,7 @@ impl Store {
             connection,
             infos,
             chains,
+            home: path.parent().map(Path::to_path_buf).unwrap_or_default(),
         })
     }
 
@@ -368,6 +371,8 @@ pub struct Standing {
     pub leased: Option<String>,
     /// Whether Hermes admitted words that it has not run to their end.
     pub pending: bool,
+    /// The home of the profile whose store keeps it, which Hermes's gateway serves it under.
+    pub home: PathBuf,
 }
 
 /// The client of a lease whose holder still lives: `pid=<pid>[:pidns=<ns>]:turn=…:platform=<client>`
@@ -469,6 +474,7 @@ impl Home {
                     .find_map(|id| store.info(id).cwd.clone()),
                 leased: holders.iter().find_map(|holder| leased(holder)),
                 pending: pending > 0,
+                home: store.home.clone(),
             })
         };
         standing().map(Some).map_err(failed)
