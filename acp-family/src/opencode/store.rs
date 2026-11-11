@@ -452,9 +452,8 @@ impl<'a> Store<'a> {
         let Some(db) = self.open()? else {
             return Ok(None);
         };
-        db
-            .query_row(
-                "select s.time_suspended, s.time_idle, s.idle_outcome,
+        db.query_row(
+            "select s.time_suspended, s.time_idle, s.idle_outcome,
                         (select count(*) from session_inbox i where i.session_id = s.id),
                         (select max(m.time_created) from session_message m
                           where m.session_id = s.id and m.type = 'user'),
@@ -462,21 +461,21 @@ impl<'a> Store<'a> {
                           where m.session_id = s.id and m.type = 'assistant'
                           order by m.seq desc limit 1)
                  from session_v2 s where s.id = ?1",
-                params![id],
-                |row| {
-                    let answer: Option<String> = row.get(5)?;
-                    Ok(Standing {
-                        claimed: row.get::<_, Option<i64>>(0)?.map(|at| at.max(0) as u64),
-                        idle: row.get::<_, Option<i64>>(1)?.map(|at| at.max(0) as u64),
-                        outcome: row.get(2)?,
-                        queued: row.get::<_, i64>(3)? > 0,
-                        asked: row.get::<_, Option<i64>>(4)?.map(|at| at.max(0) as u64),
-                        answer: answer.and_then(|data| serde_json::from_str(&data).ok()),
-                    })
-                },
-            )
-            .optional()
-            .map_err(|e| self.unreadable(e))
+            params![id],
+            |row| {
+                let answer: Option<String> = row.get(5)?;
+                Ok(Standing {
+                    claimed: row.get::<_, Option<i64>>(0)?.map(|at| at.max(0) as u64),
+                    idle: row.get::<_, Option<i64>>(1)?.map(|at| at.max(0) as u64),
+                    outcome: row.get(2)?,
+                    queued: row.get::<_, i64>(3)? > 0,
+                    asked: row.get::<_, Option<i64>>(4)?.map(|at| at.max(0) as u64),
+                    answer: answer.and_then(|data| serde_json::from_str(&data).ok()),
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| self.unreadable(e))
     }
 
     /// The folder a conversation runs in.

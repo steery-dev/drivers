@@ -8,6 +8,7 @@ mod cline;
 mod copilot;
 mod cursor;
 mod gemini;
+mod goose;
 mod grok;
 mod harness;
 mod hermes;
@@ -45,7 +46,11 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
         Harness::Cursor => steery_sdk::serve(|_notifier| cursor::Driver::default()).await,
         Harness::Cline => match std::env::args().nth(1).as_deref() {
             Some("turn") => turn::main(cline::drive::Turns::new(), std::env::args().skip(2)).await,
-            _ => steery_sdk::serve(|_notifier| cline::Driver::default()).await,
+            _ => steery_sdk::serve(cline::Driver::new).await,
+        },
+        Harness::Goose => match std::env::args().nth(1).as_deref() {
+            Some("turn") => turn::main(goose::drive::Turns, std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| goose::Driver::default()).await,
         },
         Harness::Gemini => steery_sdk::serve(|_notifier| gemini::Driver::default()).await,
     }

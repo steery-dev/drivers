@@ -62,7 +62,10 @@ impl Driver {
 
     /// OpenCode 2's executable, where this machine has one.
     async fn binary(&self) -> Result<Option<std::path::PathBuf>, Error> {
-        Ok(place::binary(self.place()?).await.0.map(|binary| binary.path))
+        Ok(place::binary(self.place()?)
+            .await
+            .0
+            .map(|binary| binary.path))
     }
 }
 
@@ -109,7 +112,11 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             door: Some(harness::LiveDoor::Plugin),
             checks_idle: true,
             worktrees: false,
-            acts: vec![harness::Act::Continue, harness::Act::Fork, harness::Act::New],
+            acts: vec![
+                harness::Act::Continue,
+                harness::Act::Fork,
+                harness::Act::New,
+            ],
             touches: false,
         },
         hooks: crate::turn::hooks::table(protocol),
@@ -174,7 +181,11 @@ impl Program for Driver {
             }
             method::START => {
                 let binary = self.binary().await?;
-                let listed = self.listed.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let listed = self
+                    .listed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 result(drive::start(
                     binary.as_deref(),
                     self.place()?,
@@ -190,8 +201,12 @@ impl Program for Driver {
                 "OpenCode",
                 &steery_sdk::params(params)?,
             )?),
-            method::RECEIPT_MARK => result(drive::mark(self.place()?, &steery_sdk::params(params)?)?),
-            method::RECEIPT_FIND => result(drive::find(self.place()?, &steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => {
+                result(drive::mark(self.place()?, &steery_sdk::params(params)?)?)
+            }
+            method::RECEIPT_FIND => {
+                result(drive::find(self.place()?, &steery_sdk::params(params)?)?)
+            }
             method::TERMINAL => result(drive::terminal(
                 self.binary().await?.as_deref(),
                 self.place()?,
