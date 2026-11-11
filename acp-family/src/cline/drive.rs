@@ -401,7 +401,9 @@ pub fn find(place: &Place, find: &ReceiptFind) -> Result<Receipt, Error> {
     shared::find(&said, &find.delivery)
 }
 
-/// `terminal`: Cline's own window on the conversation, in the folder it ran in.
+/// `terminal`: Cline's own window on the conversation, in the folder it ran in, with Cline's
+/// hub running first: a window joins the hub only where it finds one running, and only a
+/// window in the hub has a door.
 pub fn terminal(place: &Place, terminal: &Terminal) -> Result<TerminalCommand, Error> {
     let db = place.db();
     let cwd = Store::new(&db)
@@ -409,7 +411,7 @@ pub fn terminal(place: &Place, terminal: &Terminal) -> Result<TerminalCommand, E
         .unwrap_or_else(|| terminal.cwd.clone());
     Ok(TerminalCommand {
         command: format!(
-            "cd {} && cline --id {}",
+            "cline hub ensure >/dev/null && cd {} && cline --id {}",
             quoted(&cwd.to_string_lossy()),
             quoted(&terminal.external_id)
         ),

@@ -1,18 +1,20 @@
-//! Steery's driver for Cline's CLI at drive: it reads Cline's conversations from its SQLite
+//! Steery's driver for Cline's CLI at live: it reads Cline's conversations from its SQLite
 //! list and each one's messages file, plans the entries that set Cline up for Steery, lists
-//! the MCP servers Cline loads, starts Cline's turns through its own ACP server, and reads
-//! the permissions those turns ask for.
+//! the MCP servers Cline loads, starts Cline's turns through its own ACP server, reads the
+//! permissions those turns ask for, and steers a conversation that a person's Cline window
+//! shows through Cline's hub ([`live`]).
 
 mod config;
 pub(crate) mod drive;
 mod events;
 mod hooks;
+mod live;
 mod place;
 mod setup;
 mod store;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -37,28 +39,46 @@ table `sessions`. Each conversation's messages are one JSON file that Cline rewr
 blocks (`text`, `thinking`, `tool_use`, `tool_result`).";
 
 /// The driver: where Cline keeps everything, the listings it answered, to answer the next
-/// with only what changed, Cline's models as `models` last listed them, which `start` checks
-/// a pick against, and whether that listing found Cline signed out.
-#[derive(Default)]
+/// with only what changed, Cline's models as `models` last listed them, which `start` and
+/// `pick` check a pick against, whether that listing found Cline signed out, and the door
+/// of Cline's hub.
 pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
     listed: Mutex<Vec<harness::Model>>,
     signed_out: AtomicBool,
+    live: Arc<live::Live>,
 }
 
 impl Driver {
+    pub fn new(notifier: steery_sdk::Notifier) -> Self {
+        Self {
+            place: OnceLock::new(),
+            changes: Default::default(),
+            listed: Mutex::default(),
+            signed_out: AtomicBool::new(false),
+            live: Arc::new(live::Live::new(notifier)),
+        }
+    }
+
     fn place(&self) -> Result<&Place, Error> {
         self.place
             .get()
             .ok_or_else(|| Error::invalid("`initialize` must come first"))
+    }
+
+    fn listed(&self) -> Vec<harness::Model> {
+        self.listed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
 /// Cline as Steery reads it, under the protocol picked.
 fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe, wire::Level::Drive],
+        levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some("cline update".into()),
@@ -89,7 +109,8 @@ fn info(protocol: u32) -> wire::HarnessInfo {
                 model: false,
                 thinking: false,
             },
-            door: None,
+            // A window that joined Cline's hub takes words, a model and a stop through it.
+            door: Some(harness::LiveDoor::Picks),
             checks_idle: false,
             worktrees: false,
             acts: vec![harness::Act::Continue, harness::Act::New],
@@ -151,7 +172,23 @@ impl Program for Driver {
                 "Cline",
                 steery_sdk::params(params)?,
             )?),
-            method::HELD => result(drive::held(self.place()?, &steery_sdk::params(params)?)?),
+            method::HELD => {
+                let held: harness::Held = steery_sdk::params(params)?;
+                match self.live.held(self.place()?, &held.external_id).await {
+                    Some(holder) => result(harness::HeldBy::Holder(holder)),
+                    None => result(drive::held(self.place()?, &held)?),
+                }
+            }
+            method::SAY => result(
+                self.live
+                    .say(self.place()?, steery_sdk::params(params)?)
+                    .await?,
+            ),
+            method::PICK => result(
+                self.live
+                    .pick(self.place()?, &self.listed(), steery_sdk::params(params)?)
+                    .await?,
+            ),
             method::IDLE => result(drive::idle(self.place()?, &steery_sdk::params(params)?)),
             method::MODELS => {
                 let models = drive::models(self.place()?).await?;
@@ -160,27 +197,26 @@ impl Program for Driver {
                     .store(models.signed_in == Some(false), Ordering::Relaxed);
                 result(models)
             }
-            method::START => {
-                let listed = self
-                    .listed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                result(drive::start(
-                    self.place()?,
-                    &listed,
-                    self.signed_out.load(Ordering::Relaxed),
-                    steery_sdk::params(params)?,
-                )?)
-            }
+            method::START => result(drive::start(
+                self.place()?,
+                &self.listed(),
+                self.signed_out.load(Ordering::Relaxed),
+                steery_sdk::params(params)?,
+            )?),
             method::TURN_READ => result(crate::turn::drive::turn_line(
                 "Cline",
                 steery_sdk::params(params)?,
             )),
-            method::STOP => result(crate::turn::drive::stop(
-                "Cline",
-                &steery_sdk::params(params)?,
-            )?),
+            method::STOP => {
+                let stop: harness::Stop = steery_sdk::params(params)?;
+                match stop.holder {
+                    harness::Holder::Person {
+                        stop: harness::HolderStop::Owner(_),
+                        ..
+                    } => result(self.live.stop(self.place()?, &stop).await?),
+                    _ => result(crate::turn::drive::stop("Cline", &stop)?),
+                }
+            }
             method::RECEIPT_MARK => {
                 result(drive::mark(self.place()?, &steery_sdk::params(params)?)?)
             }
