@@ -1,5 +1,5 @@
 //! Kilo at drive: Steery starts Kilo's turns itself. A turn is this driver's own binary in
-//! its turn mode, speaking ACP to `kilo acp` ([`super::turn`]). Who holds a conversation is
+//! its turn mode, speaking ACP to `kilo acp` ([`crate::turn`]). Who holds a conversation is
 //! what Kilo's own marks of running turns say (`session-turn/` in its state folder), the
 //! registry by which one Kilo process tells another that it runs a turn; where a
 //! conversation stands is its newest messages in `kilo.db`.
@@ -11,28 +11,92 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use steery_driver_common::kernel;
-use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
-    Act, Ended, Execution, Held, HeldBy, Holder, HolderStop, Launch, Marked, Model, Models,
-    Receipt, ReceiptFind, ReceiptMark, Sample, Sampled, Start, Stdin, Stop, Stopped, Stream,
-    Terminal, TerminalCommand, TurnLine, TurnRead, TurnState,
+    Execution, Held, HeldBy, Holder, HolderStop, Launch, Marked, Model, Models, Receipt,
+    ReceiptFind, ReceiptMark, Sample, Sampled, Start, Terminal, TerminalCommand,
 };
 use steery_sdk::{Error, refusal};
 
 use super::config;
 use super::store::{Latest, Store, Turn};
+use crate::turn::drive::{self as shared, now};
 
 /// How long `kilo models --verbose` has to list Kilo's models.
 const LISTED_WITHIN: Duration = Duration::from_secs(25);
 
-/// The updates of a session that only a prompt makes: Kilo answering words.
-const ANSWERING: [&str; 5] = [
-    "agent_message_chunk",
-    "agent_thought_chunk",
-    "tool_call",
-    "tool_call_update",
-    "plan",
-];
+/// How long the newest words of a session may wait for an answer with no Kilo mark before
+/// the turn takes it that Kilo runs nothing more of it.
+const UNANSWERED_WITHIN: Duration = Duration::from_secs(5);
+
+/// Kilo, to a turn this driver runs ([`crate::turn`]): words told mid-turn go in as one
+/// more prompt, which Kilo queues behind the one running.
+pub struct Turns {
+    /// Kilo's database and marks, where the turn has a home to find them in.
+    store: Option<Store>,
+}
+
+impl Turns {
+    /// The store under `$HOME`, as the runtime starts the turn.
+    pub fn new() -> Self {
+        Self {
+            store: std::env::var_os("HOME").map(|home| Store::new(Path::new(&home))),
+        }
+    }
+}
+
+impl crate::turn::Host for Turns {
+    fn harness(&self) -> crate::Harness {
+        crate::Harness::Kilo
+    }
+
+    fn told(&self) -> crate::turn::Told {
+        crate::turn::Told::Prompt
+    }
+
+    /// Kilo's own mark says this Kilo runs a turn of the session (its ACP server, or a
+    /// child of the launcher that `kilo` may be), or the newest words of the session have
+    /// no answer yet, as between queued words' turn and the one they took over, for at most
+    /// [`UNANSWERED_WITHIN`] with no mark.
+    fn runs(
+        &self,
+        acp: Option<u32>,
+        session: &str,
+        _queued: &[String],
+        unmarked: &mut Option<tokio::time::Instant>,
+    ) -> bool {
+        let Some(store) = &self.store else {
+            return false;
+        };
+        let marked = match (store.turn(session), acp) {
+            (Some(Turn::Here(pid)), Some(kilo)) => {
+                pid == kilo
+                    || kernel::descendants(kilo)
+                        .iter()
+                        .any(|(child, _)| *child == pid)
+            }
+            _ => false,
+        };
+        if marked {
+            *unmarked = None;
+            return true;
+        }
+        let unanswered = store.latest(session).is_ok_and(|latest| {
+            let answered = latest
+                .answer
+                .as_ref()
+                .and_then(|answer| answer.pointer("/time/created"))
+                .and_then(Value::as_u64);
+            latest
+                .asked
+                .is_some_and(|asked| answered.is_none_or(|at| at < asked))
+        });
+        unanswered
+            && unmarked
+                .get_or_insert_with(tokio::time::Instant::now)
+                .elapsed()
+                < UNANSWERED_WITHIN
+    }
+}
 
 /// `held`: the Kilo process whose mark says it runs a turn of the conversation. Kilo marks
 /// every turn it runs, whatever runs it, so with no live mark nobody runs one.
@@ -342,98 +406,23 @@ fn recent(state: &Path, models: &[Model]) -> Option<String> {
         .find(|pick| models.iter().any(|model| model.model == *pick))
 }
 
-/// A model and thinking level that Kilo's last list has; an empty list checks nothing.
-fn offered(listed: &[Model], model: Option<&str>, thinking: Option<&str>) -> Result<(), Error> {
-    let (Some(model), false) = (model, listed.is_empty()) else {
-        return Ok(());
-    };
-    let Some(entry) = listed.iter().find(|entry| entry.model == model) else {
-        return Err(Error::refused(
-            refusal::MODEL_MISSING,
-            format!("Kilo lists no model {model}"),
-        ));
-    };
-    match thinking {
-        Some(level) if !entry.thinking.iter().any(|known| known == level) => Err(Error::refused(
-            refusal::SELECTION_UNSUPPORTED,
-            format!("Kilo's {model} has no thinking level {level}"),
-        )),
-        _ => Ok(()),
-    }
-}
-
-/// `start`: the launch plan of a turn, which runs this binary in its turn mode speaking to
-/// `kilo acp`. Kilo resumes a conversation in the folder it ran in, so a continue whose
-/// folder is gone is refused. A model or thinking level that Kilo's last list (`listed`)
-/// does not have is refused before anything runs: Kilo checks a model only once a session
-/// is open, and a new conversation would be left behind empty. Folders the turn reads
-/// outside its own are allowed it through `KILO_CONFIG_CONTENT`, so Kilo asks nobody for
-/// them.
+/// `start`: the launch plan of a turn ([`shared::launch`]). A model or thinking level that
+/// Kilo's last list (`listed`) does not have is refused before anything runs: Kilo checks a
+/// model only once a session is open, and a new conversation would be left behind empty.
+/// Folders the turn reads outside its own are allowed it through `KILO_CONFIG_CONTENT`, so
+/// Kilo asks nobody for them.
 pub fn start(
     kilo: Option<&Path>,
     store: &Store,
     listed: &[Model],
     start: Start,
 ) -> Result<Launch, Error> {
-    let kilo = kilo.ok_or_else(|| Error::refused(refusal::NO_BINARY, "Kilo is not installed"))?;
-    offered(listed, start.model.as_deref(), start.thinking.as_deref())?;
-    let act = match start.act {
-        Act::Continue => "continue",
-        Act::Fork => "fork",
-        Act::New => "new",
-        Act::Hand => {
-            return Err(Error::refused(
-                refusal::SELECTION_UNSUPPORTED,
-                "Kilo has no hand-over",
-            ));
-        }
-    };
-    if !start.cwd.is_absolute() || !start.folder.is_absolute() {
-        return Err(Error::invalid("the folders must be absolute paths"));
-    }
-    let id = match start.act {
-        Act::New => None,
-        _ => {
-            let id = start.external_id.clone().ok_or_else(|| {
-                Error::invalid(format!("a {act} must name the conversation it acts on"))
-            })?;
-            let directory = store.directory(&id)?;
-            if start.act == Act::Continue
-                && let Some(directory) = directory
-                && !directory.is_dir()
-            {
-                return Err(Error::refused(
-                    refusal::NO_PLACE,
-                    format!(
-                        "{} is gone, and Kilo resumes the conversation only there",
-                        directory.display()
-                    ),
-                ));
-            }
-            Some(id)
-        }
-    };
-    let program = std::env::current_exe().map_err(|e| {
-        Error::refused(
-            refusal::START_FAILED,
-            format!("cannot find this driver's own path: {e}"),
-        )
-    })?;
-    let asked = super::turn::Asked {
-        kilo: kilo.to_path_buf(),
-        act: act.to_owned(),
-        id,
-        model: start.model,
-        thinking: start.thinking,
-        inbox: Some(start.folder.join("inbox")),
-        // Without setup's hook, a permission Kilo asks for is rejected.
-        hook: std::fs::read_to_string(super::setup::hook_file(store.config()))
-            .ok()
-            .map(|hook| hook.trim().to_owned())
-            .filter(|hook| !hook.is_empty()),
-    };
-    let mut argv = vec![program.to_string_lossy().into_owned(), "turn".to_owned()];
-    argv.extend(asked.args());
+    shared::offered(
+        "Kilo",
+        listed,
+        start.model.as_deref(),
+        start.thinking.as_deref(),
+    )?;
     let mut env = BTreeMap::new();
     // The turn's Kilo writes the database this driver reads.
     if let Some(db) = store.moved() {
@@ -450,28 +439,8 @@ pub fn start(
             json!({"permission": {"external_directory": allowed}}).to_string(),
         );
     }
-    Ok(Launch {
-        argv,
-        env,
-        cwd: start.cwd,
-        stdin: Stdin::Words,
-        inbox: true,
-    })
-}
-
-/// `stop`: Kilo has no way to end a turn from outside the process that runs it. A turn of
-/// this driver's ends on the runtime's signal, which it passes to Kilo as a cancel.
-pub fn stop(stop: &Stop) -> Result<Stopped, Error> {
-    if stop.say.is_some() {
-        return Err(Error::refused(
-            refusal::OTHER_TURN,
-            "Kilo's driver cannot tell which words began the running turn",
-        ));
-    }
-    Ok(Stopped {
-        stopped: false,
-        proof: Some("Kilo has no way to end a turn from outside its process".into()),
-    })
+    let hook = shared::hook(&super::setup::hook_file(store.config()));
+    shared::launch("Kilo", kilo, start, |id| store.directory(id), hook, env)
 }
 
 /// `receipt/mark`: the conversation's newest message; Kilo's message ids grow with time.
@@ -483,22 +452,10 @@ pub fn mark(store: &Store, mark: &ReceiptMark) -> Result<Marked, Error> {
 
 /// `receipt/find`: whether exactly one person message after the mark carries the marker.
 pub fn find(store: &Store, find: &ReceiptFind) -> Result<Receipt, Error> {
-    let marker = format!("{DELIVERED}{}", find.delivery);
-    let found = store
-        .said_after(&find.external_id, &find.mark)?
-        .iter()
-        .filter(|words| marked(words, &marker))
-        .count();
-    if found > 1 {
-        return Err(Error::refused(
-            refusal::REFUSED,
-            "two inputs carry the delivery marker",
-        ));
-    }
-    Ok(Receipt {
-        found: found == 1,
-        owner: None,
-    })
+    shared::find(
+        &store.said_after(&find.external_id, &find.mark)?,
+        &find.delivery,
+    )
 }
 
 /// `terminal`: Kilo's own window on the conversation, in the folder it ran in.
@@ -506,119 +463,5 @@ pub fn terminal(store: &Store, terminal: &Terminal) -> Result<TerminalCommand, E
     let cwd = store
         .directory(&terminal.external_id)?
         .unwrap_or_else(|| terminal.cwd.clone());
-    Ok(TerminalCommand {
-        command: format!(
-            "cd {} && kilo --session {}",
-            quoted(&cwd.to_string_lossy()),
-            quoted(&terminal.external_id)
-        ),
-        app: None,
-        line: None,
-    })
-}
-
-/// `turn/read`: a line of a turn's output. Standard output is ACP: the session is named
-/// by Kilo's answer that opens it or by the prompt sent into it, and taken once Kilo
-/// answers the prompt; Kilo's answer to a prompt ends the turn. Standard error is the turn
-/// mode's one line, `<refusal word>: <why>`.
-pub fn turn_line(read: TurnRead) -> TurnLine {
-    match read.stream {
-        Stream::Stderr => TurnLine {
-            refused: read
-                .line
-                .split_once(':')
-                .map(|(word, _)| word.trim())
-                .filter(|word| refusal::ALL.contains(word))
-                .map(str::to_owned)
-                .or_else(|| (!read.line.trim().is_empty()).then(|| refusal::REFUSED.to_owned())),
-            ..TurnLine::default()
-        },
-        Stream::Stdout => {
-            let Ok(line) = serde_json::from_str::<Value>(&read.line) else {
-                return TurnLine::default();
-            };
-            let method = line.get("method").and_then(Value::as_str);
-            let answer = method.is_none() && line.get("id").is_some();
-            let named = if answer {
-                line.pointer("/result/sessionId")
-            } else if method == Some("session/prompt") {
-                line.pointer("/params/sessionId")
-            } else {
-                None
-            }
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-            let update = (method == Some("session/update"))
-                .then(|| line.pointer("/params/update"))
-                .flatten();
-            let kind = update
-                .and_then(|update| update.get("sessionUpdate"))
-                .and_then(Value::as_str);
-            let ended = answer.then(|| ended(&line)).flatten();
-            let took = read.delivery.as_ref().and_then(|_| {
-                if kind.is_some_and(|kind| ANSWERING.contains(&kind))
-                    || ended
-                        .as_ref()
-                        .is_some_and(|ended| ended.state != TurnState::Failed)
-                {
-                    Some(true)
-                } else {
-                    named.is_some().then_some(false)
-                }
-            });
-            TurnLine {
-                named,
-                took,
-                ended,
-                refused: answer
-                    .then(|| line.get("error"))
-                    .flatten()
-                    .map(|error| super::turn::word(error).to_owned()),
-                events: Vec::new(),
-                title: (kind == Some("session_info_update"))
-                    .then(|| update?.get("title")?.as_str().map(str::to_owned))
-                    .flatten(),
-            }
-        }
-    }
-}
-
-/// How Kilo's answer ends the turn: a prompt's `stopReason`, or any refusal.
-fn ended(answer: &Value) -> Option<Ended> {
-    if let Some(error) = answer.get("error") {
-        return Some(Ended {
-            state: TurnState::Failed,
-            error: error
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        });
-    }
-    let reason = answer.pointer("/result/stopReason")?.as_str()?;
-    Some(match reason {
-        "end_turn" => Ended {
-            state: TurnState::Finished,
-            error: None,
-        },
-        "cancelled" => Ended {
-            state: TurnState::Interrupted,
-            error: None,
-        },
-        other => Ended {
-            state: TurnState::Failed,
-            error: Some(format!("Kilo stopped the turn: {other}")),
-        },
-    })
-}
-
-/// Now, in milliseconds since 1970.
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as u64)
-}
-
-/// One literal POSIX shell word.
-fn quoted(word: &str) -> String {
-    format!("'{}'", word.replace('\'', "'\\''"))
+    Ok(shared::terminal("kilo", &cwd, &terminal.external_id))
 }

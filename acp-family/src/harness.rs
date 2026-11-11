@@ -5,6 +5,8 @@
 pub enum Harness {
     /// xAI's Grok Build, whose executable is `grok`.
     Grok,
+    /// GitHub Copilot CLI, whose executable is `copilot`.
+    Copilot,
     /// OpenCode 2, whose executable is `opencode`.
     OpenCode,
     /// Nous Research's Hermes Agent, whose executable is `hermes`.
@@ -13,6 +15,8 @@ pub enum Harness {
     Kilo,
     /// Cursor's agent CLI, whose executable is `cursor-agent`.
     Cursor,
+    /// Cline's CLI, whose executable is `cline`.
+    Cline,
     /// Google's Gemini CLI, whose executable is `gemini`.
     Gemini,
 }
@@ -22,10 +26,12 @@ impl Harness {
     pub fn id(self) -> &'static str {
         match self {
             Self::Grok => "grok",
+            Self::Copilot => "copilot",
             Self::OpenCode => "opencode",
             Self::Hermes => "hermes",
             Self::Kilo => "kilo",
             Self::Cursor => "cursor",
+            Self::Cline => "cline",
             Self::Gemini => "gemini",
         }
     }
@@ -34,10 +40,12 @@ impl Harness {
     pub fn label(self) -> &'static str {
         match self {
             Self::Grok => "Grok Build",
+            Self::Copilot => "Copilot",
             Self::OpenCode => "OpenCode",
             Self::Hermes => "Hermes Agent",
             Self::Kilo => "Kilo",
             Self::Cursor => "Cursor",
+            Self::Cline => "Cline",
             Self::Gemini => "Gemini CLI",
         }
     }
@@ -46,10 +54,12 @@ impl Harness {
     pub fn short(self) -> &'static str {
         match self {
             Self::Grok => "Gk",
+            Self::Copilot => "Co",
             Self::OpenCode => "Oc",
             Self::Hermes => "He",
             Self::Kilo => "Kl",
             Self::Cursor => "Cu",
+            Self::Cline => "Cl",
             Self::Gemini => "Gm",
         }
     }
@@ -58,10 +68,12 @@ impl Harness {
     pub fn tint(self) -> &'static str {
         match self {
             Self::Grok => "#1d1d1f",
+            Self::Copilot => "#8534f3",
             Self::OpenCode => "#211e1e",
             Self::Hermes => "#4b2fd0",
             Self::Kilo => "#617a91",
             Self::Cursor => "#14120b",
+            Self::Cline => "#1c1c24",
             Self::Gemini => "#4285f4",
         }
     }
