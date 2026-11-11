@@ -257,7 +257,7 @@ pub async fn models(kilo: Option<&Path>, store: &Store) -> Result<Models, Error>
     let mut models = listed(&String::from_utf8_lossy(&output.stdout));
     let global = config::files(store.config(), None)
         .iter()
-        .filter_map(|file| config::jsonc(file))
+        .filter_map(|file| crate::jsonc::jsonc(file))
         .collect::<Vec<_>>();
     let first = configured(&global)
         .or_else(|| recent(store.state(), &models))

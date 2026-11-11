@@ -7,10 +7,12 @@
 mod cline;
 mod copilot;
 mod cursor;
+mod gemini;
 mod goose;
 mod grok;
 mod harness;
 mod hermes;
+mod jsonc;
 mod kilo;
 mod opencode;
 mod turn;
@@ -50,5 +52,6 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             Some("turn") => turn::main(goose::drive::Turns, std::env::args().skip(2)).await,
             _ => steery_sdk::serve(|_notifier| goose::Driver::default()).await,
         },
+        Harness::Gemini => steery_sdk::serve(|_notifier| gemini::Driver::default()).await,
     }
 }

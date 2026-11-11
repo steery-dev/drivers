@@ -55,59 +55,6 @@ pub(crate) fn files(place: &Place, cwd: Option<&Path>) -> Vec<PathBuf> {
     found
 }
 
-/// A JSONC text as JSON: its comments and trailing commas dropped.
-pub(crate) fn parse(text: &str) -> Result<Value, serde_json::Error> {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    let mut string = false;
-    while let Some(c) = chars.next() {
-        if string {
-            out.push(c);
-            match c {
-                '\\' => out.extend(chars.next()),
-                '"' => string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match (c, chars.peek()) {
-            ('"', _) => {
-                string = true;
-                out.push(c);
-            }
-            ('/', Some('/')) => {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            ('/', Some('*')) => {
-                chars.next();
-                let mut last = ' ';
-                for c in chars.by_ref() {
-                    if last == '*' && c == '/' {
-                        break;
-                    }
-                    last = c;
-                }
-                out.push(' ');
-            }
-            ('}' | ']', _) => {
-                // A comma right before a closer is a trailing one; comments already left.
-                let kept = out.trim_end_matches(char::is_whitespace).len();
-                if out[..kept].ends_with(',') {
-                    out.truncate(kept - 1);
-                }
-                out.push(c);
-            }
-            _ => out.push(c),
-        }
-    }
-    serde_json::from_str(&out)
-}
-
 /// The servers of one file's `mcp`, as OpenCode 2 normalizes it: each key of `mcp` with a
 /// `type` is a server of OpenCode 1's shape; `mcp.servers` holds OpenCode 2's, which win.
 /// An entry with only `enabled` is one OpenCode 2 drops.
@@ -150,7 +97,7 @@ pub(crate) fn mcp(place: &Place, asked: McpList) -> McpServers {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
-        let Ok(document) = parse(&text) else {
+        let Ok(document) = crate::jsonc::parse(&text) else {
             complete = false;
             continue;
         };

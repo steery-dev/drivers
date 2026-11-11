@@ -1,0 +1,7 @@
+{"sessionId":"189ebb11-09e9-4122-9b95-5cee71520158","projectHash":"a6fa6f079ab3d5a54e1872d2f632156cf415d0560c02cc280826c7e62c8a12d6","startTime":"2026-11-10T11:44:52.309Z","lastUpdated":"2026-11-10T11:44:52.309Z","kind":"main"}
+{"id":"d04923d38bb0f6017037e74183378ef4","timestamp":"2026-11-10T11:44:52.309Z","type":"user","content":[{"text":"<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\nToday's date is Tuesday, November 10, 2026 (formatted according to the user's locale).\nMy operating system is: darwin\nThe project's temporary directory is: /tmp/gem/corpus/ratelimit/home/.gemini/tmp/work\n- **Workspace Directories:**\n  - /private/tmp/gem/corpus/ratelimit/work\n- **Directory Structure:**\n\nShowing up to 200 items (files + folders).\n\n/private/tmp/gem/corpus/ratelimit/work/\n└───hello.txt\n\n\n</session_context>"}]}
+{"$set":{"lastUpdated":"2026-11-10T11:44:52.310Z"}}
+{"id":"cbee065c-c3e0-4b82-a149-93141d1b1a97","timestamp":"2026-11-10T11:46:05.376Z","type":"user","content":[{"text":"list files"}]}
+{"$set":{"lastUpdated":"2026-11-10T11:46:05.376Z"}}
+{"$rewindTo":"cbee065c-c3e0-4b82-a149-93141d1b1a97"}
+{"$set":{"lastUpdated":"2026-11-10T11:50:02.888Z"}}

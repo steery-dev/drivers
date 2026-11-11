@@ -1,0 +1,23 @@
+[
+  {
+    "sessionId": "b02d7ce8-e463-40aa-b7f6-33498bbdcb74",
+    "messageId": 0,
+    "type": "user",
+    "message": "please create a file",
+    "timestamp": "2026-11-10T11:40:52.750Z"
+  },
+  {
+    "sessionId": "b02d7ce8-e463-40aa-b7f6-33498bbdcb74",
+    "messageId": 1,
+    "type": "user",
+    "message": "list files",
+    "timestamp": "2026-11-10T11:41:16.178Z"
+  },
+  {
+    "sessionId": "b02d7ce8-e463-40aa-b7f6-33498bbdcb74",
+    "messageId": 2,
+    "type": "user",
+    "message": "/quit",
+    "timestamp": "2026-11-10T11:41:26.368Z"
+  }
+]

@@ -42,7 +42,10 @@ pub fn files(global: &Path, cwd: Option<&Path>) -> Vec<PathBuf> {
 /// where a tool's name ends its server.
 pub fn servers(global: &Path, cwd: Option<&Path>) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for config in files(global, cwd).iter().filter_map(|file| jsonc(file)) {
+    for config in files(global, cwd)
+        .iter()
+        .filter_map(|file| crate::jsonc::jsonc(file))
+    {
         for name in config
             .get("mcp")
             .and_then(Value::as_object)
@@ -136,71 +139,4 @@ pub async fn list(
         complete: false,
         watch: files(global, asked.cwd.as_deref()),
     })
-}
-
-/// A JSON-with-comments file, as Kilo reads it: `//` and `/* */` comments and trailing
-/// commas allowed. None where it is missing or no such JSON.
-pub fn jsonc(path: &Path) -> Option<Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&plain(text.strip_prefix('\u{feff}').unwrap_or(&text))).ok()
-}
-
-/// JSON with comments as plain JSON: each comment and each comma before a closing bracket
-/// dropped, strings kept whole.
-fn plain(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    // Where the last comma stands in `out`, until a token other than white space follows.
-    let mut comma: Option<usize> = None;
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => {
-                comma = None;
-                out.push(c);
-                while let Some(c) = chars.next() {
-                    out.push(c);
-                    match c {
-                        '\\' => out.extend(chars.next()),
-                        '"' => break,
-                        _ => {}
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut last = '\0';
-                for c in chars.by_ref() {
-                    if last == '*' && c == '/' {
-                        break;
-                    }
-                    last = c;
-                }
-                out.push(' ');
-            }
-            ',' => {
-                comma = Some(out.len());
-                out.push(c);
-            }
-            '}' | ']' => {
-                if let Some(at) = comma.take() {
-                    out.replace_range(at..=at, " ");
-                }
-                out.push(c);
-            }
-            c if c.is_whitespace() => out.push(c),
-            c => {
-                comma = None;
-                out.push(c);
-            }
-        }
-    }
-    out
 }
