@@ -1,7 +1,8 @@
-//! `setup/plan`: Steery's skill, as a whole file in Hermes's skills folder, and Steery's MCP
+//! `setup/plan`: Steery's skill, as a whole file in Hermes's skills folder, Steery's MCP
 //! server under `mcp_servers.steery` in `<root>/config.yaml`, the only place Hermes reads MCP
-//! servers from. A `yaml` entry needs protocol 14; under an older one the plan says the
-//! command that adds the server instead.
+//! servers from, and Steery's hook command line, which a turn runs at a permission Hermes
+//! asks for. A `yaml` entry needs protocol 14; under an older one the plan says the command
+//! that adds the server instead.
 
 use std::path::{Path, PathBuf};
 
@@ -17,8 +18,18 @@ fn installed() -> Option<PathBuf> {
     executable(home.join(".local/bin/hermes"))
 }
 
+/// The `hermes` that runs here: the one on `PATH`, else the installer's.
+pub fn binary() -> Option<PathBuf> {
+    on_path("hermes").or_else(installed)
+}
+
+/// Steery's hook command line. Hermes reads nothing under its home's `steery`.
+pub fn hook_file(root: &Path) -> PathBuf {
+    root.join("steery/hook")
+}
+
 pub async fn plan(root: &Path, setup: Setup, protocol: u32) -> Planned {
-    let Some(binary) = on_path("hermes").or_else(installed) else {
+    let Some(binary) = binary() else {
         let (install, refused) = match lacks(&["bash", "curl", "git"]) {
             None => (
                 Some(Install {
@@ -86,6 +97,13 @@ pub async fn plan(root: &Path, setup: Setup, protocol: u32) -> Planned {
             setup.mcp_url
         ));
     }
+    entries.push(Entry {
+        path: hook_file(root),
+        format: Format::Text,
+        at: None,
+        value: json!(setup.hook),
+        carries: vec![Part::Hooks],
+    });
     notes.push(
         "It gets the skill. Hermes itself decides when to ask and when to ask for the next \
          instruction. Nothing that Steery writes overrides that decision."
