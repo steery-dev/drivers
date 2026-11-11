@@ -61,17 +61,23 @@ impl crate::turn::Host for Turns {
         self.db.as_deref().is_some_and(|db| {
             Store::new(db)
                 .standing(session)
-                .is_ok_and(|standing| standing.claimed.is_some() || standing.queued)
+                .is_ok_and(|standing| {
+                    standing.is_some_and(|standing| standing.claimed.is_some() || standing.queued)
+                })
         })
     }
 }
 
-/// `held`: with no claim on the conversation, nobody runs a turn of it. A claim is OpenCode
-/// running one, in its background service (which serves every conversation, so the runtime
-/// must not signal it) or in a process of its own, or a claim that a dead process left: the
-/// runtime looks for who holds the database.
+/// `held`: with no claim on the conversation, or no such conversation, nobody runs a turn of
+/// it. A claim is OpenCode running one, in its background service (which serves every
+/// conversation, so the runtime must not signal it) or in a process of its own, or a claim
+/// that a dead process left: the runtime looks for who holds the database.
 pub fn held(place: &Place, held: &Held) -> Result<HeldBy, Error> {
-    let standing = Store::new(&place.db).standing(&held.external_id)?;
+    let Some(standing) = Store::new(&place.db).standing(&held.external_id)? else {
+        return Ok(HeldBy::Holder(Holder::Nobody {
+            proof: "OpenCode 2 has no such conversation".into(),
+        }));
+    };
     if standing.claimed.is_none() {
         return Ok(HeldBy::Holder(Holder::Nobody {
             proof: "OpenCode's claim to run a turn of it (session_v2.time_suspended) is clear"
@@ -97,6 +103,7 @@ pub fn idle(place: &Place, held: &Held) -> Sampled {
         sample: Store::new(&place.db)
             .standing(&held.external_id)
             .ok()
+            .flatten()
             .and_then(|standing| sample(&standing, now())),
     }
 }
