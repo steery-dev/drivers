@@ -1,8 +1,10 @@
-//! Steery's driver for Cursor's agent CLI (`cursor-agent`) at observe: it reads Cursor's
-//! chats from their SQLite stores, plans the entries that set Cursor up for Steery, reads
-//! its hooks' moments, and lists the MCP servers that Cursor loads.
+//! Steery's driver for Cursor's agent CLI (`cursor-agent`) at observe and drive: it reads
+//! Cursor's chats from their SQLite stores, plans the entries that set Cursor up for Steery,
+//! reads its hooks' moments, lists the MCP servers that Cursor loads, and starts, follows
+//! and stops Cursor's turns ([`drive`]).
 
 mod calls;
+mod drive;
 mod hooks;
 mod sessions;
 mod store;
@@ -46,6 +48,7 @@ chat's turns.";
 pub struct Driver {
     place: OnceLock<Place>,
     changes: listing::Changes,
+    turns: drive::Turns,
 }
 
 struct Place {
@@ -56,7 +59,7 @@ struct Place {
 impl Driver {
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: "2026.7.1".into(),
                 update: Some(format!("{EXECUTABLE} update")),
@@ -82,14 +85,16 @@ impl Driver {
                 by_file: false,
                 resumes_in_place: true,
                 forks_beside: false,
+                // A continue runs on the model in `cli-config.json`, the last that Cursor
+                // used anywhere: `--model` writes it there.
                 keeps: wire::Keeps {
-                    model: false,
+                    model: true,
                     thinking: false,
                 },
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![harness::Act::Continue, harness::Act::New],
                 touches: false,
             },
             hooks: hooks::table(),
@@ -147,6 +152,24 @@ impl Program for Driver {
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(self.store()?.read(steery_sdk::params(params)?)?),
             method::MCP_LIST => result(mcp_list(&self.place()?.home, steery_sdk::params(params)?)),
+            method::MODELS => {
+                let home = &self.place()?.home;
+                result(drive::models(binary(home), home, self.store()?.root()).await?)
+            }
+            method::START => result(drive::start(
+                binary(&self.place()?.home),
+                self.store()?,
+                steery_sdk::params(params)?,
+            )?),
+            method::TURN_READ => result(self.turns.read(steery_sdk::params(params)?)),
+            method::HELD => result(drive::held(self.store()?, steery_sdk::params(params)?)?),
+            method::IDLE => result(drive::idle(self.store()?, steery_sdk::params(params)?)?),
+            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => result(drive::mark(self.store()?, steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(self.store()?, steery_sdk::params(params)?)?),
+            method::TERMINAL => {
+                result(drive::terminal(self.store()?, steery_sdk::params(params)?)?)
+            }
             _ => Err(Error::Unknown),
         }
     }

@@ -22,11 +22,15 @@ const SHM_DMS: libc::off_t = 128;
 /// Another process has the store at `path` open: it holds SQLite's lock on the WAL index.
 /// A lock of this process's own is never reported, so the driver's reads do not count.
 pub fn held(path: &Path) -> bool {
+    holder(path).is_some()
+}
+
+/// The process that holds SQLite's lock on the WAL index of the store at `path`, as the
+/// kernel names it.
+pub fn holder(path: &Path) -> Option<u32> {
     let mut shm = path.as_os_str().to_owned();
     shm.push("-shm");
-    let Ok(file) = std::fs::File::open(shm) else {
-        return false;
-    };
+    let file = std::fs::File::open(shm).ok()?;
     // SAFETY: an all-zero `flock` is a valid value of the C struct.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = libc::F_WRLCK as _;
@@ -35,7 +39,8 @@ pub fn held(path: &Path) -> bool {
     lock.l_len = 1;
     // SAFETY: the descriptor is open for the call, and `lock` outlives it.
     let asked = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) };
-    asked == 0 && i32::from(lock.l_type) != i32::from(libc::F_UNLCK)
+    let held = asked == 0 && i32::from(lock.l_type) != i32::from(libc::F_UNLCK);
+    held.then(|| u32::try_from(lock.l_pid).ok()).flatten()
 }
 
 /// An open chat.
