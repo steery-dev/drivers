@@ -164,7 +164,7 @@ impl Fold<'_> {
             .unwrap_or_default();
         let mut called = false;
         for entry in &tool_calls {
-            if let Some(call) = calls::call(entry, &row.uid, self.servers) {
+            if let Some(call) = calls::call(entry, Some(&row.uid), self.servers) {
                 called = true;
                 self.events.push(Event::CallBegan { at: row.at, call });
             }

@@ -281,6 +281,7 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                 opened
                     .get("sessionId")
                     .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
                     .map(str::to_owned)
                     .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?
             }

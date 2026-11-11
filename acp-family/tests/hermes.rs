@@ -1,8 +1,9 @@
 //! The Hermes driver, run as the runtime runs it, over standard input and output, against a
 //! Hermes home of its own: a `state.db` holding a conversation compacted in place and then
-//! rotated into a continuation, a sub-agent it delegated to and a run with no person; and a
-//! `config.yaml` whose MCP servers carry secrets spelled `SECRET`; and, where Hermes's
-//! installer puts it, a `hermes` that answers `--version`.
+//! rotated into a continuation, a sub-agent it delegated to and a run with no person, with
+//! Hermes's marks of the turns its gateway runs; and a `config.yaml` whose MCP servers carry
+//! secrets spelled `SECRET`; and, where Hermes's installer puts it, a `hermes` that answers
+//! `--version`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -30,6 +31,12 @@ CREATE TABLE messages (
     _compressed_summary INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
     compacted INTEGER NOT NULL DEFAULT 0, display_kind TEXT, display_metadata TEXT,
     api_content TEXT, message_uid TEXT);
+CREATE TABLE session_turn_leases (
+    conversation_id TEXT PRIMARY KEY, holder TEXT NOT NULL, acquired_at REAL NOT NULL,
+    expires_at REAL NOT NULL);
+CREATE TABLE session_admissions (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT, target_session_id TEXT NOT NULL,
+    status TEXT NOT NULL);
 ";
 
 struct Message<'a> {
@@ -486,6 +493,96 @@ async fn hermes_reads_its_conversations_from_state_db() {
     );
     assert!(!mcp.to_string().contains("SECRET"));
 
+    // Drive. With no lease and no admission, nobody holds the conversation, and its last turn
+    // stands as it ended.
+    let call = |method: &'static str, params: Value| {
+        let driver = &driver;
+        async move { driver.call(method, params, WAIT).await }
+    };
+    let held = call(method::HELD, json!({"external_id": "conv"}))
+        .await
+        .unwrap();
+    assert!(held["nobody"].is_object(), "{held}");
+    let idle = call(method::IDLE, json!({"external_id": "conv"}))
+        .await
+        .unwrap();
+    assert_eq!(idle["sample"]["if_unheld"], true, "{idle}");
+    assert_ne!(idle["sample"]["state"], "running", "{idle}");
+
+    // The gateway's live lease on the continuation: a turn of the ACP client, beyond Steery.
+    let db = Connection::open(root.join("state.db")).unwrap();
+    db.execute(
+        "INSERT INTO session_turn_leases VALUES ('conv-2', ?1, 0, 9e12)",
+        params![format!("pid={}:turn=t1:platform=acp", std::process::id())],
+    )
+    .unwrap();
+    let held = call(method::HELD, json!({"external_id": "conv"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        held["person"]["stop"]["beyond"], "Hermes's gateway runs a turn of it for its acp client",
+        "{held}"
+    );
+    let idle = call(method::IDLE, json!({"external_id": "conv"}))
+        .await
+        .unwrap();
+    assert_eq!(idle["sample"]["state"], "running", "{idle}");
+    // A dead holder's lease holds nothing; words admitted and not run still do.
+    db.execute(
+        "UPDATE session_turn_leases SET holder = 'pid=999999999:turn=t1:platform=acp'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO session_admissions (target_session_id, status) VALUES ('conv-2', 'queued')",
+        [],
+    )
+    .unwrap();
+    let held = call(method::HELD, json!({"external_id": "conv"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        held["person"]["stop"]["beyond"], "Hermes's gateway holds words for it that it has not run",
+        "{held}"
+    );
+    db.execute("UPDATE session_admissions SET status = 'terminal'", [])
+        .unwrap();
+
+    // A continue goes on in the chain's newest session, as Hermes resumes the very id it is
+    // given; an id Hermes does not have is refused, not started anew.
+    let asked = |act: &str, id: &str| {
+        json!({"act": act, "external_id": id, "cwd": "/elsewhere", "folder": root.join("turn"),
+               "worktree": false})
+    };
+    let launch = call(method::START, asked("continue", "conv"))
+        .await
+        .unwrap();
+    let argv: Vec<&str> = launch["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap())
+        .collect();
+    assert!(
+        argv.windows(2).any(|pair| pair == ["continue", "conv-2"]),
+        "{launch}"
+    );
+    assert_eq!(launch["cwd"], "/elsewhere", "{launch}");
+    let unknown = call(method::START, asked("continue", "nope"))
+        .await
+        .unwrap_err();
+    assert!(unknown.to_string().contains("not-found"), "{unknown}");
+    let terminal = call(
+        method::TERMINAL,
+        json!({"external_id": "conv", "cwd": "/elsewhere"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        terminal["command"],
+        "cd '/work' && hermes --resume 'conv-2'"
+    );
+
     // Picked 14: Steery's server is a `yaml` entry under `mcp_servers.steery`, beside the skill.
     let asked = json!({
         "mcp_url": "http://127.0.0.1:7/mcp",
@@ -520,6 +617,12 @@ async fn hermes_reads_its_conversations_from_state_db() {
                 },
                 "carries": ["mcp"],
             },
+            {
+                "path": root.join("steery/hook"),
+                "format": "text",
+                "value": "steery hook hermes",
+                "carries": ["hooks"],
+            },
         ])
     );
     driver.shutdown().await.unwrap();
@@ -533,7 +636,7 @@ async fn hermes_reads_its_conversations_from_state_db() {
         .iter()
         .map(|entry| entry["format"].clone())
         .collect();
-    assert_eq!(formats, [json!("text")]);
+    assert_eq!(formats, [json!("text"), json!("text")]);
     assert!(
         planned["notes"]
             .to_string()

@@ -41,6 +41,10 @@ path = "src/bin/goose.rs"
 name = "steery-driver-gemini"
 path = "src/bin/gemini.rs"
 
+[[bin]]
+name = "steery-driver-antigravity"
+path = "src/bin/antigravity.rs"
+
 [dependencies]
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
 steery-driver-common = { path = "../common" }

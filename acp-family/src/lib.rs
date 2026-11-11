@@ -4,6 +4,7 @@
 //! lives in its own module and answers the program protocol for it alone. What two of them
 //! share, such as reading ACP's `session/update` records, is a module of its own.
 
+mod antigravity;
 mod cline;
 mod copilot;
 mod cursor;
@@ -38,7 +39,10 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             }
             _ => steery_sdk::serve(|_notifier| opencode::Driver::default()).await,
         },
-        Harness::Hermes => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
+        Harness::Hermes => match std::env::args().nth(1).as_deref() {
+            Some("turn") => turn::main(hermes::drive::Turns::new(), std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(hermes::Driver::new).await,
+        },
         Harness::Kilo => match std::env::args().nth(1).as_deref() {
             Some("turn") => turn::main(kilo::drive::Turns::new(), std::env::args().skip(2)).await,
             _ => steery_sdk::serve(|_notifier| kilo::Driver::default()).await,
@@ -56,5 +60,6 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             Some("turn") => turn::main(gemini::drive::Turns::new(), std::env::args().skip(2)).await,
             _ => steery_sdk::serve(|_notifier| gemini::Driver::default()).await,
         },
+        Harness::Antigravity => steery_sdk::serve(|_notifier| antigravity::Driver::default()).await,
     }
 }

@@ -21,6 +21,8 @@ pub enum Harness {
     Goose,
     /// Google's Gemini CLI, whose executable is `gemini`.
     Gemini,
+    /// Google's Antigravity CLI, whose executable is `agy`.
+    Antigravity,
 }
 
 impl Harness {
@@ -36,6 +38,7 @@ impl Harness {
             Self::Cline => "cline",
             Self::Goose => "goose",
             Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
         }
     }
 
@@ -51,6 +54,7 @@ impl Harness {
             Self::Cline => "Cline",
             Self::Goose => "Goose",
             Self::Gemini => "Gemini CLI",
+            Self::Antigravity => "Antigravity",
         }
     }
 
@@ -66,6 +70,7 @@ impl Harness {
             Self::Cline => "Cl",
             Self::Goose => "Go",
             Self::Gemini => "Gm",
+            Self::Antigravity => "Ag",
         }
     }
 
@@ -81,6 +86,7 @@ impl Harness {
             Self::Cline => "#1c1c24",
             Self::Goose => "#101010",
             Self::Gemini => "#4285f4",
+            Self::Antigravity => "#b1502f",
         }
     }
 
