@@ -83,14 +83,6 @@ pub async fn find(lock: &Path) -> Result<Window, String> {
     ))
 }
 
-/// A fresh token for a window's server: 128 random bits in hex.
-pub fn token() -> std::io::Result<String> {
-    use std::io::Read as _;
-    let mut bytes = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
 impl Window {
     /// One unary call: its answer, or what went wrong.
     pub async fn call(&self, method: &str, body: &Value) -> Result<Value, String> {

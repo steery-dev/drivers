@@ -1002,8 +1002,9 @@ turns through its own ACP server (`agy acp`).
   window read from `ANTIGRAVITY_SERVER_CSRF_TOKEN` as it started. Without that variable the
   token is random and never leaves the window.
   - A window that started without the variable has no door: `say` is refused `no-door`.
-    `setup/plan` notes this. `terminal` gives a fresh token in the command, so the window it
-    opens has a door. The driver reads the token from the window process's environment.
+    `setup/plan` notes this. In `terminal` the shell makes a fresh token as the command runs,
+    so the window it opens has a door and no history keeps the token. The driver reads the
+    token from the window process's environment.
   - `held`: the process that holds the conversation's presence lock, where a port of it
     answers `Heartbeat` with that token. Its stop is `owner`, with a token of the window and
     the turn's start. Else Drive's `held`.

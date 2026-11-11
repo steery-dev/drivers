@@ -243,21 +243,19 @@ pub fn find(place: &Place, find: &ReceiptFind) -> Result<Receipt, Error> {
     shared::find(said.get(mark..).unwrap_or_default(), &find.delivery)
 }
 
-/// `terminal`: Antigravity's own terminal on the conversation, in the folder it ran in. It
-/// gives the window its server's token, so the window has a door (`super::door`).
+/// `terminal`: Antigravity's own terminal on the conversation, in the folder it ran in. The
+/// shell gives the window a fresh token for its server as the command runs, so the window has
+/// a door (`super::door`) and no shell history keeps the token.
 pub fn terminal(place: &Place, terminal: &Terminal) -> Result<TerminalCommand, Error> {
     let cwd = place
         .store
         .folder(&terminal.external_id)?
         .unwrap_or_else(|| terminal.cwd.clone());
-    // Without a token the window still opens, only without a door.
-    let token = door::token()
-        .map(|token| format!("{}={token} ", door::TOKEN))
-        .unwrap_or_default();
     Ok(TerminalCommand {
         command: format!(
-            "cd {} && {token}agy --conversation {}",
+            "cd {} && {}=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n') agy --conversation {}",
             quoted(&cwd.to_string_lossy()),
+            door::TOKEN,
             quoted(&terminal.external_id)
         ),
         app: None,
