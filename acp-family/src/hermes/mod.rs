@@ -1,19 +1,21 @@
-//! Steery's driver for Hermes Agent at drive: it reads Hermes's conversations from the
+//! Steery's driver for Hermes Agent at live: it reads Hermes's conversations from the
 //! SQLite store `state.db` in its home and in each profile's, plans the skill, the MCP
 //! server and the hook that set Hermes up for Steery, lists the MCP servers of its
-//! `config.yaml`, and starts Hermes's turns through `hermes acp`.
+//! `config.yaml`, starts Hermes's turns through `hermes acp`, and steers a conversation that
+//! a person's window runs on Hermes's gateway owner ([`live`]).
 
 mod calls;
 pub mod drive;
 mod events;
 mod hooks;
+mod live;
 mod mcp;
 mod setup;
 mod store;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -22,13 +24,13 @@ use steery_sdk::{Error, Program, method, refusal, result};
 use crate::Harness;
 
 /// The driver: the protocol it picked and Hermes's home, both from `initialize`, Hermes's
-/// models as `models` last listed them, which `start` checks a pick against, and whether
-/// that listing found Hermes signed out.
-#[derive(Default)]
+/// models as `models` last listed them, which `start` and `pick` check a pick against,
+/// whether that listing found Hermes signed out, and the door of Hermes's gateway owner.
 pub struct Driver {
     place: OnceLock<Place>,
     listed: Mutex<Vec<harness::Model>>,
     signed_out: AtomicBool,
+    live: Arc<live::Live>,
 }
 
 struct Place {
@@ -38,9 +40,27 @@ struct Place {
 }
 
 impl Driver {
+    pub fn new(notifier: steery_sdk::Notifier) -> Self {
+        Self {
+            place: OnceLock::new(),
+            listed: Mutex::default(),
+            signed_out: AtomicBool::new(false),
+            live: Arc::new(live::Live::new(notifier)),
+        }
+    }
+
+    fn listed(&self) -> Vec<harness::Model> {
+        self.listed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+}
+
+impl Driver {
     fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe, wire::Level::Drive],
+            levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
             minimum: Some(wire::Minimum {
                 release: "0.23.1".into(),
                 update: Some("hermes update".into()),
@@ -76,7 +96,9 @@ impl Driver {
                     model: true,
                     thinking: false,
                 },
-                door: None,
+                // A window on Hermes's gateway owner takes words, a model and a stop through
+                // the owner.
+                door: Some(harness::LiveDoor::Picks),
                 checks_idle: false,
                 worktrees: false,
                 acts: vec![
@@ -142,7 +164,19 @@ impl Program for Driver {
                 "Hermes",
                 steery_sdk::params(params)?,
             )?),
-            method::HELD => result(drive::held(root, &steery_sdk::params(params)?)?),
+            method::HELD => {
+                let held: harness::Held = steery_sdk::params(params)?;
+                match self.live.held(root, &held.external_id).await {
+                    Some(holder) => result(harness::HeldBy::Holder(holder)),
+                    None => result(drive::held(root, &held)?),
+                }
+            }
+            method::SAY => result(self.live.say(root, steery_sdk::params(params)?).await?),
+            method::PICK => result(
+                self.live
+                    .pick(root, &self.listed(), steery_sdk::params(params)?)
+                    .await?,
+            ),
             method::IDLE => result(drive::idle(root, &steery_sdk::params(params)?)),
             method::MODELS => {
                 let models = drive::models(root).await?;
@@ -151,27 +185,26 @@ impl Program for Driver {
                     .store(models.signed_in == Some(false), Ordering::Relaxed);
                 result(models)
             }
-            method::START => {
-                let listed = self
-                    .listed
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                result(drive::start(
-                    root,
-                    &listed,
-                    self.signed_out.load(Ordering::Relaxed),
-                    steery_sdk::params(params)?,
-                )?)
-            }
+            method::START => result(drive::start(
+                root,
+                &self.listed(),
+                self.signed_out.load(Ordering::Relaxed),
+                steery_sdk::params(params)?,
+            )?),
             method::TURN_READ => result(crate::turn::drive::turn_line(
                 "Hermes",
                 steery_sdk::params(params)?,
             )),
-            method::STOP => result(crate::turn::drive::stop(
-                "Hermes",
-                &steery_sdk::params(params)?,
-            )?),
+            method::STOP => {
+                let stop: harness::Stop = steery_sdk::params(params)?;
+                match stop.holder {
+                    harness::Holder::Person {
+                        stop: harness::HolderStop::Owner(_),
+                        ..
+                    } => result(self.live.stop(root, &stop).await?),
+                    _ => result(crate::turn::drive::stop("Hermes", &stop)?),
+                }
+            }
             method::RECEIPT_MARK => result(drive::mark(root, &steery_sdk::params(params)?)?),
             method::RECEIPT_FIND => result(drive::find(root, &steery_sdk::params(params)?)?),
             method::TERMINAL => result(drive::terminal(root, &steery_sdk::params(params)?)?),

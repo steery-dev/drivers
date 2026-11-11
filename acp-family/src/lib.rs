@@ -40,7 +40,7 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
         },
         Harness::Hermes => match std::env::args().nth(1).as_deref() {
             Some("turn") => turn::main(hermes::drive::Turns::new(), std::env::args().skip(2)).await,
-            _ => steery_sdk::serve(|_notifier| hermes::Driver::default()).await,
+            _ => steery_sdk::serve(hermes::Driver::new).await,
         },
         Harness::Kilo => match std::env::args().nth(1).as_deref() {
             Some("turn") => turn::main(kilo::drive::Turns::new(), std::env::args().skip(2)).await,
