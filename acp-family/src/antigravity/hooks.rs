@@ -18,14 +18,14 @@ use std::fs::File;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 
+use super::store::{BRAIN, DEPTH, Store, TRANSCRIPT};
+use crate::turn::hooks as turn_hooks;
 use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
     Answer, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment, HookRead, Moment, Says,
     TurnState, Via,
 };
-
-use super::store::{BRAIN, DEPTH, TRANSCRIPT};
 
 /// How long Antigravity gives a hook that only says a moment happened: its own default.
 const SAYS_WAITS: u32 = 30;
@@ -308,6 +308,27 @@ fn text<'a>(document: &'a Value, field: &str) -> Option<&'a str> {
         .as_str()
         .map(str::trim)
         .filter(|text| !text.is_empty())
+}
+
+/// What an `allow_always` of Antigravity's keeps: its ACP server offers none.
+const ALWAYS: &str = "nothing: Antigravity offers no lasting allow to its ACP client";
+
+/// The moment of a hook in a turn this driver runs ([`crate::turn::hooks`]), or none where
+/// it is no moment Steery carries. Antigravity's request names its own tool (`name`) and
+/// its arguments; the ACP `kind` stands in where it names none.
+pub fn turn(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
+    let document = turn_hooks::parse(&read.document)?;
+    let Some(external_id) = turn_hooks::text(&document, "/sessionId") else {
+        return Ok(HookMoment { moment: None });
+    };
+    let cwd = store.folder(external_id).ok().flatten();
+    if read.event != turn_hooks::PERMISSION {
+        return Ok(turn_hooks::ended(&document, cwd));
+    }
+    let (id, kind, input) = turn_hooks::requested(&document);
+    let tool = turn_hooks::text(&document, "/toolCall/name").map_or(kind, str::to_owned);
+    let call = super::events::call(id, &tool, input);
+    Ok(turn_hooks::asked(external_id, cwd, call, &document, ALWAYS))
 }
 
 #[cfg(test)]

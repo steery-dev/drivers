@@ -3,7 +3,8 @@
 //! Steery's MCP server under `/mcpServers/steery` of `mcp_config.json`; Steery's hooks as
 //! one named group, `/steery` of `hooks.json`, one hook per event Steery reads
 //! ([`super::hooks::EVENTS`]); Steery's skill in `skills/steery/SKILL.md`. And the folders
-//! the runtime names, in `trustedWorkspaces` of `<root>/settings.json`.
+//! the runtime names, in `trustedWorkspaces` of `<root>/settings.json`, and Steery's hook
+//! command line in `<root>/steery/hook`, which a turn this driver runs asks at a permission.
 //!
 //! Antigravity runs the hooks and MCP servers of these files in any folder, trusted or not
 //! (seen in runs with `-p` in folders never trusted); its terminal asks once whether to
@@ -14,6 +15,13 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 use steery_driver_common::program::{lacks, release_within, version};
 use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Setup};
+
+/// Steery's hook command line, which a turn this driver runs ([`super::drive`]) gives the
+/// permissions Antigravity asks its ACP client for. Antigravity reads nothing under its
+/// root's `steery`.
+pub(crate) fn hook_file(root: &Path) -> PathBuf {
+    root.join("steery").join("hook")
+}
 
 /// The plan for this machine, with the person's home `home` and Antigravity's root `root`.
 /// Antigravity has no offline check of its sign-in, so the plan asks for none.
@@ -134,6 +142,13 @@ fn entries(config: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
         value: Value::Object(group),
         carries: vec![Part::Hooks],
     });
+    entries.push(Entry {
+        path: hook_file(root),
+        format: Format::Text,
+        at: None,
+        value: json!(setup.hook),
+        carries: vec![Part::Hooks],
+    });
     // Antigravity's terminal asks whether to trust a folder before it opens a conversation
     // there; on a host made for its conversations nobody answers, so the folders the runtime
     // names are trusted as their person would, by the real path it writes.
@@ -227,6 +242,11 @@ mod tests {
         assert_eq!(
             hooks.value.as_object().unwrap().len(),
             super::super::hooks::EVENTS.len()
+        );
+        let hook = entries.next().unwrap();
+        assert_eq!(
+            (hook.path, hook.value),
+            (root.join("steery/hook"), json!("/opt/steery/hook"))
         );
         let trust = entries.next().unwrap();
         assert_eq!(

@@ -121,7 +121,8 @@ pub trait Host {
         )
     }
 
-    /// The harness opened `session` for this turn, before any words go in.
+    /// The harness opened `session` for the turn, before any words go in: a harness whose
+    /// store does not tell a driven conversation from a headless one marks it here.
     fn opened(&self, _session: &str) -> std::io::Result<()> {
         Ok(())
     }
