@@ -425,10 +425,13 @@ impl<'a> Store<'a> {
     }
 
     /// Where a conversation stands for drive: OpenCode's execution claim on it, how its
-    /// last turn ended, its newest answer and the person's newest words.
-    pub fn standing(&self, id: &str) -> Result<Standing, Error> {
-        let db = self.open()?.ok_or_else(|| not_found(id))?;
-        let row = db
+    /// last turn ended, its newest answer and the person's newest words. `None` where
+    /// OpenCode has no such conversation.
+    pub fn standing(&self, id: &str) -> Result<Option<Standing>, Error> {
+        let Some(db) = self.open()? else {
+            return Ok(None);
+        };
+        db
             .query_row(
                 "select s.time_suspended, s.time_idle, s.idle_outcome,
                         (select count(*) from session_inbox i where i.session_id = s.id),
@@ -452,8 +455,7 @@ impl<'a> Store<'a> {
                 },
             )
             .optional()
-            .map_err(|e| self.unreadable(e))?;
-        row.ok_or_else(|| not_found(id))
+            .map_err(|e| self.unreadable(e))
     }
 
     /// The folder a conversation runs in.

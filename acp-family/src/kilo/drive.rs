@@ -61,6 +61,7 @@ impl crate::turn::Host for Turns {
         &self,
         acp: Option<u32>,
         session: &str,
+        _queued: &[String],
         unmarked: &mut Option<tokio::time::Instant>,
     ) -> bool {
         let Some(store) = &self.store else {

@@ -15,6 +15,8 @@ pub enum Harness {
     Kilo,
     /// Cursor's agent CLI, whose executable is `cursor-agent`.
     Cursor,
+    /// Cline's CLI, whose executable is `cline`.
+    Cline,
 }
 
 impl Harness {
@@ -27,6 +29,7 @@ impl Harness {
             Self::Hermes => "hermes",
             Self::Kilo => "kilo",
             Self::Cursor => "cursor",
+            Self::Cline => "cline",
         }
     }
 
@@ -39,6 +42,7 @@ impl Harness {
             Self::Hermes => "Hermes Agent",
             Self::Kilo => "Kilo",
             Self::Cursor => "Cursor",
+            Self::Cline => "Cline",
         }
     }
 
@@ -51,6 +55,7 @@ impl Harness {
             Self::Hermes => "He",
             Self::Kilo => "Kl",
             Self::Cursor => "Cu",
+            Self::Cline => "Cl",
         }
     }
 
@@ -63,6 +68,7 @@ impl Harness {
             Self::Hermes => "#4b2fd0",
             Self::Kilo => "#617a91",
             Self::Cursor => "#14120b",
+            Self::Cline => "#1c1c24",
         }
     }
 
