@@ -353,6 +353,42 @@ struct Cursor {
     gone: i64,
 }
 
+/// A conversation as Hermes's own marks of its turns say it stands. Hermes's gateway runs
+/// every turn, whichever client asked for it: it takes a lease of the conversation for the
+/// turn (`session_turn_leases`, `hermes_state_runtime.py`) and admits each prompt as a row
+/// of `session_admissions`, `queued` until it runs and `terminal` once it ended.
+pub struct Standing {
+    /// The conversation's first id.
+    pub external_id: String,
+    /// The chain's newest id: the session a turn goes on in, as Hermes restores the very
+    /// session it is given (`acp_adapter/session.py:462`), and a compaction starts a new one.
+    pub tip: String,
+    pub cwd: Option<PathBuf>,
+    /// The client a live lease's holder names (`platform=`, empty where it names none).
+    pub leased: Option<String>,
+    /// Whether Hermes admitted words that it has not run to their end.
+    pub pending: bool,
+}
+
+/// The client of a lease whose holder still lives: `pid=<pid>[:pidns=<ns>]:turn=…:platform=<client>`
+/// (`agent/turn_facade_lease.py:361`). A holder in another pid namespace lives until its
+/// lease expires.
+fn leased(holder: &str) -> Option<String> {
+    let mut parts = holder.split(':');
+    let pid = parts.next()?.strip_prefix("pid=")?.parse::<i32>().ok()?;
+    let foreign = holder.split(':').any(|part| part.starts_with("pidns="));
+    if !foreign && !steery_driver_common::kernel::exists(pid).unwrap_or(true) {
+        return None;
+    }
+    Some(
+        holder
+            .split(':')
+            .find_map(|part| part.strip_prefix("platform="))
+            .unwrap_or_default()
+            .to_owned(),
+    )
+}
+
 pub struct Home {
     root: PathBuf,
     stores: Vec<PathBuf>,
@@ -378,14 +414,107 @@ impl Home {
 
     /// The store whose chain holds `id`, and that chain's first id.
     fn find(&self, id: &str) -> Result<(Store, String), Error> {
+        self.found(id)?.ok_or_else(|| not_found(id))
+    }
+
+    fn found(&self, id: &str) -> Result<Option<(Store, String)>, Error> {
         for path in &self.stores {
             let store = Store::load(path).map_err(failed)?;
             if store.infos.contains_key(id) {
                 let first = first(&store.infos, id);
-                return Ok((store, first));
+                return Ok(Some((store, first)));
             }
         }
-        Err(not_found(id))
+        Ok(None)
+    }
+
+    /// The conversation `id` as Hermes's own marks of its turns say it stands; `None` where
+    /// Hermes has no such conversation.
+    pub fn standing(&self, id: &str) -> Result<Option<Standing>, Error> {
+        let Some((store, first)) = self.found(id)? else {
+            return Ok(None);
+        };
+        if store.subagent(&first) || store.headless(&first) {
+            return Ok(None);
+        }
+        let ids = store.ids(&first);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs_f64())
+            .unwrap_or_default();
+        let standing = || -> rusqlite::Result<Standing> {
+            let mut statement = store.connection.prepare(
+                "SELECT holder FROM session_turn_leases
+                 WHERE conversation_id IN (SELECT value FROM json_each(?1)) AND expires_at > ?2",
+            )?;
+            let holders: Vec<String> = statement
+                .query_map(params![ids, now], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let pending: i64 = store.connection.query_row(
+                "SELECT count(*) FROM session_admissions
+                 WHERE target_session_id IN (SELECT value FROM json_each(?1))
+                   AND status IN ('queued', 'started')",
+                params![ids],
+                |row| row.get(0),
+            )?;
+            Ok(Standing {
+                external_id: first.clone(),
+                tip: store.chains[&first]
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| first.clone()),
+                cwd: store.chains[&first]
+                    .iter()
+                    .rev()
+                    .find_map(|id| store.info(id).cwd.clone()),
+                leased: holders.iter().find_map(|holder| leased(holder)),
+                pending: pending > 0,
+            })
+        };
+        standing().map(Some).map_err(failed)
+    }
+
+    /// The conversation's whole fold, as `sessions/read` gives it from the start.
+    pub fn events(&self, id: &str) -> Result<Vec<Event>, Error> {
+        let (store, first) = self.find(id)?;
+        Ok(self
+            .events_of(&store, &first, None, None)
+            .map_err(failed)?
+            .events)
+    }
+
+    /// The newest row of the conversation: a point that every later row is after.
+    pub fn last(&self, id: &str) -> Result<i64, Error> {
+        let (store, first) = self.find(id)?;
+        store
+            .connection
+            .query_row(
+                "SELECT ifnull(max(id), 0) FROM messages
+                 WHERE session_id IN (SELECT value FROM json_each(?1))",
+                [store.ids(&first)],
+                |row| row.get(0),
+            )
+            .map_err(failed)
+    }
+
+    /// The words of each person's row after row `after`, in order.
+    pub fn said_after(&self, id: &str, after: i64) -> Result<Vec<String>, Error> {
+        let (store, first) = self.find(id)?;
+        let mut statement = store
+            .connection
+            .prepare(
+                "SELECT content FROM messages
+                 WHERE session_id IN (SELECT value FROM json_each(?1))
+                   AND role = 'user' AND id > ?2
+                 ORDER BY id",
+            )
+            .map_err(failed)?;
+        statement
+            .query_map(params![store.ids(&first), after], |row| {
+                Ok(row.get::<_, Option<String>>(0)?.unwrap_or_default())
+            })
+            .and_then(|rows| rows.collect())
+            .map_err(failed)
     }
 
     pub fn list(&self, list: List) -> Result<Listed, Error> {
@@ -461,11 +590,11 @@ impl Home {
             ),
             None => None,
         };
-        self.events(&store, &target, cursor, read.tail)
+        self.events_of(&store, &target, cursor, read.tail)
             .map_err(failed)
     }
 
-    fn events(
+    fn events_of(
         &self,
         store: &Store,
         first: &str,

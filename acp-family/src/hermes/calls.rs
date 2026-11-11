@@ -66,7 +66,7 @@ fn group(tool: &str) -> Group {
 
 /// One call of an assistant row's `tool_calls`: `{id, function: {name, arguments}}`, the
 /// arguments a JSON string.
-pub fn call(entry: &Value, response: &str, servers: &[String]) -> Option<Call> {
+pub fn call(entry: &Value, response: Option<&str>, servers: &[String]) -> Option<Call> {
     let id = entry.get("id").and_then(Value::as_str)?;
     let function = entry.get("function")?;
     let tool = function.get("name").and_then(Value::as_str)?;
@@ -107,7 +107,7 @@ pub fn call(entry: &Value, response: &str, servers: &[String]) -> Option<Call> {
         steery,
         asks,
         parent: None,
-        response: Some(response.to_owned()),
+        response: response.map(str::to_owned),
     })
 }
 
