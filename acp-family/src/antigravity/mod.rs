@@ -1,10 +1,13 @@
-//! Steery's driver for Google's Antigravity CLI at drive: it reads Antigravity's
+//! Steery's driver for Google's Antigravity CLI at live: it reads Antigravity's
 //! conversations from `<root>/brain/<id>/`, plans the entries that set Antigravity up for
 //! Steery, reads its hooks' moments, lists the MCP servers it loads and the models it
-//! offers, and starts Antigravity's turns through its own ACP server.
+//! offers, starts Antigravity's turns through its own ACP server, and reaches a conversation
+//! open in an Antigravity window through that window's own server.
+mod door;
 pub(crate) mod drive;
 mod events;
 mod hooks;
+mod live;
 mod mcp;
 mod models;
 mod setup;
@@ -12,7 +15,7 @@ mod store;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::Harness;
 use serde_json::Value;
@@ -27,14 +30,14 @@ pub(crate) const MINIMUM: &str = "1.5.5";
 pub(crate) const SESSION_VARIABLE: &str = "ANTIGRAVITY_CONVERSATION_ID";
 
 /// The driver: what `initialize` said, the listings it answered, Antigravity's models as
-/// `models` last listed them, which `start` checks a pick against, and whether that listing
-/// found Antigravity signed out.
-#[derive(Default)]
+/// `models` last listed them, which `start` checks a pick against, whether that listing
+/// found Antigravity signed out, and the Antigravity windows whose own door it follows.
 pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
     listed: Mutex<Vec<harness::Model>>,
     signed_out: AtomicBool,
+    live: Arc<live::Live>,
 }
 
 /// The person's home, Antigravity's root, and what was read of its conversations.
@@ -63,6 +66,16 @@ pub(crate) fn binary(home: &Path) -> Option<PathBuf> {
 }
 
 impl Driver {
+    pub fn new(notifier: steery_sdk::Notifier) -> Self {
+        Self {
+            place: OnceLock::new(),
+            changes: steery_sdk::listing::Changes::default(),
+            listed: Mutex::default(),
+            signed_out: AtomicBool::new(false),
+            live: Arc::new(live::Live::new(notifier)),
+        }
+    }
+
     fn place(&self) -> Result<&Place, Error> {
         self.place
             .get()
@@ -75,7 +88,7 @@ impl Driver {
 
     fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe, wire::Level::Drive],
+            levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
             minimum: Some(wire::Minimum {
                 release: MINIMUM.into(),
                 update: Some("agy update".into()),
@@ -118,7 +131,7 @@ impl Driver {
                     model: false,
                     thinking: false,
                 },
-                door: None,
+                door: Some(harness::LiveDoor::Keeps),
                 checks_idle: false,
                 worktrees: false,
                 acts: vec![harness::Act::Continue, harness::Act::New],
@@ -206,7 +219,26 @@ impl Program for Driver {
                     .store(models.signed_in == Some(false), Ordering::Relaxed);
                 result(models)
             }
-            method::HELD => result(drive::held(self.place()?, &steery_sdk::params(params)?)?),
+            method::HELD => {
+                let held: harness::Held = steery_sdk::params(params)?;
+                match self.live.held(self.store()?, &held.external_id).await {
+                    Some(holder) => result(harness::HeldBy::Holder(holder)),
+                    None => result(drive::held(self.place()?, &held)?),
+                }
+            }
+            method::SAY => result(
+                self.live
+                    .say(self.store()?, steery_sdk::params(params)?)
+                    .await?,
+            ),
+            method::PICK => {
+                let _: harness::Pick = steery_sdk::params(params)?;
+                Err(Error::refused(
+                    refusal::SELECTION_UNSUPPORTED,
+                    "an Antigravity window runs the model its person picked in it; its server \
+                     takes a model only together with words",
+                ))
+            }
             method::IDLE => result(drive::idle(self.place()?, &steery_sdk::params(params)?)),
             method::START => {
                 let listed = self
@@ -225,10 +257,16 @@ impl Program for Driver {
                 drive::LABEL,
                 steery_sdk::params(params)?,
             )),
-            method::STOP => result(crate::turn::drive::stop(
-                drive::LABEL,
-                &steery_sdk::params(params)?,
-            )?),
+            method::STOP => {
+                let stop: harness::Stop = steery_sdk::params(params)?;
+                match stop.holder {
+                    harness::Holder::Person {
+                        stop: harness::HolderStop::Owner(_),
+                        ..
+                    } => result(self.live.stop(self.store()?, &stop).await?),
+                    _ => result(crate::turn::drive::stop(drive::LABEL, &stop)?),
+                }
+            }
             method::RECEIPT_MARK => {
                 result(drive::mark(self.place()?, &steery_sdk::params(params)?)?)
             }

@@ -12,8 +12,8 @@ use steery_sdk::wire::harness::{
 };
 use steery_sdk::{Error, refusal};
 
-use super::Place;
 use super::store::{self, Store};
+use super::{Place, door};
 use crate::turn::drive::{self as shared, now};
 
 /// The harness, as drive's lines name it.
@@ -216,7 +216,7 @@ pub fn start(
 }
 
 /// The session's model and thinking level of a model id that `agy models` lists.
-fn picked(listed: &str) -> (String, Option<String>) {
+pub(super) fn picked(listed: &str) -> (String, Option<String>) {
     match listed.rsplit_once('-') {
         Some((model, level)) if LEVELS.contains(&level) => {
             (model.to_owned(), Some(level.to_owned()))
@@ -243,15 +243,20 @@ pub fn find(place: &Place, find: &ReceiptFind) -> Result<Receipt, Error> {
     shared::find(said.get(mark..).unwrap_or_default(), &find.delivery)
 }
 
-/// `terminal`: Antigravity's own terminal on the conversation, in the folder it ran in.
+/// `terminal`: Antigravity's own terminal on the conversation, in the folder it ran in. It
+/// gives the window its server's token, so the window has a door (`super::door`).
 pub fn terminal(place: &Place, terminal: &Terminal) -> Result<TerminalCommand, Error> {
     let cwd = place
         .store
         .folder(&terminal.external_id)?
         .unwrap_or_else(|| terminal.cwd.clone());
+    // Without a token the window still opens, only without a door.
+    let token = door::token()
+        .map(|token| format!("{}={token} ", door::TOKEN))
+        .unwrap_or_default();
     Ok(TerminalCommand {
         command: format!(
-            "cd {} && agy --conversation {}",
+            "cd {} && {token}agy --conversation {}",
             quoted(&cwd.to_string_lossy()),
             quoted(&terminal.external_id)
         ),

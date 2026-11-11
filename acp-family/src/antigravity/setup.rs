@@ -73,6 +73,12 @@ async fn found(binary: PathBuf, home: &Path, root: &Path, setup: Setup) -> Plann
             "Antigravity's app and IDE read the same MCP servers, hooks and skills as its CLI."
                 .into(),
         );
+        notes.push(
+            "Live reaches an Antigravity window only where it started with \
+             `ANTIGRAVITY_SERVER_CSRF_TOKEN`, as Steery's terminal command starts it. Any other \
+             window's server takes no request from outside it, so `say` is refused `no-door`."
+                .into(),
+        );
     }
     Planned {
         found: Some(Found {
