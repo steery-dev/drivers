@@ -16,11 +16,19 @@ mod turn;
 
 pub use harness::Harness;
 
-/// Serve the driver for `harness` on standard input and output.
+/// Serve the driver for `harness` on standard input and output. Copilot's binary is also
+/// the turn mode that its `start` plans: `<binary> turn ...`.
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
         Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
-        Harness::Copilot => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
+        Harness::Copilot => {
+            let mut args = std::env::args().skip(1);
+            match args.next() {
+                Some(mode) if mode == copilot::TURN_MODE => copilot::turn_main(args).await,
+                Some(mode) if mode == copilot::READER_MODE => copilot::reader_main(args).await,
+                _ => steery_sdk::serve(|_notifier| copilot::Driver::default()).await,
+            }
+        }
         Harness::OpenCode => match std::env::args().nth(1).as_deref() {
             Some("turn") => {
                 turn::main(opencode::drive::Turns::new(), std::env::args().skip(2)).await

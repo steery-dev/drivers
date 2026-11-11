@@ -92,8 +92,9 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         },
         // Steery's own file, whole: Copilot loads every file in its `hooks` folder beside the
         // others, so the person's hooks stay where they are. Copilot hands `bash` to a shell,
-        // and reads a non-zero exit at `preToolUse` as a denied call, so a hook whose command
-        // cannot run (a machine mid-upgrade, a filled disk) says nothing instead.
+        // and reads a non-zero exit at `preToolUse` as a denied call. A hook whose command
+        // cannot run (a machine mid-upgrade, a filled disk) says nothing, except at a gate in
+        // a turn Steery started, where the call is blocked.
         Entry {
             path: root.join("hooks").join(format!("{STEERY}.json")),
             format: Format::Json,
@@ -104,14 +105,19 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
     ]
 }
 
+/// In a turn Steery started, `STEERY_STARTED` names a turn and the pid it started: Copilot
+/// itself, as the turn mode execs it, which is the parent of the shell running the hook.
+const GUARD: &str = r#" || { s=$?; case "${STEERY_STARTED:-}" in "$PPID":turn*) echo "Steery's hook failed (exit $s) in a turn Steery started, so the call is blocked" >&2; exit 2;; esac; exit 0; }"#;
+
 /// One command hook per event, running `hook` with the event added.
 fn hooked(hook: &str) -> Value {
     let events: Map<String, Value> = hooks::EVENTS
         .iter()
         .map(|event| {
+            let fails = if event.gates() { GUARD } else { " || true" };
             let entry = json!([{
                 "type": "command",
-                "bash": format!("{hook} {} || true", event.name),
+                "bash": format!("{hook} {}{fails}", event.name),
                 "timeoutSec": event.waits,
             }]);
             (event.name.to_owned(), entry)

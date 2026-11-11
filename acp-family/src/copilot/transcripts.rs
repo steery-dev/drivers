@@ -147,8 +147,8 @@ impl Store {
         ))
     }
 
-    /// The transcript of the conversation `id`.
-    fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
+    /// The transcript of the conversation `id`, where Copilot keeps it here.
+    pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
         let plain = !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0']);
         let transcript = self.folder().join(id).join("events.jsonl");
         if plain && transcript.is_file() {
@@ -156,6 +156,13 @@ impl Store {
         } else {
             Err(not_found(id))
         }
+    }
+
+    /// The shells that calls left running in the conversation `id`, which a turn's output
+    /// and a read of its transcript both note.
+    pub fn starts(&self, id: &str) -> Starts {
+        let transcript = self.folder().join(id).join("events.jsonl");
+        lock(&self.starts).entry(transcript).or_default().clone()
     }
 
     /// The transcript's records, scanned on from where the last scan stopped, for what they
