@@ -39,7 +39,7 @@ short name, its tint and its mark.
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive, live |
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
-| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
+| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
 | `crush` | Crush | [`crush`](crush/) | observe, drive |
