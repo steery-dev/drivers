@@ -1,16 +1,18 @@
-//! Steery's `amp` driver, at observe. Amp keeps its threads on ampcode.com, not on this
-//! host: the driver lists and reads them through Amp's own CLI (`amp threads list`, `amp
-//! threads export`), plans the entries that set Amp up for Steery (its MCP entry, the
-//! skill), asks its person to sign Amp in where it is not, and lists the MCP servers Amp
-//! loads. It starts no turn and reaches no live thread.
+//! Steery's `amp` driver, at observe and drive. Amp keeps its threads on ampcode.com, not on
+//! this host: the driver lists and reads them through Amp's own CLI (`amp threads list`,
+//! `amp threads export`), plans the entries that set Amp up for Steery (its MCP entry, the
+//! skill), asks its person to sign Amp in where it is not, lists the MCP servers Amp loads,
+//! and plans the `amp -x` turns that the runtime runs ([`drive`]). It reaches no live thread.
 
 mod calls;
+mod drive;
 mod events;
 mod home;
 mod mcp;
 mod setup;
 mod sign_in;
 mod threads;
+mod turn;
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -123,8 +125,21 @@ impl Program for Amp {
             method::NEEDS_GIVE if self.needs() => {
                 result(self.sign_ins.give(steery_sdk::params(params)?).await?)
             }
-            // `hook/read` and `hook/answer` (no hook is declared), and every method of drive
-            // and live, which the levels rule out.
+            method::HELD => result(drive::held(steery_sdk::params(params)?)),
+            method::IDLE => result(drive::idle(steery_sdk::params(params)?).await),
+            method::MODELS => {
+                let _: wire::Empty = steery_sdk::params(params)?;
+                result(drive::models(self.home()?).await?)
+            }
+            method::START => result(drive::start(steery_sdk::params(params)?).await?),
+            method::TURN_READ => result(turn::read(steery_sdk::params(params)?)),
+            method::STOP => result(drive::stop(steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => result(drive::mark(steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
+            method::READER => result(drive::reader(steery_sdk::params(params)?)?),
+            method::TERMINAL => result(drive::terminal(steery_sdk::params(params)?).await?),
+            // `hook/read` and `hook/answer` (no hook is declared), `reader/read` (`reader`
+            // refuses), and every method of live, which the levels rule out.
             _ => Err(Error::Unknown),
         }
     }
@@ -133,7 +148,7 @@ impl Program for Amp {
 /// Amp as Steery reads it.
 fn info() -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe],
+        levels: vec![wire::Level::Observe, wire::Level::Drive],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some(UPDATE.into()),
@@ -156,20 +171,21 @@ fn info() -> wire::HarnessInfo {
             call_bound: None,
         },
         reader: None,
-        // Observe only: the driver continues, forks and starts nothing, and has no door.
+        // A continue runs in the same thread, in the mode it began in; Amp has no fork, no
+        // door, and no thinking pick.
         facts: wire::HarnessFacts {
             touches: false,
             by_file: false,
-            resumes_in_place: false,
+            resumes_in_place: true,
             forks_beside: false,
             keeps: wire::Keeps {
-                model: false,
+                model: true,
                 thinking: false,
             },
             door: None,
             checks_idle: false,
             worktrees: false,
-            acts: Vec::new(),
+            acts: vec![harness::Act::Continue, harness::Act::New],
         },
         hooks: Vec::new(),
     }
