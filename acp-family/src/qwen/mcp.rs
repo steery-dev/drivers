@@ -112,6 +112,36 @@ enum Scope {
     Extension,
 }
 
+/// The settings Qwen loads in `cwd`, in merge order: the system defaults, the person's,
+/// the project's, the system settings.
+pub(super) fn scopes(root: &Path, cwd: &Path) -> [Value; 4] {
+    loaded(root, Some(cwd), &Places::here(root))
+}
+
+/// The settings Qwen loads in `cwd` with its files at `places`. The project's
+/// `<cwd>/.qwen/settings.json` counts where folder trust is off or trusts the folder, and
+/// not in Qwen's home folder, where it is the person's own.
+fn loaded(root: &Path, cwd: Option<&Path>, places: &Places) -> [Value; 4] {
+    let user_path = root.join("settings.json");
+    let system = settings(&places.system);
+    let defaults = settings(&places.defaults);
+    let user = settings(&user_path);
+    let mut workspace = Value::Object(Map::new());
+    if let Some(cwd) = cwd {
+        let path = cwd.join(".qwen/settings.json");
+        let checks = last(
+            &[&defaults, &user, &system],
+            "/security/folderTrust/enabled",
+        )
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+        if (!checks || trusts(&places.trusted, cwd)) && real(&path) != real(&user_path) {
+            workspace = settings(&path);
+        }
+    }
+    [defaults, user, workspace, system]
+}
+
 fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
     let user_path = root.join("settings.json");
     let extensions = root.join("extensions");
@@ -124,25 +154,9 @@ fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
         extensions.clone(),
         extensions.join("extension-enablement.json"),
     ];
-    let system = settings(&places.system);
-    let defaults = settings(&places.defaults);
-    let user = settings(&user_path);
-
-    let mut workspace = Value::Object(Map::new());
     let mut project = Map::new();
     if let Some(cwd) = cwd {
-        let path = cwd.join(".qwen/settings.json");
-        watch.push(path.clone());
-        let checks = last(
-            &[&defaults, &user, &system],
-            "/security/folderTrust/enabled",
-        )
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-        // In Qwen's home folder the project's file is the person's own.
-        if (!checks || trusts(&places.trusted, cwd)) && real(&path) != real(&user_path) {
-            workspace = settings(&path);
-        }
+        watch.push(cwd.join(".qwen/settings.json"));
         let file = cwd.join(".mcp.json");
         watch.push(file.clone());
         if let Some(Value::Object(servers)) =
@@ -151,7 +165,9 @@ fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
             project = servers;
         }
     }
-    let scopes = [&defaults, &user, &workspace, &system];
+    let scopes = loaded(root, cwd, places);
+    let [defaults, user, workspace, system] = &scopes;
+    let scopes = [defaults, user, workspace, system];
 
     let mut configured: BTreeMap<String, (Map<String, Value>, Scope)> = BTreeMap::new();
     let mut put = |entries: Option<&Map<String, Value>>, scope: Scope| {
@@ -162,16 +178,16 @@ fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
         }
     };
     let entries = |scope: &Value| scope.get("mcpServers").and_then(Value::as_object).cloned();
-    put(entries(&defaults).as_ref(), Scope::Person);
-    put(entries(&user).as_ref(), Scope::Person);
+    put(entries(defaults).as_ref(), Scope::Person);
+    put(entries(user).as_ref(), Scope::Person);
     let project: Map<String, Value> = project
         .into_iter()
         .filter(|(_, entry)| entry.is_object())
         .map(|(name, entry)| (name, claude(entry)))
         .collect();
     put(Some(&project), Scope::Project);
-    put(entries(&workspace).as_ref(), Scope::Workspace);
-    put(entries(&system).as_ref(), Scope::System);
+    put(entries(workspace).as_ref(), Scope::Workspace);
+    put(entries(system).as_ref(), Scope::System);
     if let Some(command) = last(&scopes, "/mcp/serverCommand")
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty())

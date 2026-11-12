@@ -40,11 +40,11 @@ short name, its tint and its mark.
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
-| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe |
+| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe, drive |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
-| `droid` | Droid | [`acp-family`](acp-family/) | observe |
-| `crush` | Crush | [`crush`](crush/) | observe, drive |
+| `droid` | Droid | [`acp-family`](acp-family/) | observe, drive |
+| `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -1082,6 +1082,60 @@ steery programs test target/debug/steery-driver-grok
 cargo test
 ```
 
+## Qwen Code: `acp-family/src/qwen/`
+
+One binary, `steery-driver-qwen`, at observe and drive, from release 0.27.2. Qwen keeps
+everything under its root, `QWEN_HOME` or `~/.qwen`. Each conversation is one JSON-lines chat
+file, `projects/<folder>/chats/<id>.jsonl` (the folder is the conversation's `cwd` with each
+character that is not a letter or a digit as `-`), with `<id>.title.json` beside it.
+
+- **Drive** (`held`, `idle`, `stop`, `models`, `start`, `turn/read`, `reader`, `terminal`).
+  Acts `new`, `continue` and `fork`. No words while a turn runs.
+  - `held`: Qwen keeps no lock and no pid. The runtime looks for the processes that hold
+    or name the chat file. `qwen --acp` serves every conversation its client opens, so it
+    is named beyond, not stopped.
+  - `idle`: how the last turn in the chat file's end ended. It stands while nobody holds it.
+  - `models`: `session/new`'s `models.availableModels` of a `qwen --acp` that is never
+    prompted, the current one first. Qwen has no thinking level a run can pick.
+  - `start`: `qwen -o stream-json --approval-mode yolo [-r <id> [--fork-session]] [-m m]
+    [--add-dir r]`, with the words on standard input, which Qwen reads as the prompt.
+    - `yolo` runs every call unasked, so Steery's `PreToolUse` hook is the turn's one gate.
+      `start` is refused `refused` where no settings scope that Qwen loads in the folder
+      holds Steery's guarded hook, or `disableAllHooks` turns hooks off.
+    - The guard: where the hook fails in a turn Steery started (`STEERY_STARTED` names the
+      pid of Qwen's parent), the call is blocked (exit 2). In the person's own `qwen` it
+      lets the call go. Its timeout is the longest Qwen waits, as a timed-out hook lets the
+      call run.
+    - A continue or a fork of a conversation Qwen does not keep here is refused
+      `not-found`. A model `models` does not list is refused `model-missing`. A thinking
+      pick, a worktree and a hand-over are refused `selection-unsupported`.
+  - `turn/read`: `system` `init` names the conversation (a fork's new id). A `tool_use` or
+    `tool_result` is a call that began or ended. `result` ends the turn: `success`
+    finished, else failed with its error; an `API Error: 404 model ... not found` is
+    refused `model-missing`. On standard error, `No saved session found with ID` is refused
+    `not-found` and an auth error `refused`.
+  - `stop`: Qwen has no way to end a turn from outside its process. The runtime's signal
+    ends it: Qwen exits 130 with no `result`, and the turn reads interrupted.
+  - `reader`: `qwen -o text --chat-recording=false --approval-mode plan`, its tools held to
+    `read_file`, `grep_search`, `glob` or none, and no MCP server.
+  - `terminal`: `cd '<cwd>' && qwen -r <id>`, with `QWEN_HOME` where the root is not
+    `~/.qwen`.
+
+Ran (Qwen Code 0.27.2, `/opt/homebrew/bin/qwen`, ollama `qwen3:1.7b`, a temporary
+`QWEN_HOME`): a `new` turn through `start` that ran `run_shell_command` past the hook and
+finished; a `continue` with the hook denying, the call blocked and the turn finished; a
+`fork` whose `init` named a new conversation, its chat file holding the source's records and
+the source's file left as it was; a `stop` by SIGINT (exit 130, interrupted);
+a missing hook binary blocking every call of a turn Steery started, and letting the calls
+run where `STEERY_STARTED` names another process; `start` refused where
+the settings hold no hook. The recorded turns are in `acp-family/tests/qwen/turns`.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-qwen
+cargo test --test qwen
+```
+
 ## Antigravity: `acp-family/src/antigravity/`
 
 One binary, `steery-driver-antigravity`, from release 1.5.5. The driver starts Antigravity's
@@ -1236,7 +1290,7 @@ PATH="<gemini's folder>:$PATH" cargo test --test gemini
 
 ## Droid: `acp-family/src/droid/`
 
-One binary, `steery-driver-droid`, at observe only, from release 1.9.0. Droid keeps everything
+One binary, `steery-driver-droid`, at observe and drive, from release 1.9.0. Droid keeps everything
 in `~/.factory`. Each conversation is one JSON-lines file under `sessions/`, in one of three
 layouts: `sessions/<folder>/<id>.jsonl` (the folder is the conversation's `cwd` with each `/`
 as `-`), `sessions/<id>.jsonl`, and `sessions/btw/<id>.jsonl` (a side question). Beside each,
@@ -1264,17 +1318,43 @@ as `-`), `sessions/<id>.jsonl`, and `sessions/btw/<id>.jsonl` (a side question).
   `decision: "block"`). A tool's document carries no call id. `SessionStart` appends Steery's
   lead to `CLAUDE_ENV_FILE`.
 - **Knowing.** `FACTORY_SESSION_ID` in the agent's shell names the conversation.
+- **Models.** Droid has no models command; `models` reads `droid exec --help`: "Available
+  Models" (the default marked `(default)`, listed first), "Custom Models" from
+  `~/.factory/settings.json`, and each Factory model's levels from "Model details". A custom
+  model lists no levels. It watches `~/.factory/settings.json`.
+- **Drive.** A turn is `droid exec -o stream-json --skip-permissions-unsafe [-s <id> | --fork
+  <id>] [-m <model>] [-r <level>] --cwd <cwd>`, the words on standard input. Each line of
+  standard output is one record that names the conversation by `session_id`: `system`/`init`
+  (the model), the person's `message` (the words went in, under the turn id the file gives),
+  `tool_call` and `tool_result` (the file's call ids), `completion` (finished) or `error`
+  (failed; `Authentication failed` is `refused`). Droid refuses an unknown model
+  (`Invalid model:`, `model-missing`) or level (`Unsupported reasoning effort`,
+  `selection-unsupported`) on standard error before any record.
+- **The gate.** Under `--auto`, Droid's own gate ends a headless turn (`Exec ended early:
+  insufficient permission`) at a call its level or its denylist does not allow: `--auto low`
+  at an `Execute`, `--auto high` at a denylisted command. So the turn runs with
+  `--skip-permissions-unsafe`, Steery's `PreToolUse` hook is its only gate, and `start` refuses
+  without that hook in `~/.factory/hooks.json`. A denied call fails and the turn goes on. Where
+  Steery's hook itself fails in a turn Steery started (`STEERY_STARTED` names Droid's parent),
+  the setup command exits 2: Droid blocks the call.
+- **Continue.** `-s` of an id Droid does not keep opens a new conversation under that id, so
+  `start` refuses an id the store lacks (`not-found`), and a gone folder (`no-place`). No
+  worktree, no `hand`. `stop` is the runtime's signals; `terminal` is `cd '<cwd>' && droid
+  --resume '<id>'`.
 
 Ran (Droid 1.9.0, `~/.local/bin/droid`, no Factory account, ollama `qwen3:1.7b` as a custom
 model): real `droid exec` conversations in `/tmp/droid-obs` (an `Execute` call, a resume, a
 fork, a failed turn, an interrupted turn, an MCP call) listed and read from `~/.factory`;
 `hook/read` over the documents Droid handed a logging hook for each event above; `setup/plan`
-and `mcp/list` against `~/.factory`.
+and `mcp/list` against `~/.factory`. For drive: `droid exec -o stream-json` turns under
+`--auto low`, `--auto high` and `--skip-permissions-unsafe`, with a hook that let the call
+run, denied it, and failed; a resume, a fork, a killed turn, an unknown model and level, and a Factory model
+signed out. `fixtures/droid/turns` holds those records.
 
 Not verified: sub-agents (`Task`, `SubagentStop`), compaction (`PreCompact`), a `Notification`
 document (none fired in `droid exec`), the `sessions/<id>.jsonl` and `sessions/btw/` layouts
 (read from the store's shape, no real file), which of several same-named MCP servers Droid
-loads, and the installer on a host without Droid.
+loads, the installer on a host without Droid, and any turn on a Factory model (no account).
 
 ```sh
 cd acp-family && cargo build
@@ -1392,10 +1472,12 @@ cd plugin && npm install && npm run check
 
 ## Crush: `crush/`
 
-One binary, `steery-driver-crush`, with no settings, at drive. Crush keeps each
+One binary, `steery-driver-crush`, with no settings, at live. Crush keeps each
 project's sessions in that project's SQLite store, `<project>/.crush/crush.db`. The
 projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DATA`, else
-`$XDG_DATA_HOME/crush`, else `~/.local/share/crush`. The driver opens each store read only.
+`$XDG_DATA_HOME/crush`, else `~/.local/share/crush`. Crush never lists there a project that
+only its server opened, so the driver adds the server's workspaces (`GET /v1/workspaces`,
+within 1 s), each store once. The driver opens each store read only.
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`).
   - `sessions/list` lists every session of every project, where the project is.
@@ -1409,7 +1491,7 @@ projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DA
     `error` failed with the provider's words. Crush keeps tokens only of a session's newest
     response, so a read gives them once, at its end.
   - An answer that the model still writes has no `finish`. It holds the cursor back.
-  - `sessions/fold` is refused `selection-unsupported`: the driver has no door.
+  - `sessions/fold` is refused `selection-unsupported`: Crush's door is `keeps`, not a plugin.
 - **Setup** (`setup/plan`). The plan has the MCP entry in the person's `crush.json`
   (`mcp.steery`, `type: http` and its URL), the skill in Crush's own skills folder
   (`$CRUSH_SKILLS_DIR`, else `<XDG_CONFIG_HOME or ~/.config>/crush/skills`), and one hook
@@ -1433,10 +1515,30 @@ projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DA
     `STEERY_STARTED` to Crush under its own pid, and the hook's `$PPID` is that pid.
   - `stop`: the turn mode gets the runtime's signal and sends Crush SIGINT, as Ctrl-C.
     Crush writes the turn `canceled`.
-  - `held`: every Crush with the project open holds its store, so the runtime looks there.
+  - `held`: a person's window that shows the session through Crush's server holds it
+    (Live, below). Else every Crush with the project open holds its store, so the runtime
+    looks there.
   - `models`: `crush models` on a terminal, each `<provider>/<id>`, with labels, thinking
     and costs from Crush's `providers.json`; `models.large` first.
   - `terminal`: `cd '<project>' && crush --session <id>`.
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`). Door `keeps`: Crush's server.
+  - A Crush TUI opened with `CRUSH_CLIENT_SERVER=1` runs its sessions in `crush server`,
+    one per person, on `crush-<uid>.sock` in `$XDG_RUNTIME_DIR`, else the temporary folder
+    (`getconf DARWIN_USER_TEMP_DIR` on a Mac), else `/tmp`. HTTP/1.1 over that socket.
+  - A session is held where the server's workspace for its project shows it to a client
+    (`attached_clients` above 0). A TUI without the variable runs in its own process: no door.
+  - The driver follows the workspace's events (`GET /v1/workspaces/<id>/events`) and sends
+    `session/changed`: the turn, the says it took, calls, permissions and questions as
+    dialogs, the model of the last answer, and settled turns. The person answers a dialog in
+    the window. A dialog that opened before the driver followed is not seen: the server
+    lists no open permission.
+  - `say` posts `/agent`. Words that steer go without a run id and Crush folds them into the
+    running turn at its next step. Others carry a run id and queue as their own turn.
+    `took` once Crush writes their message or lists them in its queue.
+  - `pick` with a model or thinking is refused `selection-unsupported`: Crush picks the model
+    for a whole workspace. With neither it reads back the session's model.
+  - `stop` posts `/agent/sessions/<id>/cancel` and waits up to 8 s for the session to go idle.
+    Crush drops the words that wait with it.
 
 Crush puts no session id in a shell command's environment or an MCP call. The skill tells
 the agent to run `crush session last --json` in its folder and send `meta.uuid`. A live

@@ -1,12 +1,16 @@
-//! Steery's driver for Factory's Droid at observe: it reads Droid's conversations from
-//! `~/.factory/sessions/`, plans the entries that set Droid up for Steery, reads its hooks'
-//! moments, and lists the MCP servers that Droid loads.
+//! Steery's driver for Factory's Droid at observe and drive: it reads Droid's conversations
+//! from `~/.factory/sessions/`, plans the entries that set Droid up for Steery, reads its
+//! hooks' moments, lists the MCP servers and models that Droid loads, and starts its turns
+//! headless ([`drive`]).
 
+mod drive;
 mod events;
 mod hooks;
 mod mcp;
+mod models;
 mod setup;
 mod store;
+mod turn;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -63,7 +67,7 @@ impl Driver {
 
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: MINIMUM.into(),
                 update: Some(format!("{EXECUTABLE} update")),
@@ -101,7 +105,11 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![
+                    harness::Act::Continue,
+                    harness::Act::Fork,
+                    harness::Act::New,
+                ],
                 touches: false,
             },
             hooks: hooks::table(),
@@ -147,6 +155,26 @@ impl Program for Driver {
             method::HOOK_READ => result(hooks::read(&place.store, steery_sdk::params(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::MCP_LIST => result(mcp::list(&place.root, steery_sdk::params(params)?)),
+            method::MODELS => {
+                let _: wire::Empty = steery_sdk::params(params)?;
+                result(models::list(&place.home, &place.root).await?)
+            }
+            method::START => result(
+                drive::start(
+                    &place.home,
+                    &place.root,
+                    &place.store,
+                    steery_sdk::params(params)?,
+                )
+                .await?,
+            ),
+            method::TURN_READ => result(turn::read(steery_sdk::params(params)?)),
+            method::HELD => result(drive::held(&place.store, steery_sdk::params(params)?)),
+            method::IDLE => result(drive::idle(&place.store, steery_sdk::params(params)?)?),
+            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => result(drive::mark(steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
+            method::TERMINAL => result(drive::terminal(&place.store, steery_sdk::params(params)?)?),
             _ => Err(Error::Unknown),
         }
     }

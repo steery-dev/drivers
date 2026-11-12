@@ -71,20 +71,28 @@ pub(crate) fn projects_file(home: &Path) -> PathBuf {
     data(home).join("projects.json")
 }
 
-/// Every project `projects.json` lists, each once by its store, with a store of absolute
+/// Every project `projects.json` lists, then every project the person's Crush server has
+/// open ([`crate::door::open_projects`]), each once by its store, with a store of absolute
 /// path; none where Crush never ran here.
 pub(crate) fn projects(home: &Path) -> Vec<Project> {
-    let Some(listed) = steery_driver_common::mcp::json(&projects_file(home))
+    let listed = steery_driver_common::mcp::json(&projects_file(home))
         .and_then(|value| serde_json::from_value::<Projects>(value).ok())
-    else {
-        return Vec::new();
-    };
+        .map(|listed| listed.projects)
+        .unwrap_or_default();
+    let open = crate::door::open_projects(home)
+        .into_iter()
+        .map(|(path, data_dir)| Project { path, data_dir });
     let mut projects: Vec<Project> = Vec::new();
-    for project in listed.projects {
-        if project.path.is_absolute()
-            && project.data_dir.is_absolute()
-            && !projects.iter().any(|p| p.data_dir == project.data_dir)
-        {
+    let mut stores: Vec<PathBuf> = Vec::new();
+    for project in listed.into_iter().chain(open) {
+        if !project.path.is_absolute() || !project.data_dir.is_absolute() {
+            continue;
+        }
+        // The server names a project by its real path (`/private/tmp`), `projects.json` by
+        // the one it was opened at (`/tmp`).
+        let store = std::fs::canonicalize(&project.data_dir).unwrap_or(project.data_dir.clone());
+        if !stores.contains(&store) {
+            stores.push(store);
             projects.push(project);
         }
     }

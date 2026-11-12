@@ -108,10 +108,10 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         },
     ];
     // One group per event with no `matcher`, which matches every tool and source, beside
-    // whatever the person hooked there, in the shape Qwen 0.27.2 ran. Qwen hands the command
-    // to a shell and reads an exit of 2 as a block, so a hook whose command cannot run (a
-    // machine mid-upgrade, a filled disk) says nothing instead. Its `timeout` is in seconds
-    // (`readCommandHookTimeout`; 1000 and more would read as milliseconds).
+    // whatever the person hooked there, in the shape Qwen 0.27.2 ran. Each command is
+    // [`super::hooks::command`]: the `PreToolUse` one blocks the call where Steery's hook
+    // fails in a turn Steery started, the others say nothing. Its `timeout` is
+    // [`super::hooks::timeout`]: seconds, or milliseconds from 1000 on (`hook-timeout.ts`).
     entries.extend(super::hooks::EVENTS.iter().map(|event| Entry {
         path: settings.clone(),
         format: Format::Json,
@@ -119,8 +119,8 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         value: json!({
             "hooks": [{
                 "type": "command",
-                "command": format!("{} {} || true", setup.hook, event.name),
-                "timeout": event.waits,
+                "command": super::hooks::command(&setup.hook, event.name),
+                "timeout": super::hooks::timeout(event.waits),
             }],
         }),
         carries: vec![Part::Hooks],
@@ -140,6 +140,33 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         })
     }));
     entries
+}
+
+/// Whether Qwen, run in `cwd`, runs Steery's guarded `PreToolUse` hook before every call:
+/// a settings scope it loads holds a group with no `matcher` that runs the command setup
+/// writes ([`super::hooks::guards`]), and no scope turns every hook off
+/// (`disableAllHooks`). A turn Steery starts runs with `--approval-mode yolo`, so this hook
+/// is its only gate.
+pub(crate) fn gated(root: &Path, cwd: &Path) -> bool {
+    let scopes = super::mcp::scopes(root, cwd);
+    let off = scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get("disableAllHooks"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    !off && scopes.iter().any(|scope| {
+        scope["hooks"][super::hooks::BEFORE_CALL]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|group| group["matcher"].as_str().is_none_or(str::is_empty))
+            .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+            .any(|hook| {
+                hook["type"] == "command"
+                    && hook["command"].as_str().is_some_and(super::hooks::guards)
+            })
+    })
 }
 
 /// npm's global install of Qwen Code, where `npm` and a Node.js new enough are here.
@@ -255,8 +282,13 @@ mod tests {
             assert_eq!(
                 entry.value,
                 json!({"hooks": [{"type": "command",
-                    "command": format!("/opt/steery/hook {} || true", hook.event),
-                    "timeout": hook.waits.unwrap()}]})
+                    "command": super::super::hooks::command("/opt/steery/hook", &hook.event),
+                    "timeout": super::super::hooks::timeout(hook.waits.unwrap())}]})
+            );
+            let command = entry.value["hooks"][0]["command"].as_str().unwrap();
+            assert_eq!(
+                super::super::hooks::guards(command),
+                hook.event == super::super::hooks::BEFORE_CALL
             );
         }
         let trust = entries.next().unwrap();

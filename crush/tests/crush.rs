@@ -65,7 +65,8 @@ fn home(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     (home, work, failed)
 }
 
-/// The driver, in an environment holding only `HOME` and `PATH`, initialized.
+/// The driver, in an environment holding only `HOME`, `PATH` and a runtime folder of its own
+/// (no Crush server there), initialized.
 async fn start(home: &Path) -> Client {
     let client = Client::spawn(
         Path::new("/usr/bin/env"),
@@ -73,6 +74,7 @@ async fn start(home: &Path) -> Client {
             "-i".into(),
             format!("HOME={}", home.display()),
             format!("PATH={}:/usr/bin:/bin", home.join("bin").display()),
+            format!("XDG_RUNTIME_DIR={}", home.display()),
             env!("CARGO_BIN_EXE_steery-driver-crush").into(),
         ],
         None,

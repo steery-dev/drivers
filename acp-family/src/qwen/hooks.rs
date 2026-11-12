@@ -26,9 +26,49 @@ use steery_sdk::wire::harness::{
 /// How long Qwen gives a hook that only says a moment happened: its own default.
 const SAYS_WAITS: u32 = 60;
 /// How long Qwen gives a hook that may put the call to a person, who answers from a phone;
-/// the runtime answers within `waits - 90`. Qwen reads a `timeout` of 1000 and more as
-/// milliseconds, so 999 seconds is the longest a hook can wait.
-const ASKS_WAITS: u32 = 999;
+/// the runtime answers within `waits - 90`. Setup writes it in milliseconds, as Qwen reads a
+/// `timeout` of 1000 and more (`hook-timeout.ts`), and Node's timer holds at most
+/// 2^31 - 1 of them: about 24 days, the longest a hook can wait. Past it Qwen kills the hook
+/// and, with no decision, runs the call.
+const ASKS_WAITS: u32 = 2_147_483;
+
+/// Qwen's event before a tool call: the one hook that can block it.
+pub(crate) const BEFORE_CALL: &str = "PreToolUse";
+
+/// What follows `<hook> PreToolUse` in Qwen's settings. `--approval-mode yolo` runs every
+/// call that no hook denies, and Qwen runs a call whose hook exits other than 2. So where
+/// Steery's hook fails (the runtime gone, the binary moved) this exits 2, Qwen's block, with
+/// standard error as its reason. It does so only in a turn Steery started: the runtime's
+/// adapter starts `qwen` itself, with `STEERY_STARTED` naming the adapter's own pid
+/// (PROTOCOL.md §3.3), and Qwen runs the hook in a shell of its own, so `$PPID` is Qwen and
+/// Qwen's parent is that pid. A person's own Qwen, even one that inherited the variable,
+/// says nothing, as every other hook does.
+const GUARD: &str = r#" || { s=$?; p=$(ps -o ppid= -p "${PPID:-0}" | tr -d " "); case "${STEERY_STARTED:-}" in "$p":turn*) echo "Steery's hook failed (exit $s) in a turn Steery started, so the call is blocked" >&2; exit 2;; esac; exit 0; }"#;
+
+/// The command setup writes for `event`, after the runtime's `hook` command. A hook whose
+/// command cannot run (a machine mid-upgrade, a filled disk) says nothing, as Qwen reads
+/// an exit of 2 and more as a block.
+pub(crate) fn command(hook: &str, event: &str) -> String {
+    if event == BEFORE_CALL {
+        format!("{hook} {event}{GUARD}")
+    } else {
+        format!("{hook} {event} || true")
+    }
+}
+
+/// Whether `command` is the one setup writes for [`BEFORE_CALL`], for any `hook`.
+pub(crate) fn guards(command: &str) -> bool {
+    command.ends_with(&format!(" {BEFORE_CALL}{GUARD}"))
+}
+
+/// The `timeout` setup writes for a hook that waits `waits` seconds, as Qwen reads it.
+pub(crate) fn timeout(waits: u32) -> u64 {
+    if waits < 1000 {
+        u64::from(waits)
+    } else {
+        u64::from(waits) * 1000
+    }
+}
 
 /// One of Qwen's hook events Steery is hooked on, by its name in `settings.json`.
 pub(crate) struct Event {
@@ -59,7 +99,7 @@ pub(crate) const EVENTS: [Event; 8] = [
     // Qwen reads no paragraph before a call that Steery answers: only a deny's reason,
     // which the model reads.
     Event {
-        name: "PreToolUse",
+        name: BEFORE_CALL,
         kind: HookKind::BeforeCall,
         says: &[],
         waits: ASKS_WAITS,
