@@ -37,11 +37,14 @@ fn copy(from: &Path, to: &Path) {
             continue;
         }
         std::fs::copy(entry.path(), &target).unwrap();
-        if target.extension().is_some_and(|extension| extension == "jsonl") {
+        if target
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
             let text = std::fs::read_to_string(&target).unwrap();
             let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
-            let at = chrono::DateTime::parse_from_rfc3339(last["timestamp"].as_str().unwrap())
-                .unwrap();
+            let at =
+                chrono::DateTime::parse_from_rfc3339(last["timestamp"].as_str().unwrap()).unwrap();
             std::fs::File::options()
                 .write(true)
                 .open(&target)
