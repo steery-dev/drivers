@@ -25,6 +25,8 @@ pub enum Harness {
     Antigravity,
     /// Alibaba's Qwen Code, whose executable is `qwen`.
     Qwen,
+    /// OpenClaw, whose executable is `openclaw`.
+    OpenClaw,
 }
 
 impl Harness {
@@ -42,6 +44,7 @@ impl Harness {
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
             Self::Qwen => "qwen",
+            Self::OpenClaw => "openclaw",
         }
     }
 
@@ -59,6 +62,7 @@ impl Harness {
             Self::Gemini => "Gemini CLI",
             Self::Antigravity => "Antigravity",
             Self::Qwen => "Qwen Code",
+            Self::OpenClaw => "OpenClaw",
         }
     }
 
@@ -76,6 +80,7 @@ impl Harness {
             Self::Gemini => "Gm",
             Self::Antigravity => "Ag",
             Self::Qwen => "Qw",
+            Self::OpenClaw => "Ow",
         }
     }
 
@@ -93,6 +98,7 @@ impl Harness {
             Self::Gemini => "#4285f4",
             Self::Antigravity => "#b1502f",
             Self::Qwen => "#615ced",
+            Self::OpenClaw => "#e8453c",
         }
     }
 

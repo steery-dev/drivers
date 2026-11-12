@@ -56,6 +56,12 @@ pub(crate) fn installation(home: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Amp's saved accounts, which a sign-in changes. The driver names the file and never reads
+/// it.
+pub(crate) fn accounts(home: &Path) -> PathBuf {
+    data(home).join("accounts.json")
+}
+
 /// The folder Amp's own installer writes its executable to: `$AMP_HOME/bin`, else
 /// `~/.amp/bin`. It links `~/.local/bin/amp` to it.
 fn installer_folder() -> Option<PathBuf> {
