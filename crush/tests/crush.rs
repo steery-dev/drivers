@@ -2,7 +2,8 @@
 //! project stores that Crush 0.100.0 wrote (`tests/fixtures`, each a `sqlite3 .dump`): one a
 //! live turn with an Ollama model that ran tools, with a sub-agent and Crush's own title
 //! session added to it, one a turn that the provider refused. A stand-in `crush` on `PATH`
-//! answers `--version` only.
+//! answers `--version`, and `run` as Crush 0.100.0 does: it logs the session it continues
+//! and leaves the project's store as `$HOME/answered.db` holds it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -41,7 +42,12 @@ fn home(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(
         bin.join("crush"),
-        "#!/bin/sh\n[ \"$1\" = --version ] && echo 'crush version v0.100.0'\n",
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n--version) echo 'crush version v0.100.0';;\n\
+             run) cat > \"$HOME/words\"; cp \"$HOME/answered.db\" .crush/crush.db; \
+             echo 'INFO Continuing session for non-interactive run session_id={LEAD}' >&2;;\n\
+             esac\n"
+        ),
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt as _;
@@ -324,5 +330,214 @@ async fn crush_lists_its_servers_and_plans_its_setup() {
     );
     assert!(planned.get("needs").is_none(), "{planned}");
     driver.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// A turn starts only behind Steery's `PreToolUse` hook, which `crush run`'s own approval
+/// of every call leaves as its gate: without the hook the start is refused; with the hooks
+/// the plan wrote, the turn mode runs `crush run -s`, names the session and ends with the
+/// answer Crush wrote. A hook reads as a call of its group and answers as Crush parses it;
+/// the guard blocks a call whose hook failed only in a turn Steery started.
+#[tokio::test]
+async fn crush_drives_a_turn_behind_its_hook() {
+    let (home, work, _) = home("drive");
+    let answered = home.join("answered.db");
+    std::fs::copy(work.join(".crush/crush.db"), &answered).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    // The fixture's messages, moved to just after this run began.
+    let store = rusqlite::Connection::open(&answered).unwrap();
+    let first: i64 = store
+        .query_row("select min(created_at) from messages", [], |row| row.get(0))
+        .unwrap();
+    let shift = now + 5 - first;
+    store
+        .execute_batch(&format!(
+            "update messages set created_at = created_at + {shift}, \
+             updated_at = updated_at + {shift}, finished_at = finished_at + {shift};"
+        ))
+        .unwrap();
+    drop(store);
+    let driver = start(&home).await;
+    let continued = json!({"act": "continue", "external_id": LEAD, "cwd": work,
+                           "folder": home.join("turn"), "worktree": false});
+
+    let ungated = call(&driver, method::START, continued.clone()).await;
+    assert!(
+        matches!(&ungated, Err(CallError::Refused { word, .. }) if word == "refused"),
+        "{ungated:?}"
+    );
+
+    let planned = call(
+        &driver,
+        method::SETUP_PLAN,
+        json!({"mcp_url": "http://127.0.0.1:7/mcp", "skill": "# Steery", "hook": "steery hook",
+               "door": "http://127.0.0.1:7/door", "release": "7.0.0", "timeout": 60}),
+    )
+    .await
+    .unwrap();
+    let hooks: Vec<&Value> = planned["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["carries"] == json!(["hooks"]))
+        .collect();
+    let at: Vec<&str> = hooks
+        .iter()
+        .map(|hook| hook["at"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        at,
+        [
+            "/hooks/PreToolUse/-",
+            "/hooks/PostToolUse/-",
+            "/hooks/PostToolUseFailure/-"
+        ]
+    );
+    assert_eq!(hooks[1]["value"]["command"], "steery hook PostToolUse");
+    assert_eq!(hooks[0]["value"]["timeout"], 86_400);
+    // As the runtime writes them, beside a hook of the person's own.
+    let mut settings = json!({"hooks": {"PreToolUse": [{"command": "mine", "matcher": "bash"}]}});
+    for hook in &hooks {
+        let event = hook["at"].as_str().unwrap().split('/').nth(2).unwrap();
+        settings["hooks"][event]
+            .as_array_mut()
+            .map(|list| list.push(hook["value"].clone()))
+            .unwrap_or_else(|| settings["hooks"][event] = json!([hook["value"]]));
+    }
+    std::fs::create_dir_all(home.join(".config/crush")).unwrap();
+    std::fs::write(home.join(".config/crush/crush.json"), settings.to_string()).unwrap();
+
+    let launch = call(&driver, method::START, continued).await.unwrap();
+    let argv: Vec<String> = serde_json::from_value(launch["argv"].clone()).unwrap();
+    assert_eq!(argv[1..2], ["turn"]);
+    assert_eq!(argv[4..], ["run", "-q", "-v", "-s", LEAD]);
+    let mut turn = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .current_dir(&work)
+        .env_clear()
+        .env("HOME", &home)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", home.join("bin").display()),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    turn.stdin
+        .take()
+        .unwrap()
+        .write_all(b"Reply with PONG")
+        .unwrap();
+    let output = turn.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(home.join("words")).unwrap(),
+        "Reply with PONG"
+    );
+    let mut lines = Vec::new();
+    for line in String::from_utf8(output.stdout).unwrap().lines() {
+        lines.push(
+            call(
+                &driver,
+                method::TURN_READ,
+                json!({"turn": "t1", "line": line, "stream": "stdout"}),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    assert_eq!(lines[0]["named"], LEAD, "{lines:?}");
+    assert_eq!(lines[1]["ended"]["state"], "finished", "{lines:?}");
+
+    let before = json!({"hook_event_name": "PreToolUse", "event": "PreToolUse",
+                        "session_id": LEAD, "cwd": work, "tool_name": "bash",
+                        "tool_input": {"command": "rm -rf build"}, "tool_use_id": "call_1"});
+    let moment = call(
+        &driver,
+        method::HOOK_READ,
+        json!({"event": "PreToolUse", "document": before.to_string()}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(moment["moment"]["external_id"], LEAD, "{moment}");
+    assert_eq!(moment["moment"]["call"]["group"], "shell", "{moment}");
+    assert_eq!(moment["moment"]["call"]["input"]["command"], "rm -rf build");
+    let steery = json!({"hook_event_name": "PostToolUse", "session_id": LEAD, "cwd": work,
+                        "tool_name": "mcp_steery_sessions_describe", "tool_input": {}});
+    let moment = call(
+        &driver,
+        method::HOOK_READ,
+        json!({"event": "PostToolUse", "document": steery.to_string()}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        moment["moment"]["call"]["steery"], "sessions_describe",
+        "{moment}"
+    );
+    assert_eq!(moment["moment"]["ok"], true, "{moment}");
+
+    let denied = call(
+        &driver,
+        method::HOOK_ANSWER,
+        json!({"event": "PreToolUse", "document": before.to_string(),
+               "answer": {"decision": {"deny": {"reason": "Not in build"}}}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied["exit_code"], 0);
+    assert_eq!(
+        serde_json::from_str::<Value>(denied["stdout"].as_str().unwrap()).unwrap(),
+        json!({"decision": "deny", "reason": "Not in build"})
+    );
+    let said = call(
+        &driver,
+        method::HOOK_ANSWER,
+        json!({"event": "PostToolUse", "document": steery.to_string(),
+               "answer": {"say": "Words wait for you"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        said["stdout"],
+        json!({"context": "Words wait for you"}).to_string()
+    );
+    let decided = call(
+        &driver,
+        method::HOOK_ANSWER,
+        json!({"event": "PostToolUse", "document": steery.to_string(),
+               "answer": {"decision": {"allow": {"reason": "ok"}}}}),
+    )
+    .await;
+    assert!(decided.is_err(), "{decided:?}");
+    driver.shutdown().await.unwrap();
+
+    // The guard, with a hook that fails: `$PPID` is this test, as Crush is the hook's parent
+    // in a turn, and `STEERY_STARTED` names the pid it trusts.
+    let guarded =
+        hooks[0]["value"]["command"]
+            .as_str()
+            .unwrap()
+            .replacen("steery hook", "false", 1);
+    let guard = |started: Option<String>| {
+        let mut sh = std::process::Command::new("/bin/sh");
+        sh.args(["-c", &guarded])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin");
+        if let Some(started) = started {
+            sh.env("STEERY_STARTED", started);
+        }
+        sh.output().unwrap()
+    };
+    let blocked = guard(Some(format!("{}:turn@x", std::process::id())));
+    assert_eq!(blocked.status.code(), Some(2), "{blocked:?}");
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("the call is blocked"));
+    assert_eq!(guard(None).status.code(), Some(1));
+    assert_eq!(guard(Some("1:turn@x".into())).status.code(), Some(1));
     let _ = std::fs::remove_dir_all(&home);
 }
