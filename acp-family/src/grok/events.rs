@@ -655,7 +655,7 @@ fn clip(content: &Value) -> Option<Clip> {
 
 /// The call a `tool_call` began. Grok names the tool and its kind in `_meta["x.ai/tool"]`;
 /// an MCP tool is `<server>__<tool>` there.
-fn call(update: &Value) -> Call {
+pub(super) fn call(update: &Value) -> Call {
     let tool = &update["_meta"]["x.ai/tool"];
     let name = tool["name"]
         .as_str()

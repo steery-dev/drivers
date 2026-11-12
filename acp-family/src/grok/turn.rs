@@ -153,7 +153,11 @@ fn calls(transcript: &Path, line: &Value, ended: bool) -> Vec<Event> {
     let Ok(file) = std::fs::File::open(transcript) else {
         return Vec::new();
     };
-    let want = if ended { "tool_call_update" } else { "tool_call" };
+    let want = if ended {
+        "tool_call_update"
+    } else {
+        "tool_call"
+    };
     let mut found: Vec<(usize, Vec<Event>)> = Vec::new();
     for record in BufReader::new(file).lines().map_while(Result::ok) {
         let Some(id) = ids.iter().position(|id| record.contains(id)) else {
@@ -213,14 +217,18 @@ mod tests {
             }
         );
         assert_eq!(
-            state(json!({"subtype": "error_during_execution", "is_error": true,
-                         "stop_reason": "cancelled", "result": "null"}))
+            state(
+                json!({"subtype": "error_during_execution", "is_error": true,
+                         "stop_reason": "cancelled", "result": "null"})
+            )
             .state,
             TurnState::Interrupted
         );
-        let failed = state(json!({"subtype": "error_during_execution", "is_error": true,
+        let failed = state(
+            json!({"subtype": "error_during_execution", "is_error": true,
             "stop_reason": null,
-            "errors": ["Couldn't set model 'x': Invalid params: \"unknown model id\"."]}));
+            "errors": ["Couldn't set model 'x': Invalid params: \"unknown model id\"."]}),
+        );
         assert_eq!(failed.state, TurnState::Failed);
         assert_eq!(
             refused_by(failed.error.as_deref().unwrap()),
@@ -235,7 +243,9 @@ mod tests {
             Some(refusal::REFUSED)
         );
         assert_eq!(
-            refusal_of("Error: Couldn't set model 'no-such-model': Invalid params: \"unknown model id\". Run 'grok models' to see available models."),
+            refusal_of(
+                "Error: Couldn't set model 'no-such-model': Invalid params: \"unknown model id\". Run 'grok models' to see available models."
+            ),
             Some(refusal::MODEL_MISSING)
         );
         assert_eq!(
@@ -247,9 +257,14 @@ mod tests {
             None
         );
         assert_eq!(
-            refusal_of("2026-11-10T12:36:13.927939Z ERROR worker quit with fatal: Transport channel closed, when AuthRequired"),
+            refusal_of(
+                "2026-11-10T12:36:13.927939Z ERROR worker quit with fatal: Transport channel closed, when AuthRequired"
+            ),
             None
         );
-        assert_eq!(refusal_of("Not signed in. To authenticate without a browser, run:"), None);
+        assert_eq!(
+            refusal_of("Not signed in. To authenticate without a browser, run:"),
+            None
+        );
     }
 }
