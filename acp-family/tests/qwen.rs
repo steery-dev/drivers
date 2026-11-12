@@ -112,7 +112,9 @@ async fn reads_the_chats_qwen_wrote() {
     let home = home();
     let client = start(&home).await;
 
-    let listed = ask(&client, method::SESSIONS_LIST, json!({})).await.unwrap();
+    let listed = ask(&client, method::SESSIONS_LIST, json!({}))
+        .await
+        .unwrap();
     assert_eq!(listed["complete"], true);
     let sessions = listed["sessions"].as_array().unwrap();
     let ids: Vec<&str> = sessions
@@ -126,14 +128,28 @@ async fn reads_the_chats_qwen_wrote() {
         two["transcripts"][0].as_str().unwrap(),
         chat(&home, "-tmp-qwh-work", TWO_PROMPTS).to_str().unwrap()
     );
-    assert!(two["title"].as_str().unwrap().starts_with("Reply with the single word: pong"));
+    assert!(
+        two["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Reply with the single word: pong")
+    );
     assert_eq!(sessions[0]["cwd"], "/private/tmp/qwtest");
 
-    let located = ask(&client, method::SESSIONS_LOCATE, json!({"external_id": COMPRESSED}))
-        .await
-        .unwrap();
+    let located = ask(
+        &client,
+        method::SESSIONS_LOCATE,
+        json!({"external_id": COMPRESSED}),
+    )
+    .await
+    .unwrap();
     assert_eq!(located["session"]["external_id"], COMPRESSED);
-    let missing = ask(&client, method::SESSIONS_LOCATE, json!({"external_id": "nope"})).await;
+    let missing = ask(
+        &client,
+        method::SESSIONS_LOCATE,
+        json!({"external_id": "nope"}),
+    )
+    .await;
     let missing = missing.unwrap_err();
     assert!(missing.contains("not-found"), "{missing}");
 
@@ -166,7 +182,10 @@ async fn reads_the_chats_qwen_wrote() {
     // A shell command that failed to start.
     let failed = read(&client, json!({"external_id": FAILED_SHELL})).await;
     let events = lines(&failed["events"]);
-    assert!(events.contains(&"call_ended false".to_owned()), "{events:?}");
+    assert!(
+        events.contains(&"call_ended false".to_owned()),
+        "{events:?}"
+    );
 
     // The model's service refused both turns: its failure says why.
     let refused = read(&client, json!({"external_id": REFUSED})).await;
@@ -196,11 +215,19 @@ async fn reads_the_chats_qwen_wrote() {
 
     // A read from the cursor says nothing until Qwen appends; then it says the new prompt.
     let cursor = two["cursor"].as_str().unwrap().to_owned();
-    let again = read(&client, json!({"external_id": TWO_PROMPTS, "cursor": cursor})).await;
+    let again = read(
+        &client,
+        json!({"external_id": TWO_PROMPTS, "cursor": cursor}),
+    )
+    .await;
     assert_eq!(lines(&again["events"]), Vec::<String>::new());
     let file = chat(&home, "-tmp-qwh-work", TWO_PROMPTS);
     let last: Value = serde_json::from_str(
-        std::fs::read_to_string(&file).unwrap().lines().last().unwrap(),
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
     )
     .unwrap();
     let prompt = json!({
@@ -213,7 +240,10 @@ async fn reads_the_chats_qwen_wrote() {
         "cwd": "/tmp/qwh/work",
         "message": {"role": "user", "parts": [{"text": "third"}]},
     });
-    let mut open = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+    let mut open = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
     writeln!(open, "{prompt}").unwrap();
     let on = read(
         &client,
@@ -284,12 +314,16 @@ async fn hooks(client: &Client) {
             .unwrap()
             .ends_with(&format!("chats/{TWO_PROMPTS}.jsonl"))
     );
-    assert_eq!(said[2]["prompt"], "Reply with the single word: pong /no_think");
+    assert_eq!(
+        said[2]["prompt"],
+        "Reply with the single word: pong /no_think"
+    );
     assert_eq!(said[3]["outcome"], "finished");
     assert_eq!(said[3]["continued"], false);
     assert!(said[3]["context_left"].as_f64().unwrap() > 0.99);
     assert_eq!(said[12]["person_exited"], true);
-    let unhooked = json!({"event": "MessageDisplay", "document": "{\"session_id\":\"x\"}", "env": {}});
+    let unhooked =
+        json!({"event": "MessageDisplay", "document": "{\"session_id\":\"x\"}", "env": {}});
     assert_eq!(
         ask(client, method::HOOK_READ, unhooked).await.unwrap()["moment"],
         Value::Null
@@ -306,7 +340,13 @@ async fn hooks(client: &Client) {
         (!stdout.is_empty()).then(|| serde_json::from_str::<Value>(stdout).unwrap())
     };
     assert_eq!(
-        printed(answer("PreToolUse", json!({"decision": {"deny": {"reason": "not now"}}})).await),
+        printed(
+            answer(
+                "PreToolUse",
+                json!({"decision": {"deny": {"reason": "not now"}}})
+            )
+            .await
+        ),
         Some(json!({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
@@ -314,7 +354,13 @@ async fn hooks(client: &Client) {
         }}))
     );
     assert_eq!(
-        printed(answer("PreToolUse", json!({"decision": {"allow": {"reason": "ok"}}})).await),
+        printed(
+            answer(
+                "PreToolUse",
+                json!({"decision": {"allow": {"reason": "ok"}}})
+            )
+            .await
+        ),
         None
     );
     assert_eq!(
@@ -391,7 +437,10 @@ async fn mcp(client: &Client, home: &Path) {
         }}),
     );
     let extension = root.join("extensions/ext");
-    put(extension.join("qwen-extension.json"), json!({"name": "ext", "version": "1.0.0"}));
+    put(
+        extension.join("qwen-extension.json"),
+        json!({"name": "ext", "version": "1.0.0"}),
+    );
     put(
         extension.join(".mcp.json"),
         json!({"mcpServers": {
@@ -400,7 +449,9 @@ async fn mcp(client: &Client, home: &Path) {
         }}),
     );
 
-    let listed = ask(client, method::MCP_LIST, json!({"cwd": cwd})).await.unwrap();
+    let listed = ask(client, method::MCP_LIST, json!({"cwd": cwd}))
+        .await
+        .unwrap();
     let servers: Vec<(&str, Option<&str>)> = listed["servers"]
         .as_array()
         .unwrap()

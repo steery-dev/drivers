@@ -145,7 +145,8 @@ fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
         }
         let file = cwd.join(".mcp.json");
         watch.push(file.clone());
-        if let Some(Value::Object(servers)) = jsonc(&file).and_then(|f| f.get("mcpServers").cloned())
+        if let Some(Value::Object(servers)) =
+            jsonc(&file).and_then(|f| f.get("mcpServers").cloned())
         {
             project = servers;
         }
@@ -182,7 +183,12 @@ fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
     let rules = steery_driver_common::mcp::json(&extensions.join("extension-enablement.json"));
     let at = slashed(&cwd.unwrap_or(Path::new("/")).to_string_lossy());
     for extension in active(&extensions, rules.as_ref(), &at, &mut watch) {
-        for (name, entry) in extension.get("mcpServers").and_then(Value::as_object).into_iter().flatten() {
+        for (name, entry) in extension
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
             if let Some(entry) = entry.as_object() {
                 configured
                     .entry(name.clone())
@@ -256,7 +262,10 @@ fn claude(entry: Value) -> Value {
         return entry;
     };
     let sdk = server.get("type").and_then(Value::as_str) == Some("sdk");
-    if ["command", "httpUrl", "tcp"].iter().any(|key| truthy(server.get(*key))) {
+    if ["command", "httpUrl", "tcp"]
+        .iter()
+        .any(|key| truthy(server.get(*key)))
+    {
         if !sdk {
             server.remove("type");
         }
@@ -390,8 +399,14 @@ fn active(dir: &Path, rules: Option<&Value>, at: &str, watch: &mut Vec<PathBuf>)
             watch.push(install.clone());
             let install = steery_driver_common::mcp::json(&install);
             let home = match (
-                install.as_ref().and_then(|i| i.get("type")).and_then(Value::as_str),
-                install.as_ref().and_then(|i| i.get("source")).and_then(Value::as_str),
+                install
+                    .as_ref()
+                    .and_then(|i| i.get("type"))
+                    .and_then(Value::as_str),
+                install
+                    .as_ref()
+                    .and_then(|i| i.get("source"))
+                    .and_then(Value::as_str),
             ) {
                 (Some("link"), Some(source)) => PathBuf::from(source),
                 _ => folder,

@@ -193,10 +193,7 @@ impl Store {
             cwd: head.cwd.clone(),
             title,
             created_at: head.started,
-            updated_at: conversation
-                .changed
-                .max(head.started)
-                .unwrap_or_default(),
+            updated_at: conversation.changed.max(head.started).unwrap_or_default(),
             transcripts: vec![conversation.file.clone()],
             parent: None,
             app: false,
@@ -240,9 +237,7 @@ impl Store {
                 Some(SubAgent {
                     lead: text("parentAgentId"),
                     name: text("agentType"),
-                    task: text("description")
-                        .map(|task| title(&task))
-                        .or(head.prompt),
+                    task: text("description").map(|task| title(&task)).or(head.prompt),
                     started_at: text("createdAt")
                         .as_deref()
                         .and_then(events::millis)
@@ -305,9 +300,7 @@ impl Head {
                 .map(PathBuf::from)
                 .filter(|cwd| cwd.is_absolute());
         }
-        if self.prompt.is_none()
-            && record["type"] == "user"
-            && record["provenance"] == "real_user"
+        if self.prompt.is_none() && record["type"] == "user" && record["provenance"] == "real_user"
         {
             let said: String = record["message"]["parts"]
                 .as_array()
@@ -316,10 +309,7 @@ impl Head {
                 .filter(|part| part["thought"] != true)
                 .filter_map(|part| part["text"].as_str())
                 .collect();
-            self.prompt = said
-                .lines()
-                .find(|line| !line.trim().is_empty())
-                .map(title);
+            self.prompt = said.lines().find(|line| !line.trim().is_empty()).map(title);
         }
     }
 }

@@ -249,7 +249,11 @@ impl Fold {
             .find_map(|part| part.get("functionResponse").cloned());
         let Some(id) = result["callId"]
             .as_str()
-            .or_else(|| response.as_ref().and_then(|response| response["id"].as_str()))
+            .or_else(|| {
+                response
+                    .as_ref()
+                    .and_then(|response| response["id"].as_str())
+            })
             .map(str::to_owned)
         else {
             return;
@@ -454,9 +458,7 @@ fn group(name: &str) -> Group {
         "web_fetch" | "web_search" => Group::Web,
         "lsp" => Group::Code,
         "agent" | "send_message" | "list_agents" | "create_sub_session" | "team_create"
-        | "team_delete" | "team_plan_approval" | "request_shutdown" | "task_stop" => {
-            Group::Agents
-        }
+        | "team_delete" | "team_plan_approval" | "request_shutdown" | "task_stop" => Group::Agents,
         "todo_write" | "enter_plan_mode" | "exit_plan_mode" | "task_create" | "task_list"
         | "task_update" | "get_goal" | "propose_goal" | "update_goal" | "cron_create"
         | "cron_delete" | "cron_list" | "loop_wakeup" => Group::Plan,
