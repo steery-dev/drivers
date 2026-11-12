@@ -128,6 +128,17 @@ pub trait Host {
     /// The harness opened `session` for the turn, before any words go in: a harness whose
     /// store does not tell a driven conversation from a headless one marks it here.
     fn opened(&self, _session: &str) {}
+
+    /// The command that sets `session`'s model, where the harness's ACP has no `model`
+    /// config option; none sets the option.
+    fn sets_model(
+        &self,
+        _binary: &std::path::Path,
+        _session: &str,
+        _model: &str,
+    ) -> Option<tokio::process::Command> {
+        None
+    }
 }
 
 /// What a turn is asked to do, as its command line says it.
@@ -270,11 +281,19 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
             }
         };
         host.opened(&session);
-        for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
-            if let Some(value) = value {
-                let params = json!({"sessionId": session, "configId": option, "value": value});
-                acp.call("session/set_config_option", params).await?;
+        if let Some(model) = &asked.model {
+            match host.sets_model(&asked.binary, &session, model) {
+                Some(command) => set_model(command, label).await?,
+                None => {
+                    let params = json!({"sessionId": session, "configId": "model", "value": model});
+                    acp.call("session/set_config_option", params).await?;
+                }
             }
+        }
+        if let Some(thinking) = &asked.thinking {
+            let params =
+                json!({"sessionId": session, "configId": host.thinking(), "value": thinking});
+            acp.call("session/set_config_option", params).await?;
         }
         // The prompts that wait for the harness's answer, with their words, by their ids.
         let mut prompts = HashMap::from([(acp.prompt(&session, &words).await?, words)]);
@@ -425,6 +444,40 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
     }
     acp.close().await;
     outcome
+}
+
+/// Run the command that sets the session's model ([`Host::sets_model`]); a failure is the
+/// turn's refusal line.
+async fn set_model(mut command: tokio::process::Command, label: &str) -> Result<(), String> {
+    let output = command
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| {
+            format!(
+                "{}: {label} did not set the model: {e}",
+                refusal::START_FAILED
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    let said = said
+        .lines()
+        .chain(
+            std::str::from_utf8(&output.stdout)
+                .unwrap_or_default()
+                .lines(),
+        )
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("it exited without a line");
+    Err(format!(
+        "{}: {label} kept its model: {said}",
+        refusal::REFUSED
+    ))
 }
 
 /// The answer to a permission asked in a turn that is cancelled.

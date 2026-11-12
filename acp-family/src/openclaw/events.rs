@@ -275,7 +275,7 @@ impl Fold<'_> {
             .iter()
             .filter(|part| part.get("type").and_then(Value::as_str) == Some("toolCall"))
         {
-            if let Some(call) = call(part, &id, self.servers) {
+            if let Some(call) = call(part, Some(&id), self.servers) {
                 self.events.push(Event::CallBegan { at, call });
             }
         }
@@ -456,7 +456,7 @@ fn group(tool: &str) -> Group {
 
 /// A `toolCall` part: `{id, name, arguments}`. OpenClaw names an MCP tool
 /// `<server>__<tool>` (`src/agents/agent-bundle-mcp-names.ts:10,93`).
-fn call(part: &Value, response: &str, servers: &[String]) -> Option<Call> {
+pub(super) fn call(part: &Value, response: Option<&str>, servers: &[String]) -> Option<Call> {
     let id = part.get("id").and_then(Value::as_str)?;
     let tool = part.get("name").and_then(Value::as_str)?;
     let input = part.get("arguments").cloned().unwrap_or(Value::Null);
@@ -487,6 +487,6 @@ fn call(part: &Value, response: &str, servers: &[String]) -> Option<Call> {
         steery,
         asks: None,
         parent: None,
-        response: Some(response.to_owned()),
+        response: response.map(str::to_owned),
     })
 }

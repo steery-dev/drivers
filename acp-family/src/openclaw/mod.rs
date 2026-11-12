@@ -1,8 +1,11 @@
-//! Steery's driver for OpenClaw at observe: it reads OpenClaw's conversations from each
+//! Steery's driver for OpenClaw at drive: it reads OpenClaw's conversations from each
 //! agent's SQLite store, `<state>/agents/<agent>/agent/openclaw-agent.sqlite`, plans the
-//! entries that set OpenClaw up for Steery, and lists the MCP servers OpenClaw loads.
+//! entries that set OpenClaw up for Steery, lists the MCP servers OpenClaw loads, and runs
+//! OpenClaw's turns through `openclaw acp` ([`drive`]).
 
+pub mod drive;
 mod events;
+mod hooks;
 mod mcp;
 mod models;
 mod setup;
@@ -10,7 +13,7 @@ mod sign_in;
 mod store;
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -19,14 +22,16 @@ use steery_sdk::{Error, Program, method, refusal, result};
 use crate::Harness;
 
 /// The driver: the protocol it picked from `initialize`, where OpenClaw keeps everything,
-/// the listings it answered, to answer the next with only what changed, and the sign-in that
-/// waits for its person.
+/// the listings it answered, to answer the next with only what changed, the sign-in that
+/// waits for its person, and the models `models` last listed, which `start` checks a pick
+/// against.
 #[derive(Default)]
 pub struct Driver {
     protocol: OnceLock<u32>,
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
     sign_ins: sign_in::SignIns,
+    listed: Mutex<Vec<harness::Model>>,
 }
 
 /// The person's home, and OpenClaw's state folder.
@@ -67,9 +72,9 @@ impl Driver {
             .is_some_and(|&protocol| protocol >= steery_driver_common::program::NEEDS)
     }
 
-    fn info() -> wire::HarnessInfo {
+    fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: setup::MINIMUM_TEXT.into(),
                 update: Some("openclaw update".into()),
@@ -109,13 +114,15 @@ impl Driver {
                     thinking: true,
                 },
                 door: None,
-                checks_idle: false,
+                checks_idle: true,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                // `openclaw acp` resumes a key and makes one anew; it has no fork.
+                acts: vec![harness::Act::Continue, harness::Act::New],
                 touches: false,
             },
-            // OpenClaw's hooks are modules it loads, not commands it runs.
-            hooks: Vec::new(),
+            // A turn of this driver's runs Steery's hook at each permission `openclaw acp`
+            // relays, and at its end.
+            hooks: crate::turn::hooks::table(protocol),
         }
     }
 }
@@ -133,7 +140,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol,
             program: Harness::OpenClaw.program()?,
-            harness: Some(Box::new(Self::info())),
+            harness: Some(Box::new(Self::info(protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -177,8 +184,55 @@ impl Program for Driver {
             method::MODELS => {
                 let _: wire::Empty = steery_sdk::params(params)?;
                 let place = self.place()?;
-                result(models::list(&place.home, &place.root).await?)
+                let models = models::list(&place.home, &place.root).await?;
+                *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = models.models.clone();
+                result(models)
             }
+            method::START => {
+                let place = self.place()?;
+                result(drive::start(
+                    &place.home,
+                    &place.root,
+                    &self.listed.lock().unwrap_or_else(|e| e.into_inner()),
+                    steery_sdk::params(params)?,
+                )?)
+            }
+            method::HELD => result(drive::held(
+                &self.place()?.root,
+                &steery_sdk::params(params)?,
+            )?),
+            method::IDLE => result(drive::idle(
+                &self.place()?.root,
+                &steery_sdk::params(params)?,
+            )),
+            method::TURN_READ => result(drive::turn_line(
+                &self.place()?.root,
+                steery_sdk::params(params)?,
+            )),
+            method::STOP => result(crate::turn::drive::stop(
+                "OpenClaw",
+                &steery_sdk::params(params)?,
+            )?),
+            method::RECEIPT_MARK => result(drive::mark(
+                &self.place()?.root,
+                &steery_sdk::params(params)?,
+            )?),
+            method::RECEIPT_FIND => result(drive::find(
+                &self.place()?.root,
+                &steery_sdk::params(params)?,
+            )?),
+            method::TERMINAL => result(drive::terminal(
+                &self.place()?.root,
+                &steery_sdk::params(params)?,
+            )?),
+            method::HOOK_READ => result(hooks::read(
+                &self.place()?.root,
+                steery_sdk::params(params)?,
+            )?),
+            method::HOOK_ANSWER => result(crate::turn::hooks::answer(
+                "OpenClaw",
+                steery_sdk::params(params)?,
+            )?),
             method::NEEDS_GIVE if self.needs() => {
                 let give: harness::Give = steery_sdk::params(params)?;
                 result(self.sign_ins.give(&self.place()?.home, give).await?)

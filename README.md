@@ -41,7 +41,7 @@ short name, its tint and its mark.
 | `amp` | Amp | [`amp`](amp/) | observe |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
-| `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
+| `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -1073,7 +1073,7 @@ cargo test
 
 ## OpenClaw: `acp-family/src/openclaw/`
 
-One binary, `steery-driver-openclaw`, at observe only, from release 2026.11.3. OpenClaw keeps
+One binary, `steery-driver-openclaw`, at observe and drive, from release 2026.11.3. OpenClaw keeps
 everything in its state folder, `OPENCLAW_STATE_DIR` or `~/.openclaw`. Each agent's
 conversations are in its SQLite store, `agents/<agent>/agent/openclaw-agent.sqlite`, which the
 driver opens read-only.
@@ -1096,12 +1096,31 @@ driver opens read-only.
     plain JSON, the plan notes it.
   - Steery's skill in `skills/steery/SKILL.md`, the managed skills folder, which every agent
     reads.
-  - OpenClaw's hooks are JavaScript modules, not commands. Thus the driver declares no hooks.
+  - Steery's hook command line in `steery/hook` of the state folder, which OpenClaw does not
+    read. OpenClaw's own hooks are JavaScript modules, not commands, so only a turn that this
+    driver runs calls Steery's hook.
 - **Needs** (protocol 5): `sign-in`, where `openclaw models status --json --check` exits 1.
   See Signing in.
 - **`models`**: `openclaw models list --json`, the models of its configured providers that
   are `available`, with the one tagged `default` first. Each key `<provider>/<model>` is split
   at its first `/`.
+- **Drive** (`start`, `held`, `idle`, `receipt/mark`, `receipt/find`, `terminal`,
+  `turn/read`, `hook/read`, `hook/answer`). A turn is this driver's binary in its turn mode,
+  speaking ACP to `openclaw acp`, a bridge onto the gateway that runs every turn.
+  - `new`: `session/new` with `mcpServers []`; the bridge names the session
+    `<agent>:acp-bridge:<id>`. `continue`: `session/resume` by that key. `fork` is refused
+    `selection-unsupported`: the bridge has none.
+  - Steery names a conversation by its first window's id. `turn/read` maps the ACP id back to
+    it. A bridge key sets only `parent_session_key`, so only `spawned_by` marks a sub-agent.
+  - The model: `openclaw gateway call sessions.patch` on the key before the turn, as the
+    bridge has no model option. A model the last `models` lacks is refused. The thinking
+    level is the session's `thought_level` option.
+  - Words told mid-turn go in as the next prompt, after the running one ends: a second
+    prompt cancels the running one.
+  - A permission is the gateway's exec approval, relayed with the call's `rawInput`.
+    `hook/read` names it as the `exec` call. It reaches ACP only where exec `ask` is on.
+  - `held`: the newest window of a key that a run writes now (`activeWriterRunId`).
+  - `terminal`: `openclaw tui --session <key>` in the conversation's folder.
 
 Ran (OpenClaw 2026.11.3, `/opt/homebrew/bin/openclaw`, ollama `qwen3:1.7b`): five real
 conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd record, one
@@ -1112,14 +1131,24 @@ and the plan asks for `sign-in`. A real sub-agent, spawned by `sessions_spawn` t
 gateway's `tools.invoke` (with `gateway.tools.allow` lifting its default deny for the probe),
 listed under its lead, left out of the list, and read in place: its task, its answer.
 
+Drive ran on the live gateway (`127.0.0.1:18789`, ollama `qwen3:1.7b` and `qwen3:0.6b`):
+`new` (`end_turn` in 19.3 s) and three `continue` turns; a `write` tool call read back;
+`receipt/find` true for its delivery, false for another; `--model ollama/qwen3:0.6b` set
+by `sessions.patch`, both answers from `qwen3:0.6b`; words told on the inbox heard and
+answered as the next prompt; with exec `ask: always`, an `exec` approval through the hook,
+read by `hook/read`, allowed once, then the turn-end hook; `held` and `idle` going `running`
+then `finished` during a turn; `steery programs test` all `ok`.
+
 Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
 idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the
 installer on a host without OpenClaw; `~/.npm-global/bin` and `~/.local/bin` as install
-folders (read from `install.sh`, not seen installed).
+folders (read from `install.sh`, not seen installed); a reject at the hook; live (the
+gateway's `chat.send` and `chat.abort` need an operator token, not built).
 
 ```sh
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-openclaw
+cargo test
 ```
 
 ## Amp: `amp/`
