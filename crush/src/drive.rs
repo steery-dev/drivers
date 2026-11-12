@@ -367,10 +367,14 @@ pub fn refusal_of(message: &str) -> Option<&'static str> {
 
 /// `held`: Crush keeps no mark of the session it runs. Every Crush that has a project open,
 /// a turn or a person's window, holds the project's store open, so the runtime looks there.
+/// A session no store keeps: nothing to look at.
 pub fn held(home: &Path, held: Held) -> Result<HeldBy, Error> {
     Ok(HeldBy::Look(Looked {
         look: Look {
-            transcripts: vec![Store::new(home).transcript(&held.external_id)?],
+            transcripts: Store::new(home)
+                .transcript(&held.external_id)?
+                .into_iter()
+                .collect(),
             strays: false,
             beyond: Vec::new(),
         },
@@ -378,9 +382,13 @@ pub fn held(home: &Path, held: Held) -> Result<HeldBy, Error> {
 }
 
 /// `idle`: how the session's last turn ended, where it did. It stands while nobody holds
-/// the store.
+/// the store. A session no store keeps has no sample.
 pub fn idle(home: &Path, held: Held) -> Result<Sampled, Error> {
-    let read = Store::new(home).read(
+    let store = Store::new(home);
+    if store.transcript(&held.external_id)?.is_none() {
+        return Ok(Sampled { sample: None });
+    }
+    let read = store.read(
         Read {
             external_id: held.external_id,
             sub_agent: None,

@@ -1,16 +1,18 @@
-//! Steery's `crush` driver, at drive. Crush keeps each project's sessions in that project's
+//! Steery's `crush` driver, at live. Crush keeps each project's sessions in that project's
 //! SQLite store, `<project>/.crush/crush.db`, and lists the projects in its data folder's
 //! `projects.json`. The driver lists and reads those sessions, plans the entries that set
 //! Crush up for Steery (its MCP entry, the skill, the hooks), reads and answers Crush's tool
 //! hooks ([`hooks`]), lists the MCP servers Crush loads, lists Crush's models, and starts,
-//! reads and stops Crush's turns through `crush run` ([`drive`], [`turn`]). It reaches no
-//! live session.
+//! reads and stops Crush's turns through `crush run` ([`drive`], [`turn`]). It reaches a
+//! person's Crush window through Crush's own server ([`live`]).
 
 mod calls;
+mod door;
 mod drive;
 mod events;
 mod home;
 mod hooks;
+mod live;
 mod mcp;
 mod setup;
 mod store;
@@ -18,7 +20,7 @@ mod turn;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -71,17 +73,20 @@ part comes when the model stops.";
 const MINIMUM: &str = "0.100.0";
 const UPDATE: &str = "brew upgrade charmbracelet/tap/crush";
 
-/// The driver: the protocol it picked and the person's home, both from `initialize`.
+/// The driver: the protocol it picked and the person's home, both from `initialize`, and
+/// the Crush windows it follows.
 struct Crush {
     protocol: OnceLock<u32>,
     home: OnceLock<PathBuf>,
+    live: Arc<live::Live>,
 }
 
 impl Crush {
-    fn new(_: steery_sdk::Notifier) -> Self {
+    fn new(notifier: steery_sdk::Notifier) -> Self {
         Self {
             protocol: OnceLock::new(),
             home: OnceLock::new(),
+            live: Arc::new(live::Live::new(notifier)),
         }
     }
 
@@ -143,15 +148,40 @@ impl Program for Crush {
             method::MODELS => result(drive::models(self.home()?).await?),
             method::START => result(drive::start(self.home()?, steery_sdk::params(params)?)?),
             method::TURN_READ => result(drive::read(&steery_sdk::params(params)?)),
-            method::HELD => result(drive::held(self.home()?, steery_sdk::params(params)?)?),
+            method::HELD => {
+                let home = self.home()?;
+                let held: harness::Held = steery_sdk::params(params)?;
+                match self.live.held(home, &held.external_id).await {
+                    Some(holder) => result(harness::HeldBy::Holder(holder)),
+                    None => result(drive::held(home, held)?),
+                }
+            }
             method::IDLE => result(drive::idle(self.home()?, steery_sdk::params(params)?)?),
-            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::SAY => result(
+                self.live
+                    .say(self.home()?, steery_sdk::params(params)?)
+                    .await?,
+            ),
+            method::PICK => result(
+                self.live
+                    .pick(self.home()?, steery_sdk::params(params)?)
+                    .await?,
+            ),
+            method::STOP => {
+                let stop: harness::Stop = steery_sdk::params(params)?;
+                match stop.holder {
+                    harness::Holder::Person {
+                        stop: harness::HolderStop::Owner(_),
+                        ..
+                    } => result(self.live.stop(self.home()?, &stop).await?),
+                    _ => result(drive::stop(&stop)?),
+                }
+            }
             method::RECEIPT_MARK => result(drive::mark(self.home()?, steery_sdk::params(params)?)?),
             method::RECEIPT_FIND => result(drive::find(self.home()?, steery_sdk::params(params)?)?),
             method::TERMINAL => result(drive::terminal(self.home()?, steery_sdk::params(params)?)?),
             method::HOOK_READ => result(hooks::read(self.home()?, steery_sdk::params(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
-            // Every method of live, which the levels rule out.
             _ => Err(Error::Unknown),
         }
     }
@@ -160,7 +190,7 @@ impl Program for Crush {
 /// Crush as Steery reads it.
 fn info() -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe, wire::Level::Drive],
+        levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some(UPDATE.into()),
@@ -186,7 +216,8 @@ fn info() -> wire::HarnessInfo {
         reader: None,
         // A turn is `crush run`: a new session, or a continue in the project that keeps it,
         // which restores the model of the session's last answer (`restoreModelFromSession`)
-        // but not its reasoning effort. No door.
+        // but not its reasoning effort. A window opened with `CRUSH_CLIENT_SERVER=1` runs in
+        // Crush's server, whose door keeps the session's model.
         facts: wire::HarnessFacts {
             touches: false,
             by_file: false,
@@ -196,7 +227,7 @@ fn info() -> wire::HarnessInfo {
                 model: true,
                 thinking: false,
             },
-            door: None,
+            door: Some(harness::LiveDoor::Keeps),
             checks_idle: false,
             worktrees: false,
             acts: vec![harness::Act::Continue, harness::Act::New],

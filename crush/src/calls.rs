@@ -26,6 +26,15 @@ pub fn call(id: &str, tool: &str, input: Value, servers: &[String]) -> Call {
     }
 }
 
+/// The tool of a call that runs, as a live state names it: as a [`Call`] names it, but
+/// Steery's own as `mcp__steery__<tool>`.
+pub fn live_tool(tool: &str, servers: &[String]) -> String {
+    match mcp(tool, servers) {
+        Some(("steery", named)) => format!("mcp__steery__{named}"),
+        _ => tool.to_owned(),
+    }
+}
+
 /// The server and tool of an MCP tool's name, by the longest server name that fits.
 fn mcp<'a>(tool: &'a str, servers: &[String]) -> Option<(&'a str, &'a str)> {
     let rest = tool.strip_prefix("mcp_")?;

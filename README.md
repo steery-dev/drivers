@@ -44,7 +44,7 @@ short name, its tint and its mark.
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
 | `droid` | Droid | [`acp-family`](acp-family/) | observe |
-| `crush` | Crush | [`crush`](crush/) | observe, drive |
+| `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -1327,10 +1327,12 @@ cd plugin && npm install && npm run check
 
 ## Crush: `crush/`
 
-One binary, `steery-driver-crush`, with no settings, at drive. Crush keeps each
+One binary, `steery-driver-crush`, with no settings, at live. Crush keeps each
 project's sessions in that project's SQLite store, `<project>/.crush/crush.db`. The
 projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DATA`, else
-`$XDG_DATA_HOME/crush`, else `~/.local/share/crush`. The driver opens each store read only.
+`$XDG_DATA_HOME/crush`, else `~/.local/share/crush`. Crush never lists there a project that
+only its server opened, so the driver adds the server's workspaces (`GET /v1/workspaces`,
+within 1 s), each store once. The driver opens each store read only.
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`).
   - `sessions/list` lists every session of every project, where the project is.
@@ -1344,7 +1346,7 @@ projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DA
     `error` failed with the provider's words. Crush keeps tokens only of a session's newest
     response, so a read gives them once, at its end.
   - An answer that the model still writes has no `finish`. It holds the cursor back.
-  - `sessions/fold` is refused `selection-unsupported`: the driver has no door.
+  - `sessions/fold` is refused `selection-unsupported`: Crush's door is `keeps`, not a plugin.
 - **Setup** (`setup/plan`). The plan has the MCP entry in the person's `crush.json`
   (`mcp.steery`, `type: http` and its URL), the skill in Crush's own skills folder
   (`$CRUSH_SKILLS_DIR`, else `<XDG_CONFIG_HOME or ~/.config>/crush/skills`), and one hook
@@ -1368,10 +1370,30 @@ projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DA
     `STEERY_STARTED` to Crush under its own pid, and the hook's `$PPID` is that pid.
   - `stop`: the turn mode gets the runtime's signal and sends Crush SIGINT, as Ctrl-C.
     Crush writes the turn `canceled`.
-  - `held`: every Crush with the project open holds its store, so the runtime looks there.
+  - `held`: a person's window that shows the session through Crush's server holds it
+    (Live, below). Else every Crush with the project open holds its store, so the runtime
+    looks there.
   - `models`: `crush models` on a terminal, each `<provider>/<id>`, with labels, thinking
     and costs from Crush's `providers.json`; `models.large` first.
   - `terminal`: `cd '<project>' && crush --session <id>`.
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`). Door `keeps`: Crush's server.
+  - A Crush TUI opened with `CRUSH_CLIENT_SERVER=1` runs its sessions in `crush server`,
+    one per person, on `crush-<uid>.sock` in `$XDG_RUNTIME_DIR`, else the temporary folder
+    (`getconf DARWIN_USER_TEMP_DIR` on a Mac), else `/tmp`. HTTP/1.1 over that socket.
+  - A session is held where the server's workspace for its project shows it to a client
+    (`attached_clients` above 0). A TUI without the variable runs in its own process: no door.
+  - The driver follows the workspace's events (`GET /v1/workspaces/<id>/events`) and sends
+    `session/changed`: the turn, the says it took, calls, permissions and questions as
+    dialogs, the model of the last answer, and settled turns. The person answers a dialog in
+    the window. A dialog that opened before the driver followed is not seen: the server
+    lists no open permission.
+  - `say` posts `/agent`. Words that steer go without a run id and Crush folds them into the
+    running turn at its next step. Others carry a run id and queue as their own turn.
+    `took` once Crush writes their message or lists them in its queue.
+  - `pick` with a model or thinking is refused `selection-unsupported`: Crush picks the model
+    for a whole workspace. With neither it reads back the session's model.
+  - `stop` posts `/agent/sessions/<id>/cancel` and waits up to 8 s for the session to go idle.
+    Crush drops the words that wait with it.
 
 Crush puts no session id in a shell command's environment or an MCP call. The skill tells
 the agent to run `crush session last --json` in its folder and send `meta.uuid`. A live
