@@ -8,6 +8,7 @@ mod antigravity;
 mod cline;
 mod copilot;
 mod cursor;
+mod droid;
 mod gemini;
 mod goose;
 mod grok;
@@ -68,5 +69,6 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
         },
         Harness::Qwen => steery_sdk::serve(|_notifier| qwen::Driver::default()).await,
         Harness::OpenClaw => steery_sdk::serve(|_notifier| openclaw::Driver::default()).await,
+        Harness::Droid => steery_sdk::serve(|_notifier| droid::Driver::default()).await,
     }
 }
