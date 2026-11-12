@@ -38,7 +38,7 @@ short name, its tint and its mark.
 | `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive, live |
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
-| `amp` | Amp | [`amp`](amp/) | observe |
+| `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
@@ -124,7 +124,7 @@ signed in, as the harness itself says.
 | `copilot` | ``run `copilot login` in a terminal`` | its own server's (`copilot --headless --stdio`) `auth.getStatus` `isAuthenticated`, bound 10 s. It counts a `gh` sign-in and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`. |
 | `opencode` | ``run `opencode auth login` in a terminal`` | not told. OpenCode's free models need no account, so an empty model list never means signed out. |
 | `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
-| `amp` | ``run `amp login` in a terminal`` | not told (the driver has no `models`). `setup/plan` asks `amp threads list --json --limit 1`: exit 1 with `Run 'amp login'`, and no `AMP_API_KEY`: not signed in. |
+| `amp` | ``run `amp login` in a terminal`` | `amp threads list --json --limit 1`. Exit 0: signed in. Exit 1 with `Run 'amp login'`: not signed in. `setup/plan` asks the same, and an `AMP_API_KEY` counts as signed in. |
 | `cline` | ``run `cline auth` in a terminal`` | `models` starts `cline --acp`: `session/new` refused with ACP `-32000` (auth required) means not signed in. |
 | `goose` | ``run `goose configure` in a terminal`` | `models` starts `goose acp`: `session/new` refused with `Failed to resolve provider and model` means not signed in. |
 | `gemini` | ``run `gemini` in a terminal and choose how to sign in`` | `gemini models list` lists signed in or not, so the driver reads what Gemini reads first: `security.auth.selectedType`, else the type that `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI` or `GEMINI_API_KEY` picks. No type: not signed in. Google sign-in: `oauth_creds.json` there, else not told (the Keychain). Key: `GEMINI_API_KEY` there, else not told (the Keychain). |
@@ -290,10 +290,11 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok` and `antigravity` do this. omp, pi, Kilo
-  and OpenCode have no door of their own, so their door is `plugin`. This repository keeps
-  Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in `acp-family/plugin/kilo.ts`
-  and OpenCode's in `acp-family/plugin/opencode.ts`, and `setup/plan` installs it. The plugin
+  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok` and `antigravity` do this. omp, pi, Kilo,
+  OpenCode and Amp have no door of their own, so their door is `plugin`. This repository keeps
+  Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in `acp-family/plugin/kilo.ts`,
+  OpenCode's in `acp-family/plugin/opencode.ts` and Amp's in `amp/plugin/steery.ts`, and
+  `setup/plan` installs it. The plugin
   speaks the plugin door,
   version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
   uses the live methods only on conversations that Steery started. The runtime never steers a
@@ -1175,10 +1176,12 @@ steery programs test target/debug/steery-driver-droid
 
 ## Amp: `amp/`
 
-One binary, `steery-driver-amp`, with no settings, at observe only. Amp keeps its threads on
-ampcode.com, not on this host. Thus the driver reads them only through Amp's own CLI:
+One binary, `steery-driver-amp`, with no settings, at observe, drive and live. Amp keeps its threads
+on ampcode.com, not on this host. Thus the driver reads them only through Amp's own CLI:
 
 - `amp threads list --json` and `amp threads export <thread>`
+- `amp -x --stream-json` and `amp threads continue <thread> -x --stream-json`, which the
+  runtime runs
 - `amp mcp list --json`
 - `amp login`
 
@@ -1215,17 +1218,61 @@ plan asks `sign-in` in two ways:
     response's tokens, and the model. A message that Amp still writes holds the cursor back.
     A person can edit an earlier message, which cuts the thread there. Then the cursor's last
     message is gone, and the read starts again (`reset`).
-  - `sessions/fold` is refused `selection-unsupported`: Amp has no plugin door that sends
-    records.
-- **Setup** (`setup/plan`). The plan has two entries: the MCP entry in Amp's settings
-  (`amp.mcpServers.steery`, its URL alone), and the skill in Amp's own skills folder
-  (`skills/steery/SKILL.md` under Amp's settings folder). Amp names no thread in an MCP call's
-  `_meta`, so the entry sends no `Steery-*` header.
+  - `sessions/fold` is refused `selection-unsupported`: Steery's plugin sends no records.
+- **Setup** (`setup/plan`). The plan has three entries: the MCP entry in Amp's settings
+  (`amp.mcpServers.steery`, its URL alone), the skill in Amp's own skills folder
+  (`skills/steery/SKILL.md` under Amp's settings folder), and Steery's plugin in Amp's system
+  plugins folder (`plugins/steery.ts` there), the door's address filled in. Amp names no thread
+  in an MCP call's `_meta`, so the entry sends no `Steery-*` header.
 - **MCP servers** (`mcp/list`): see MCP servers.
+- **Drive** (`start`, `turn/read`). A turn is `amp -x --stream-json`, the words on standard
+  input. A new thread adds `--no-archive-after-execute`, as `amp -x` archives its thread
+  otherwise. A continue is `amp threads continue <thread> -x --stream-json`.
+  - Amp picks no model: it runs a mode. `models` lists the built-in modes `medium` (Amp's
+    default), `low`, `high`, `ultra`, passed as `-m`. `claude-code` needs a linked Claude
+    subscription and is left out. No thinking pick.
+  - A thread keeps the mode of its first message. A continue that asks another mode is
+    refused `selection-unsupported` (`keeps.model`). Fork and hand: `selection-unsupported`.
+  - `turn/read`: `system/init` names the thread before Amp takes the words. The `user` line
+    that holds the delivery marker is `took`. `result` ends the turn, failed with Amp's
+    `error` where it is one. Standard error's `Error:` line: `harness-busy` (the thread is
+    open in another Amp), `not-found`, `refused` (signed out, out of credits), else
+    `start-failed`. A line gives no event: the runtime reads the thread.
+  - `held`: Amp keeps no registry of who has a thread open, so the runtime looks at stray
+    `amp` processes. `idle` exports the thread and samples its last ended turn. `stop` has no
+    graceful step; with `say`, `other-turn`. No `reader`: `amp -x` saves every run as a
+    thread and cannot run without its tools. `terminal`: `amp threads continue <thread>` in
+    the folder, and the thread's page on ampcode.com as its app.
+- **Live**, door `plugin`. Amp runs each plugin as a child of the `amp` process, TUI or `-x`.
+  For each root thread that starts there, the plugin dials the door (§4.4). Its `hello` names
+  the thread, the `amp` process's pid, and the mode: `json` for a turn Steery started
+  (`STEERY_STARTED` names the `amp` process's parent), else `tui`, or `print` for a person's
+  `amp -x`. A thread with a parent thread is Amp's sub-agent: it opens no door. The door carries
+  no entries and no `live` frames: Amp gives a plugin no text while a message forms.
+  - `say`: `appendUserMessage`, with `steer` while a turn runs. `queue` words wait for the turn's
+    end. `agent.start` takes them. A one-shot run takes words only during its own turn.
+  - `pick`: `selection-unsupported` (a thread keeps its mode).
+  - `stop`: Amp's `cancel`, where the turn that runs is one that its words began; else
+    `other-turn`. A stop that names no say parks the thread.
+  - `settle` at `agent.end`: the runtime's words continue the thread (`action: continue`).
+  - `compact`: declined; the context starts at the thread's first message.
 
-How an agent in Amp learns its thread's id is not checked yet: no Amp turn has run under the
-driver. The skill tells the agent to send the `T-…` of its thread's address, or
-`AMP_THREAD_ID` where it is set.
+What ran live, on an account with no credits (Amp 0.0.1794225648 and 0.0.1794484845):
+
+- A new turn through the driver's plan: named, took, ended `failed` "Out of Credits",
+  `refused`. `sessions/read` then gave the person's words.
+- A continue in another mode: refused before anything ran. `terminal`: the command and URL.
+- `amp threads continue <thread> -x` with no credits appends the words, prints nothing and
+  exits 1 (Amp's log: `ReferenceError: Cannot access 'ae' before initialization`). Stdin,
+  argument and `--stream-json-input` alike. A continue that reaches the model is not checked.
+- Steery's plugin as a project plugin under `amp -x --stream-json` (0.0.1794484845), against a
+  stand-in door: `hello` (the thread's `T-…`, `mode: json`, the `amp` pid, cwd), `welcome`,
+  `state`, and the turn's begin. Out of credits, Amp exits before `agent.end`, so `say`,
+  `stop` and `settle` on a running turn are not checked.
+
+How an agent in Amp learns its thread's id is not checked yet: no Amp turn has reached the
+model under the driver. The skill tells the agent to send the `T-…` of its thread's address,
+or `AMP_THREAD_ID` where it is set.
 
 Build and check it, with Amp on `PATH`:
 
@@ -1233,6 +1280,7 @@ Build and check it, with Amp on `PATH`:
 cd amp && cargo build
 steery programs test target/debug/steery-driver-amp
 cargo test
+cd plugin && npm install && npm run check
 ```
 
 ## Crush: `crush/`

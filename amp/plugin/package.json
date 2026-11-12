@@ -1,0 +1,13 @@
+{
+  "name": "steery-amp-plugin",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc -p ."
+  },
+  "devDependencies": {
+    "@ampcode/plugin": "0.0.0-20261112001220-gbe68d4b",
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
+  }
+}
