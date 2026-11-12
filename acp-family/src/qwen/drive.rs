@@ -283,7 +283,7 @@ pub fn terminal(
 }
 
 /// Whether an id is one plain word that a command takes as it is, and not a flag.
-fn plain_id(id: &str) -> bool {
+pub(super) fn plain_id(id: &str) -> bool {
     !id.is_empty()
         && !id.starts_with('-')
         && id
