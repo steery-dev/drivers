@@ -2,12 +2,18 @@
 //! `~/.factory/sessions/`, plans the entries that set Droid up for Steery, reads its hooks'
 //! moments, and lists the MCP servers that Droid loads.
 
+mod events;
+mod hooks;
+mod mcp;
+mod setup;
+mod store;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
-use steery_sdk::{Error, Program, listing};
+use steery_sdk::{Error, Program, listing, method, result};
 
 use crate::Harness;
 
@@ -36,10 +42,11 @@ pub struct Driver {
     changes: listing::Changes,
 }
 
-/// The person's home and Droid's folder, `~/.factory`.
+/// The person's home, Droid's folder, `~/.factory`, and what was read of its sessions.
 pub(crate) struct Place {
     pub home: PathBuf,
     pub root: PathBuf,
+    store: store::Store,
 }
 
 /// Droid's folder: `~/.factory`, as `droid doctor` reports it (`factoryDir`).
@@ -97,7 +104,7 @@ impl Driver {
                 acts: Vec::<harness::Act>::new(),
                 touches: false,
             },
-            hooks: Vec::new(),
+            hooks: hooks::table(),
         }
     }
 }
@@ -109,6 +116,7 @@ impl Program for Driver {
         let _ = self.place.set(Place {
             home: params.home.clone(),
             root: root(&params.home),
+            store: store::Store::new(&root(&params.home)),
         });
         self.changes.picked(protocol);
         Ok(wire::Initialized {
@@ -120,8 +128,23 @@ impl Program for Driver {
         })
     }
 
-    async fn call(&self, method: &str, _params: Value) -> Result<Value, Error> {
-        let _ = (method, self.place()?);
-        Err(Error::Unknown)
+    async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
+        let place = self.place()?;
+        match method {
+            method::SETUP_PLAN => result(
+                setup::plan(&place.home, &place.root, steery_sdk::params(params)?).await,
+            ),
+            method::SESSIONS_LIST => {
+                let asked: harness::List = steery_sdk::params(params)?;
+                let after = asked.after.clone();
+                result(self.changes.answer(after.as_deref(), place.store.list(asked)))
+            }
+            method::SESSIONS_LOCATE => result(place.store.locate(steery_sdk::params(params)?)?),
+            method::SESSIONS_READ => result(place.store.read(steery_sdk::params(params)?)?),
+            method::HOOK_READ => result(hooks::read(&place.store, steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::MCP_LIST => result(mcp::list(&place.root, steery_sdk::params(params)?)),
+            _ => Err(Error::Unknown),
+        }
     }
 }
