@@ -39,7 +39,7 @@ short name, its tint and its mark.
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive, live |
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
-| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive |
+| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
@@ -293,14 +293,14 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
   `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok` and `antigravity` do this. omp, pi, Kilo,
-  OpenCode and Amp have no door of their own, so their door is `plugin`. This repository keeps
-  Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in `acp-family/plugin/kilo.ts`,
-  OpenCode's in `acp-family/plugin/opencode.ts` and Amp's in `amp/plugin/steery.ts`, and
-  `setup/plan` installs it. The plugin
-  speaks the plugin door,
-  version 1 (§4.4), to the runtime itself. Thus the driver has no live methods. The runtime
-  uses the live methods only on conversations that Steery started. The runtime never steers a
-  conversation that a person started.
+  OpenCode, Amp and Gemini CLI have no door of their own, so their door is `plugin`. This
+  repository keeps Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in
+  `acp-family/plugin/kilo.ts`, OpenCode's in `acp-family/plugin/opencode.ts` and Amp's in
+  `amp/plugin/steery.ts`, and `setup/plan` installs it. Gemini CLI loads no plugin of
+  Steery's: its turn process speaks the door itself (`acp-family/src/turn/door.rs`). The
+  plugin speaks the plugin door, version 1 (§4.4), to the runtime itself. Thus the driver has
+  no live methods. The runtime uses the live methods only on conversations that Steery
+  started. The runtime never steers a conversation that a person started.
 
 ## MCP servers
 
@@ -1196,6 +1196,42 @@ gateway's `chat.send` and `chat.abort` need an operator token, not built).
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-openclaw
 cargo test
+```
+
+## Gemini CLI: `acp-family/src/gemini/`
+
+One binary, `steery-driver-gemini`, with no settings, at observe, drive and live, from release
+0.67.0. Gemini keeps each conversation in `<GEMINI_CLI_HOME or ~>/.gemini/tmp/<project>/chats/`,
+one append-only JSON-lines file each (`session-<time>-<id8>.jsonl`).
+
+- **Drive** (`start`, `held`, `idle`, `receipt/*`, `models`, `turn/read`, `terminal`). Acts
+  `new` and `continue`; no fork, no hand-over, no thinking level. A turn is this driver's
+  binary in its turn mode, speaking ACP to `gemini --acp` in the turn's own process.
+  - `held`: Gemini keeps no lock and no pid of a running turn, so the runtime looks.
+  - `terminal`: `cd '<cwd>' && gemini --resume <id>`.
+- **Live**, door `plugin`. Gemini loads no plugin of Steery's, so the turn process is the
+  conversation's copy. The runtime keeps it past its words (`stdin: held`). It dials the door
+  that `setup/plan` wrote to `<root>/steery/door`, `mode: rpc`, with its own pid.
+  - `say`: a second `session/prompt` aborts Gemini's running turn
+    (`packages/cli/src/acp/acpSession.ts`). Thus words to a running turn, `steer` or `queue`,
+    wait in the copy (`queued_at`, `pending`) and go in together as the next prompt at its end
+    (`taken_at`). `idle` words to a running turn are refused `harness-busy`.
+  - `stop`: `session/cancel`; `pick`: `session/set_model`. `compact` runs nothing of
+    Steery's. The copy keeps no records: a welcome that asks for entries gets `lost`.
+
+Ran (Gemini CLI 0.67.0, `npm install -g @google/gemini-cli`, a model API on the loopback
+through `GOOGLE_GEMINI_BASE_URL`): `tests/gemini.rs` runs `setup/plan`, `start` and the launch
+plan. The real `gemini --acp` dials the test as the door. A `say` goes in at once; words said
+while it runs wait and go in at its end; `stop` cancels a running turn; the runtime's signal
+closes the door; `sessions/list` and `sessions/read` then read Gemini's own chat file.
+
+Not verified: a signed-in Google model (no account here); a permission through the hook; a
+`pick` of a model; `force` on a running turn.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-gemini
+PATH="<gemini's folder>:$PATH" cargo test --test gemini
 ```
 
 ## Droid: `acp-family/src/droid/`

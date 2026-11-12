@@ -232,15 +232,13 @@ async fn node_lacks() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Gemini CLI 0.67.0 as npm installs it, on the machine that recorded the corpus.
-    const GEMINI: &str = "/tmp/gem/prefix/bin/gemini";
-
     #[tokio::test]
     async fn gemini_is_pointed_at_steery_in_its_own_spelling() {
-        if !Path::new(GEMINI).exists() {
-            eprintln!("skipped: no {GEMINI} here");
+        // Gemini CLI 0.67.0 as npm installs it.
+        let Some(gemini) = on_path("gemini") else {
+            eprintln!("skipped: no gemini on PATH");
             return;
-        }
+        };
         let root = std::env::temp_dir().join("steery-gemini-plan/.gemini");
         let setup = Setup {
             mcp_url: "http://127.0.0.1:7777/mcp".into(),
@@ -251,7 +249,7 @@ mod tests {
             timeout: 600,
             trusts: vec!["/home/daytona/work".into()],
         };
-        let planned = found(GEMINI.into(), &root, setup).await;
+        let planned = found(gemini, &root, setup).await;
         let found = planned.found.unwrap();
         assert_eq!(
             (found.release.as_str(), found.root.as_path()),
