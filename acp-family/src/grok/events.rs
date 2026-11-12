@@ -235,10 +235,7 @@ impl Fold<'_> {
         let params = &record["params"];
         let meta = &params["_meta"];
         let update = &params["update"];
-        let at = meta["agentTimestampMs"]
-            .as_u64()
-            .or_else(|| record["timestamp"].as_u64().map(|seconds| seconds * 1000))
-            .unwrap_or(0);
+        let at = stamp(record);
         self.last = self.newest.clone();
         let id = match meta["eventId"].as_str() {
             Some(id) => {
@@ -500,34 +497,10 @@ impl Fold<'_> {
 
     /// A call's update: where it finished, its end and the text of its result.
     fn ended(&mut self, at: u64, id: String, update: &Value) {
-        let ok = match update["status"].as_str() {
-            Some("completed") => true,
-            Some("failed") => false,
-            _ => return,
-        };
-        let Some(call) = update["toolCallId"].as_str() else {
-            return;
-        };
-        self.flush();
-        let text = result(update);
-        self.events.push(Event::CallEnded {
-            at,
-            id: call.to_owned(),
-            ok,
-            chars: text.chars().count() as u64,
-            tail: tail(&text),
-            waited: Vec::new(),
-        });
-        if !text.trim().is_empty() {
-            self.events.push(Event::Words {
-                at,
-                id,
-                voice: Voice::Tool,
-                text,
-                message: None,
-                call: Some(call.to_owned()),
-                clips: Vec::new(),
-            });
+        let ended = ended(at, Some(id), update);
+        if !ended.is_empty() {
+            self.flush();
+            self.events.extend(ended);
         }
     }
 
@@ -586,6 +559,75 @@ impl Fold<'_> {
     }
 }
 
+/// When a record was written: Grok's `agentTimestampMs`, else its `timestamp` in seconds.
+fn stamp(record: &Value) -> u64 {
+    record["params"]["_meta"]["agentTimestampMs"]
+        .as_u64()
+        .or_else(|| record["timestamp"].as_u64().map(|seconds| seconds * 1000))
+        .unwrap_or(0)
+}
+
+/// The events of a call's finished update: its end, and the words of its result under
+/// the record's `id` where it has one.
+fn ended(at: u64, id: Option<String>, update: &Value) -> Vec<Event> {
+    let ok = match update["status"].as_str() {
+        Some("completed") => true,
+        Some("failed") => false,
+        _ => return Vec::new(),
+    };
+    let Some(call) = update["toolCallId"].as_str() else {
+        return Vec::new();
+    };
+    let text = result(update);
+    let mut events = vec![Event::CallEnded {
+        at,
+        id: call.to_owned(),
+        ok,
+        chars: text.chars().count() as u64,
+        tail: tail(&text),
+        waited: Vec::new(),
+    }];
+    if let Some(id) = id
+        && !text.trim().is_empty()
+    {
+        events.push(Event::Words {
+            at,
+            id,
+            voice: Voice::Tool,
+            text,
+            message: None,
+            call: Some(call.to_owned()),
+            clips: Vec::new(),
+        });
+    }
+    events
+}
+
+/// The call events that one transcript record gives, as [`read`] gives them: a
+/// `tool_call`'s `call_began`; a finished `tool_call_update`'s `call_ended`, and the words
+/// of its result where the record names its event. `call` is the call it must be of.
+pub fn calls(record: &Value, call: &str) -> Vec<Event> {
+    let update = &record["params"]["update"];
+    if update["toolCallId"].as_str() != Some(call) {
+        return Vec::new();
+    }
+    let at = stamp(record);
+    match update["sessionUpdate"].as_str() {
+        Some("tool_call") => vec![Event::CallBegan {
+            at,
+            call: self::call(update),
+        }],
+        Some("tool_call_update") => ended(
+            at,
+            record["params"]["_meta"]["eventId"]
+                .as_str()
+                .map(str::to_owned),
+            update,
+        ),
+        _ => Vec::new(),
+    }
+}
+
 /// What a person's chunk carried besides its text.
 fn clip(content: &Value) -> Option<Clip> {
     let text = |key: &str| content[key].as_str().map(str::to_owned);
@@ -613,7 +655,7 @@ fn clip(content: &Value) -> Option<Clip> {
 
 /// The call a `tool_call` began. Grok names the tool and its kind in `_meta["x.ai/tool"]`;
 /// an MCP tool is `<server>__<tool>` there.
-fn call(update: &Value) -> Call {
+pub(super) fn call(update: &Value) -> Call {
     let tool = &update["_meta"]["x.ai/tool"];
     let name = tool["name"]
         .as_str()

@@ -1,24 +1,30 @@
 //! `setup/plan`: what sets Amp up for Steery, each an entry the runtime writes and records:
-//! Steery's MCP server in Amp's settings (`amp.mcpServers`), and Steery's skill in Amp's
-//! own skills folder. Where Amp is not signed in, its sign-in is a need.
+//! Steery's MCP server in Amp's settings (`amp.mcpServers`), Steery's skill in Amp's own
+//! skills folder, and Steery's plugin in Amp's system plugins folder, which every `amp`
+//! process loads and which dials the runtime's door. Where Amp is not signed in, its sign-in
+//! is a need.
 
 use std::path::Path;
 
 use serde_json::json;
 use steery_driver_common::program::{release_within, version};
+use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
 
 use crate::home;
 
+/// Steery's plugin for Amp, the door's address in a placeholder inside a string literal.
+const PLUGIN: &str = include_str!("../plugin/steery.ts");
+
 /// The plan for this host; where `needs` (protocol 5) and Amp is signed out, its sign-in
 /// ([`crate::sign_in::need`]).
-pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Planned {
+pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Error> {
     let Some(binary) = home::binary() else {
         let (install, refused) = match home::install() {
             Ok(install) => (Some(install), None),
             Err(why) => (None, Some(why)),
         };
-        return Planned {
+        return Ok(Planned {
             found: None,
             refused,
             entries: Vec::new(),
@@ -29,7 +35,7 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Planned {
             ],
             install,
             needs: Vec::new(),
-        };
+        });
     };
     let lacks = async { needs && crate::sign_in::signed_out(&binary).await };
     let (release, lacks) = tokio::join!(release(&binary), lacks);
@@ -59,8 +65,16 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Planned {
             value: json!(setup.skill),
             carries: vec![Part::Skill],
         },
+        // Amp's system plugins folder: every `amp` process, TUI or `-x`, loads it.
+        Entry {
+            path: home::config(home).join("plugins/steery.ts"),
+            format: Format::Text,
+            at: None,
+            value: json!(plugin(&setup.door)?),
+            carries: vec![Part::Plugin],
+        },
     ];
-    Planned {
+    Ok(Planned {
         found: Some(Found {
             binary,
             release: release.unwrap_or_default(),
@@ -75,7 +89,17 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Planned {
         } else {
             Vec::new()
         },
+    })
+}
+
+/// Steery's plugin with the door's address filled in.
+fn plugin(door: &str) -> Result<String, Error> {
+    if door.is_empty() || door.contains(['"', '\\', '\n', '\r']) {
+        return Err(Error::invalid(
+            "`door` is not an address the plugin can hold",
+        ));
     }
+    Ok(PLUGIN.replace("__STEERY_DOOR__", door))
 }
 
 /// The release `amp --version` names (`0.0.1794225648-g45053b`, read as `0.0.1794225648`), or

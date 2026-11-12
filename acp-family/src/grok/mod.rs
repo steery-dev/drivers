@@ -1,17 +1,21 @@
-//! Steery's driver for Grok Build at observe: it reads Grok's conversations from
-//! `$GROK_HOME/sessions/<encoded folder>/<id>/`, plans the entries that set Grok up for
-//! Steery, and reads its hooks' moments.
+//! Steery's driver for Grok Build at observe, drive and live: it reads Grok's conversations
+//! from `$GROK_HOME/sessions/<encoded folder>/<id>/`, plans the entries that set Grok up for
+//! Steery, reads its hooks' moments, plans the turns that the runtime runs as Grok, and
+//! reaches a person's Grok TUI through Grok's leader ([`live`]).
 
+mod drive;
 mod events;
 mod hooks;
+mod live;
 mod mcp;
 mod models;
 mod setup;
 mod sign_in;
 mod store;
+mod turn;
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -20,14 +24,15 @@ use steery_sdk::{Error, Program, method, refusal, result};
 use crate::Harness;
 
 /// The driver: the protocol it picked from `initialize`, where Grok keeps everything, the
-/// listings it answered, to answer the next with only what changed, and the sign-in that
-/// waits for its person.
-#[derive(Default)]
+/// listings it answered, to answer the next with only what changed, the sign-in that
+/// waits for its person, and the door of Grok's leader.
 pub struct Driver {
     protocol: OnceLock<u32>,
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
     sign_ins: sign_in::SignIns,
+    turns: turn::Turns,
+    live: Arc<live::Live>,
 }
 
 /// The person's home, and Grok's home.
@@ -51,6 +56,17 @@ pub(crate) fn binary(root: &Path) -> Option<PathBuf> {
 }
 
 impl Driver {
+    pub fn new(notifier: steery_sdk::Notifier) -> Self {
+        Self {
+            protocol: OnceLock::new(),
+            place: OnceLock::new(),
+            changes: Default::default(),
+            sign_ins: Default::default(),
+            turns: Default::default(),
+            live: Arc::new(live::Live::new(notifier)),
+        }
+    }
+
     fn place(&self) -> Result<&Place, Error> {
         self.place
             .get()
@@ -70,7 +86,7 @@ impl Driver {
 
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
             minimum: Some(wire::Minimum {
                 release: "1.0.77".into(),
                 update: Some("grok update".into()),
@@ -100,7 +116,20 @@ impl Driver {
                 cuts_tool_text: false,
                 call_bound: None,
             },
-            reader: None,
+            // `--tools ""` allows no built-in tool, `--no-subagents` and
+            // `--disable-web-search` reach nothing beyond. Grok 1.0.77 has no flag that
+            // leaves out MCP servers, rules files, hooks, or the saved run.
+            reader: Some(wire::ReaderFacts {
+                sealed: wire::Sealed {
+                    tools: true,
+                    mcp: false,
+                    instructions: false,
+                    extensions: false,
+                    history: false,
+                },
+                known: Vec::new(),
+                unnamed: true,
+            }),
             facts: wire::HarnessFacts {
                 by_file: false,
                 resumes_in_place: true,
@@ -109,10 +138,14 @@ impl Driver {
                     model: true,
                     thinking: false,
                 },
-                door: None,
+                door: Some(harness::LiveDoor::Picks),
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![
+                    harness::Act::Continue,
+                    harness::Act::Fork,
+                    harness::Act::New,
+                ],
                 touches: false,
             },
             hooks: hooks::table(),
@@ -171,6 +204,61 @@ impl Program for Driver {
                 result(mcp::list(&place.home, &place.root, steery_sdk::params(params)?).await?)
             }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HELD => {
+                let held: harness::Held = steery_sdk::params(params)?;
+                let root = &self.place()?.root;
+                match self.live.held(root, &held.external_id).await {
+                    Some(holder) => result(harness::HeldBy::Holder(holder)),
+                    None => result(drive::held(root, &self.store()?, held)),
+                }
+            }
+            method::SAY => result(
+                self.live
+                    .say(&self.place()?.root, steery_sdk::params(params)?)
+                    .await?,
+            ),
+            method::PICK => result(
+                self.live
+                    .pick(&self.place()?.root, steery_sdk::params(params)?)
+                    .await?,
+            ),
+            method::IDLE => result(drive::idle(&self.store()?, steery_sdk::params(params)?)),
+            method::START => result(
+                drive::start(
+                    &self.place()?.root,
+                    &self.store()?,
+                    steery_sdk::params(params)?,
+                )
+                .await?,
+            ),
+            method::TURN_READ => {
+                result(self.turns.read(&self.store()?, steery_sdk::params(params)?))
+            }
+            method::STOP => {
+                let stop: harness::Stop = steery_sdk::params(params)?;
+                match stop.holder {
+                    harness::Holder::Person {
+                        stop: harness::HolderStop::Owner(_),
+                        ..
+                    } => result(self.live.stop(&self.place()?.root, &stop).await?),
+                    _ => result(drive::stop(stop)?),
+                }
+            }
+            method::RECEIPT_MARK => result(drive::mark(steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
+            method::READER => result(drive::reader(
+                &self.place()?.root,
+                steery_sdk::params(params)?,
+            )?),
+            method::TERMINAL => {
+                let place = self.place()?;
+                result(drive::terminal(
+                    &place.home,
+                    &place.root,
+                    &self.store()?,
+                    steery_sdk::params(params)?,
+                )?)
+            }
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::MODELS => {
                 let _: wire::Empty = steery_sdk::params(params)?;
