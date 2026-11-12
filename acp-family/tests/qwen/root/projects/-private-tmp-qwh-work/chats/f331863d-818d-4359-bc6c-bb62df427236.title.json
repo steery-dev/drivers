@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "displayName": "Run the shell command: echo hi > a.txt. Then reply done. /no_think",
+  "source": "prompt",
+  "updatedAt": "2026-11-12T13:30:38.627Z"
+}

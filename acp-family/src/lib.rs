@@ -16,6 +16,7 @@ mod hermes;
 mod jsonc;
 mod kilo;
 mod opencode;
+mod qwen;
 mod turn;
 
 pub use harness::Harness;
@@ -61,5 +62,6 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             Some("turn") => turn::main(antigravity::drive::Turns, std::env::args().skip(2)).await,
             _ => steery_sdk::serve(antigravity::Driver::new).await,
         },
+        Harness::Qwen => steery_sdk::serve(|_notifier| qwen::Driver::default()).await,
     }
 }
