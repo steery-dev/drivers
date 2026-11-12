@@ -18,9 +18,9 @@ use serde_json::Value;
 use steery_driver_common::kernel;
 use steery_driver_common::program::helper;
 use steery_sdk::wire::harness::{
-    Act, Ended, Event, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked,
-    Model, Models, Read, Receipt, ReceiptFind, ReceiptMark, Sample, Sampled, Start, Stdin, Stop,
-    Stopped, Stream, Terminal, TerminalCommand, TurnLine, TurnRead, TurnState,
+    Act, Ended, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked, Model, Models,
+    Read, Receipt, ReceiptFind, ReceiptMark, Sampled, Start, Stdin, Stop, Stopped, Stream,
+    Terminal, TerminalCommand, TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
@@ -342,41 +342,7 @@ pub fn idle(store: &Store, held: Held) -> Result<Sampled, Error> {
         tail: Some(IDLE_TAIL),
     })?;
     Ok(Sampled {
-        sample: sample(&read.events),
-    })
-}
-
-/// The sample of the last turn in `events`, where it ended.
-fn sample(events: &[Event]) -> Option<Sample> {
-    let mut started_at = None;
-    let mut ended = None;
-    for event in events {
-        match event {
-            Event::TurnBegan { at, .. } => {
-                started_at = Some(*at);
-                ended = None;
-            }
-            Event::TurnEnded {
-                at, state, failure, ..
-            } => ended = Some((*at, *state, failure.as_ref().map(|f| f.line.clone()))),
-            _ => {}
-        }
-    }
-    let (ended_at, state, error) = ended?;
-    Some(Sample {
-        state: match state {
-            TurnState::Finished => Execution::Finished,
-            TurnState::Failed => Execution::Failed,
-            TurnState::Interrupted => Execution::Interrupted,
-        },
-        observed_at: shared::now(),
-        started_at,
-        ended_at: Some(ended_at),
-        model: None,
-        thinking: None,
-        error,
-        vacant: false,
-        if_unheld: true,
+        sample: shared::sample(&read.events),
     })
 }
 

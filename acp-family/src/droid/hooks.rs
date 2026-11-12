@@ -36,6 +36,32 @@ const SAYS_WAITS: u32 = 10;
 /// the runtime answers within `waits - 90`. A day.
 const ASKS_WAITS: u32 = 86_400;
 
+/// Droid's event before a tool call: the one hook that can block it.
+pub(crate) const BEFORE_CALL: &str = "PreToolUse";
+
+/// What follows `<hook> PreToolUse` in `hooks.json`. Droid runs a call whose hook exits
+/// other than 2 (1.9.0), so where Steery's hook fails (the runtime gone, the binary moved)
+/// this exits 2, Droid's block, with standard error as its reason. It does so only in a
+/// turn Steery started: `STEERY_STARTED` names a turn and the pid of droid's parent
+/// (PROTOCOL.md §3.3). Droid is the hook shell's parent, so a person's own Droid, even one
+/// that inherited the variable, runs the call as before.
+const GUARD: &str = r#" || { s=$?; p=$(ps -o ppid= -p "${PPID:-0}" | tr -d " "); case "${STEERY_STARTED:-}" in "$p":turn*) echo "Steery's hook failed (exit $s) in a turn Steery started, so the call is blocked" >&2; exit 2;; esac; exit 0; }"#;
+
+/// The command setup writes for `event`, after the runtime's `hook` command. A hook other
+/// than the call's says nothing where it cannot run: Droid reads its exit of 2 as a block.
+pub(crate) fn command(hook: &str, event: &str) -> String {
+    if event == BEFORE_CALL {
+        format!("{hook} {event}{GUARD}")
+    } else {
+        format!("{hook} {event} || true")
+    }
+}
+
+/// Whether `command` is the one setup writes for [`BEFORE_CALL`], for any `hook`.
+pub(crate) fn guards(command: &str) -> bool {
+    command.ends_with(&format!(" {BEFORE_CALL}{GUARD}"))
+}
+
 /// One of Droid's hook events Steery is hooked on, by its name in `hooks.json`.
 pub(crate) struct Event {
     pub(crate) name: &'static str,
@@ -64,7 +90,7 @@ pub(crate) const EVENTS: [Event; 7] = [
     },
     // Droid reads a decision before a call, and no paragraph.
     Event {
-        name: "PreToolUse",
+        name: BEFORE_CALL,
         kind: HookKind::BeforeCall,
         says: &[],
         waits: ASKS_WAITS,

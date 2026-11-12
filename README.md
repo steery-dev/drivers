@@ -43,7 +43,7 @@ short name, its tint and its mark.
 | `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
-| `droid` | Droid | [`acp-family`](acp-family/) | observe |
+| `droid` | Droid | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -1171,7 +1171,7 @@ steery programs test target/debug/steery-driver-openclaw
 
 ## Droid: `acp-family/src/droid/`
 
-One binary, `steery-driver-droid`, at observe only, from release 1.9.0. Droid keeps everything
+One binary, `steery-driver-droid`, at observe and drive, from release 1.9.0. Droid keeps everything
 in `~/.factory`. Each conversation is one JSON-lines file under `sessions/`, in one of three
 layouts: `sessions/<folder>/<id>.jsonl` (the folder is the conversation's `cwd` with each `/`
 as `-`), `sessions/<id>.jsonl`, and `sessions/btw/<id>.jsonl` (a side question). Beside each,
@@ -1199,17 +1199,43 @@ as `-`), `sessions/<id>.jsonl`, and `sessions/btw/<id>.jsonl` (a side question).
   `decision: "block"`). A tool's document carries no call id. `SessionStart` appends Steery's
   lead to `CLAUDE_ENV_FILE`.
 - **Knowing.** `FACTORY_SESSION_ID` in the agent's shell names the conversation.
+- **Models.** Droid has no models command; `models` reads `droid exec --help`: "Available
+  Models" (the default marked `(default)`, listed first), "Custom Models" from
+  `~/.factory/settings.json`, and each Factory model's levels from "Model details". A custom
+  model lists no levels. It watches `~/.factory/settings.json`.
+- **Drive.** A turn is `droid exec -o stream-json --skip-permissions-unsafe [-s <id> | --fork
+  <id>] [-m <model>] [-r <level>] --cwd <cwd>`, the words on standard input. Each line of
+  standard output is one record that names the conversation by `session_id`: `system`/`init`
+  (the model), the person's `message` (the words went in, under the turn id the file gives),
+  `tool_call` and `tool_result` (the file's call ids), `completion` (finished) or `error`
+  (failed; `Authentication failed` is `refused`). Droid refuses an unknown model
+  (`Invalid model:`, `model-missing`) or level (`Unsupported reasoning effort`,
+  `selection-unsupported`) on standard error before any record.
+- **The gate.** Under `--auto`, Droid's own gate ends a headless turn (`Exec ended early:
+  insufficient permission`) at a call its level or its denylist does not allow: `--auto low`
+  at an `Execute`, `--auto high` at a denylisted command. So the turn runs with
+  `--skip-permissions-unsafe`, Steery's `PreToolUse` hook is its only gate, and `start` refuses
+  without that hook in `~/.factory/hooks.json`. A denied call fails and the turn goes on. Where
+  Steery's hook itself fails in a turn Steery started (`STEERY_STARTED` names Droid's parent),
+  the setup command exits 2: Droid blocks the call.
+- **Continue.** `-s` of an id Droid does not keep opens a new conversation under that id, so
+  `start` refuses an id the store lacks (`not-found`), and a gone folder (`no-place`). No
+  worktree, no `hand`. `stop` is the runtime's signals; `terminal` is `cd '<cwd>' && droid
+  --resume '<id>'`.
 
 Ran (Droid 1.9.0, `~/.local/bin/droid`, no Factory account, ollama `qwen3:1.7b` as a custom
 model): real `droid exec` conversations in `/tmp/droid-obs` (an `Execute` call, a resume, a
 fork, a failed turn, an interrupted turn, an MCP call) listed and read from `~/.factory`;
 `hook/read` over the documents Droid handed a logging hook for each event above; `setup/plan`
-and `mcp/list` against `~/.factory`.
+and `mcp/list` against `~/.factory`. For drive: `droid exec -o stream-json` turns under
+`--auto low`, `--auto high` and `--skip-permissions-unsafe`, with a hook that let the call
+run, denied it, and failed; a resume, a fork, a killed turn, an unknown model and level, and a Factory model
+signed out. `fixtures/droid/turns` holds those records.
 
 Not verified: sub-agents (`Task`, `SubagentStop`), compaction (`PreCompact`), a `Notification`
 document (none fired in `droid exec`), the `sessions/<id>.jsonl` and `sessions/btw/` layouts
 (read from the store's shape, no real file), which of several same-named MCP servers Droid
-loads, and the installer on a host without Droid.
+loads, the installer on a host without Droid, and any turn on a Factory model (no account).
 
 ```sh
 cd acp-family && cargo build
