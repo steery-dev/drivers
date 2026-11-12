@@ -222,5 +222,116 @@ async fn reads_the_chats_qwen_wrote() {
     let fold = ask(&client, method::SESSIONS_FOLD, json!({"harness": "qwen"})).await;
     assert!(fold.is_err());
 
+    hooks(&client).await;
+
     let _ = std::fs::remove_dir_all(&home);
+}
+
+/// Each document Qwen Code 0.27.2 handed its hooks in the fixture's ACP conversation reads
+/// as its moment, and each answer prints as Qwen parses it.
+async fn hooks(client: &Client) {
+    let documents = include_str!("qwen/hooks/documents.tsv");
+    let mut said = Vec::new();
+    for line in documents.lines() {
+        let (event, document) = line.split_once('\t').unwrap();
+        let params = json!({"event": event, "document": document, "env": {}});
+        let moment = ask(client, method::HOOK_READ, params).await.unwrap()["moment"].clone();
+        assert_eq!(moment["external_id"], TWO_PROMPTS, "{event}");
+        assert_eq!(moment["cwd"], "/tmp/qwh/work", "{event}");
+        assert!(moment["at"].is_u64(), "{event}");
+        said.push(moment);
+    }
+    let shape: Vec<String> = said
+        .iter()
+        .map(|moment| {
+            let mut line = moment["event"].as_str().unwrap().to_owned();
+            if let Some(call) = moment["call"]["id"].as_str() {
+                line += &format!(" {call} {}", moment["call"]["group"].as_str().unwrap());
+            }
+            if let Some(ok) = moment["ok"].as_bool() {
+                line += &format!(" ok={ok}");
+            }
+            line
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "SessionStart",
+            "Notification",
+            "UserPromptSubmit",
+            "Stop",
+            "UserPromptSubmit",
+            "PreToolUse call_ina3yuq4 files-edit",
+            "PreToolUse call_yfsm13l1 files-edit",
+            "PostToolUseFailure call_ina3yuq4 files-edit ok=false",
+            "PostToolUseFailure call_yfsm13l1 files-edit ok=false",
+            "PreToolUse call_x5bkxwf5 files-read",
+            "PostToolUse call_x5bkxwf5 files-read ok=true",
+            "Stop",
+            "SessionEnd",
+        ]
+    );
+    assert_eq!(said[0]["model"], "qwen3:1.7b");
+    assert!(
+        said[0]["transcript"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("chats/{TWO_PROMPTS}.jsonl"))
+    );
+    assert_eq!(said[2]["prompt"], "Reply with the single word: pong /no_think");
+    assert_eq!(said[3]["outcome"], "finished");
+    assert_eq!(said[3]["continued"], false);
+    assert!(said[3]["context_left"].as_f64().unwrap() > 0.99);
+    assert_eq!(said[12]["person_exited"], true);
+    let unhooked = json!({"event": "MessageDisplay", "document": "{\"session_id\":\"x\"}", "env": {}});
+    assert_eq!(
+        ask(client, method::HOOK_READ, unhooked).await.unwrap()["moment"],
+        Value::Null
+    );
+
+    let answer = |event: &str, answer: Value| {
+        let params = json!({"event": event, "document": "{}", "env": {}, "answer": answer});
+        async move { ask(client, method::HOOK_ANSWER, params).await }
+    };
+    let printed = |answered: Result<Value, String>| {
+        let answered = answered.unwrap();
+        assert_eq!(answered["exit_code"], 0, "{answered}");
+        let stdout = answered["stdout"].as_str().unwrap();
+        (!stdout.is_empty()).then(|| serde_json::from_str::<Value>(stdout).unwrap())
+    };
+    assert_eq!(
+        printed(answer("PreToolUse", json!({"decision": {"deny": {"reason": "not now"}}})).await),
+        Some(json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "not now",
+        }}))
+    );
+    assert_eq!(
+        printed(answer("PreToolUse", json!({"decision": {"allow": {"reason": "ok"}}})).await),
+        None
+    );
+    assert_eq!(
+        printed(answer("PostToolUse", json!({"say": "Words wait."})).await),
+        Some(json!({"hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": "Words wait.",
+        }}))
+    );
+    assert_eq!(
+        printed(answer("Stop", json!({"say": "Go on."})).await),
+        Some(json!({"decision": "block", "reason": "Go on."}))
+    );
+    assert_eq!(
+        printed(answer("SessionStart", json!({"lead": "qwen:k1"})).await),
+        None
+    );
+    for (event, refused) in [
+        ("Notification", json!({"say": "Words wait."})),
+        ("Stop", json!({"decision": {"deny": {"reason": "no"}}})),
+    ] {
+        let error = answer(event, refused).await.unwrap_err();
+        assert!(error.contains("Qwen Code does not"), "{event}: {error}");
+    }
 }

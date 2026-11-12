@@ -3,6 +3,7 @@
 //! its hooks' moments and lists the MCP servers it loads.
 
 mod events;
+mod hooks;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -125,7 +126,7 @@ impl Driver {
                 acts: Vec::<harness::Act>::new(),
                 touches: false,
             },
-            hooks: Vec::new(),
+            hooks: hooks::table(),
         }
     }
 }
@@ -169,6 +170,8 @@ impl Program for Driver {
                     "Qwen Code has no plugin door that sends its records",
                 ))
             }
+            method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             _ => Err(Error::Unknown),
         }
     }
