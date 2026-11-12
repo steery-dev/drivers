@@ -1128,8 +1128,9 @@ character that is not a letter or a digit as `-`), with `<id>.title.json` beside
   - The driver finds each daemon by its record, `daemon-<port>.json` in `$QWEN_RUNTIME_DIR/daemon`
     or `<root>/daemon`. A daemon with `--require-auth` takes the token of
     `daemon-<port>-<pid>.token` beside the record, else `QWEN_SERVER_TOKEN`.
-  - `held`: the daemon whose `GET /session/<id>/status` answers 200 holds it. Its stop is
-    `owner`, with the running prompt's id. Else Drive's `held`.
+  - `held`: the daemon whose `GET /session/<id>/status` answers 200 holds it. The driver asks
+    every daemon at once and takes the first 200; a daemon that never answers costs at most
+    2 s. Its stop is `owner`, with the running prompt's id. Else Drive's `held`.
   - `say`: `steer` while a turn runs is `POST /session/<id>/mid-turn-message`: the daemon
     puts the words in at the turn's next step, else runs them as their own turn. `queue`, and
     `steer` where nothing runs, is `POST /session/<id>/prompt`, which waits behind any prompt
@@ -1138,9 +1139,10 @@ character that is not a letter or a digit as `-`), with `<id>.title.json` beside
   - `pick`: `POST /session/<id>/model` with `qwen.session.modelPersistDefault: false`, so the
     person's default stays. A model the daemon does not know is refused `model-missing`. A
     thinking level is refused `selection-unsupported`.
-  - `stop`: `POST /session/<id>/cancel`, where the token still names the prompt that runs,
-    or the named say went into it (else `other-turn`). Words that wait stay, and the next of
-    them starts.
+  - `stop`: `POST /session/<id>/cancel`, where the token still names the prompt that runs
+    (else `stopped: false`), or the named say went into it (else `other-turn`). The cancel
+    names no prompt: a turn that ends between the check and the cancel lets it reach the
+    next one. Words that wait stay, and the next of them starts.
   - `session/changed`: the daemon's `GET /session/<id>/events`. `turn_complete` settles a
     turn's says, `mid_turn_message_injected` adds steered says to the running turn,
     `tool_call` and `tool_call_update` are calls, `usage_update` is `context_left`, and

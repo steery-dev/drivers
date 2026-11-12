@@ -32,6 +32,10 @@ const VIEWED_EVERY: Duration = Duration::from_secs(5);
 /// How long a stop waits for the turn to end: inside the runtime's 2.8 s for `stop`
 /// (PROTOCOL.md §7).
 const STOPPED_WITHIN: Duration = Duration::from_millis(2500);
+/// How long each daemon has to say whether it runs a conversation. All are asked at once and
+/// the first to answer 200 wins, so a daemon that accepts and never answers costs `held` and
+/// `say` at most this, inside the runtime's 10 s for them (PROTOCOL.md §7).
+const PROBED_WITHIN: Duration = Duration::from_secs(2);
 /// How many ended calls, settled turns and finished prompts a fold keeps.
 const ENDED: usize = 64;
 const SETTLED: usize = 16;
@@ -84,56 +88,47 @@ impl Live {
         {
             return Some(Arc::clone(session));
         }
-        for daemon in door::daemons(home, root) {
-            let Ok(status) = daemon.get(&format!("/session/{id}/status")).await else {
-                continue;
-            };
-            if status.status != 200 {
-                continue;
+        let (daemon, status) = loaded(door::daemons(home, root), id).await?;
+        let session = Arc::new(Session {
+            workspace: status["workspaceCwd"].as_str().map(str::to_owned),
+            daemon,
+            id: id.to_owned(),
+            ended: AtomicBool::new(false),
+            poke: Notify::new(),
+            shut: Notify::new(),
+            fold: Mutex::default(),
+        });
+        let (opened, open) = oneshot::channel();
+        let (live, reading) = (Arc::clone(self), Arc::clone(&session));
+        tokio::spawn(async move {
+            let path = format!("/session/{}/events", reading.id);
+            let events = reading.daemon.events(
+                &path,
+                || {
+                    let _ = opened.send(());
+                },
+                |event| live.event(&reading, &event),
+            );
+            tokio::select! {
+                _ = events => {}
+                () = reading.shut.notified() => {}
             }
-            let status = status.json().unwrap_or_default();
-            let session = Arc::new(Session {
-                workspace: status["workspaceCwd"].as_str().map(str::to_owned),
-                daemon,
-                id: id.to_owned(),
-                ended: AtomicBool::new(false),
-                poke: Notify::new(),
-                shut: Notify::new(),
-                fold: Mutex::default(),
-            });
-            let (opened, open) = oneshot::channel();
-            let (live, reading) = (Arc::clone(self), Arc::clone(&session));
-            tokio::spawn(async move {
-                let path = format!("/session/{}/events", reading.id);
-                let events = reading.daemon.events(
-                    &path,
-                    || {
-                        let _ = opened.send(());
-                    },
-                    |event| live.event(&reading, &event),
-                );
-                tokio::select! {
-                    _ = events => {}
-                    () = reading.shut.notified() => {}
-                }
-                live.closed(&reading).await;
-            });
-            if tokio::time::timeout(Duration::from_secs(2), open)
-                .await
-                .is_err()
-            {
-                session.ended.store(true, Ordering::Relaxed);
-                session.shut.notify_one();
-                continue;
-            }
-            session.lock().model = session.model().await;
-            session.refresh(self).await;
-            followed.insert(id.to_owned(), Arc::clone(&session));
-            let (live, asking) = (Arc::clone(self), Arc::clone(&session));
-            tokio::spawn(async move { live.ask_loop(&asking).await });
-            return Some(session);
+            live.closed(&reading).await;
+        });
+        if tokio::time::timeout(Duration::from_secs(2), open)
+            .await
+            .is_err()
+        {
+            session.ended.store(true, Ordering::Relaxed);
+            session.shut.notify_one();
+            return None;
         }
-        None
+        session.lock().model = session.model().await;
+        session.refresh(self).await;
+        followed.insert(id.to_owned(), Arc::clone(&session));
+        let (live, asking) = (Arc::clone(self), Arc::clone(&session));
+        tokio::spawn(async move { live.ask_loop(&asking).await });
+        Some(session)
     }
 
     /// One event of the conversation.
@@ -580,6 +575,15 @@ struct Taken {
     at: u64,
 }
 
+/// A prompt that ended.
+struct Finished {
+    prompt: String,
+    /// Where the driver saw it run: the `began_at` of its `turn`.
+    began_at: Option<u64>,
+    at: u64,
+    failure: Option<String>,
+}
+
 /// What the daemon's events and answers said of one conversation.
 #[derive(Default)]
 struct Fold {
@@ -590,9 +594,10 @@ struct Fold {
     says: HashMap<String, Vec<Taken>>,
     /// Says that steer, by their message, until a turn takes them.
     steered: HashMap<String, Taken>,
-    /// The prompts that ended lately, and the failure of each, so a say whose prompt ended
-    /// before its answer came still settles.
-    finished: VecDeque<(String, u64, Option<String>)>,
+    /// The prompts that ended lately, with when each began where the driver saw it run, when
+    /// it ended and its failure, so a say whose prompt ended before its answer came still
+    /// settles.
+    finished: VecDeque<Finished>,
     /// The failure of a prompt that runs.
     failures: HashMap<String, String>,
     model: Option<String>,
@@ -655,9 +660,9 @@ impl Fold {
             say: say.to_owned(),
             at,
         };
-        if let Some((_, ended, failure)) = self.finished.iter().find(|(done, ..)| done == prompt) {
-            let (ended, failure) = (*ended, failure.clone());
-            self.settle(vec![taken], ended, failure);
+        if let Some(done) = self.finished.iter().find(|done| done.prompt == prompt) {
+            let (began_at, ended, failure) = (done.began_at, done.at, done.failure.clone());
+            self.settle(vec![taken], began_at, ended, failure);
             return;
         }
         self.says.entry(prompt.to_owned()).or_default().push(taken);
@@ -706,20 +711,25 @@ impl Fold {
 
     /// Prompt `prompt` ended: its says settle, and its calls end.
     fn finished(&mut self, prompt: &str, at: u64) {
-        if prompt.is_empty() || self.finished.iter().any(|(done, ..)| done == prompt) {
+        if prompt.is_empty() || self.finished.iter().any(|done| done.prompt == prompt) {
             return;
         }
         let failure = self.failures.remove(prompt);
-        self.finished
-            .push_back((prompt.to_owned(), at, failure.clone()));
+        let began_at = self
+            .running
+            .as_ref()
+            .filter(|(running, _)| running == prompt)
+            .map(|(_, began_at)| *began_at);
+        self.finished.push_back(Finished {
+            prompt: prompt.to_owned(),
+            began_at,
+            at,
+            failure: failure.clone(),
+        });
         if self.finished.len() > FINISHED {
             self.finished.pop_front();
         }
-        if self
-            .running
-            .as_ref()
-            .is_some_and(|(running, _)| running == prompt)
-        {
+        if began_at.is_some() {
             self.running = None;
             for call in std::mem::take(&mut self.calls) {
                 self.end(call.id, at);
@@ -727,7 +737,7 @@ impl Fold {
             self.dialogs.clear();
         }
         let says = self.says.remove(prompt).unwrap_or_default();
-        self.settle(says, at, failure);
+        self.settle(says, began_at, at, failure);
     }
 
     /// What the daemon answered: the prompt that runs, and whether words wait. A prompt that
@@ -746,10 +756,13 @@ impl Fold {
         }
     }
 
-    fn settle(&mut self, says: Vec<Taken>, at: u64, error: Option<String>) {
-        let Some(began_at) = says.iter().map(|taken| taken.at).min() else {
+    /// The says of one turn settle, at the time the turn began where the driver saw it run (the
+    /// `began_at` its `turn` carried), else when its first say went in.
+    fn settle(&mut self, says: Vec<Taken>, began_at: Option<u64>, at: u64, error: Option<String>) {
+        let Some(first) = says.iter().map(|taken| taken.at).min() else {
             return;
         };
+        let began_at = began_at.unwrap_or(first);
         self.settled.push_back(LiveSettled {
             began_at,
             at,
@@ -821,6 +834,30 @@ fn base_model(id: &str) -> String {
         .and_then(|rest| rest.split_once('|'))
         .map_or(bare, |(_, model)| model)
         .to_owned()
+}
+
+/// The daemon that runs conversation `id`, with its status: the first to answer 200. Every
+/// daemon is asked at once, each within [`PROBED_WITHIN`]; a conversation runs in one daemon.
+async fn loaded(daemons: Vec<Daemon>, id: &str) -> Option<(Daemon, Value)> {
+    let path = format!("/session/{id}/status");
+    let mut asked = tokio::task::JoinSet::new();
+    for daemon in daemons {
+        let path = path.clone();
+        asked.spawn(async move {
+            match tokio::time::timeout(PROBED_WITHIN, daemon.get(&path)).await {
+                Ok(Ok(answer)) if answer.status == 200 => {
+                    Some((daemon, answer.json().unwrap_or_default()))
+                }
+                _ => None,
+            }
+        });
+    }
+    while let Some(answer) = asked.join_next().await {
+        if let Ok(Some(found)) = answer {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn no_door() -> Error {
