@@ -159,6 +159,14 @@ impl Store {
         }
     }
 
+    /// The chat file of the conversation `id` names, and the folder it ran in, as its
+    /// records say.
+    pub fn find(&self, id: &str) -> Result<(PathBuf, Option<PathBuf>), Error> {
+        let index = self.index();
+        let conversation = index.conversation(id)?;
+        Ok((conversation.file.clone(), conversation.head.cwd.clone()))
+    }
+
     /// `sessions/locate`.
     pub fn locate(&self, locate: Locate) -> Result<Located, Error> {
         let index = self.index();
