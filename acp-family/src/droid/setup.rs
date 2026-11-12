@@ -117,6 +117,8 @@ pub(crate) fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
                 "type": "http",
                 "url": setup.mcp_url,
                 "headers": {"Steery-Harness": "droid"},
+                // Milliseconds, per tool call: a Steery ask waits on its person.
+                "timeout": u64::from(setup.timeout) * 1_000,
             }),
             carries: vec![Part::Mcp],
         },
