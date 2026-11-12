@@ -26,14 +26,28 @@ fn home() -> PathBuf {
     home
 }
 
+/// Copies the fixture, giving each chat the file time Qwen left on it: its last record's
+/// `timestamp`. A checkout gives every file the same time, and the listing orders by it.
 fn copy(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap().flatten() {
         let target = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             copy(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
+            continue;
+        }
+        std::fs::copy(entry.path(), &target).unwrap();
+        if target.extension().is_some_and(|extension| extension == "jsonl") {
+            let text = std::fs::read_to_string(&target).unwrap();
+            let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            let at = chrono::DateTime::parse_from_rfc3339(last["timestamp"].as_str().unwrap())
+                .unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_modified(at.into())
+                .unwrap();
         }
     }
 }
@@ -121,8 +135,8 @@ async fn reads_the_chats_qwen_wrote() {
         .iter()
         .map(|session| session["external_id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, [REFUSED, FAILED_SHELL, COMPRESSED, TWO_PROMPTS]);
-    let two = &sessions[3];
+    assert_eq!(ids, [TWO_PROMPTS, COMPRESSED, FAILED_SHELL, REFUSED]);
+    let two = &sessions[0];
     assert_eq!(two["cwd"], "/tmp/qwh/work");
     assert_eq!(
         two["transcripts"][0].as_str().unwrap(),
@@ -134,7 +148,7 @@ async fn reads_the_chats_qwen_wrote() {
             .unwrap()
             .starts_with("Reply with the single word: pong")
     );
-    assert_eq!(sessions[0]["cwd"], "/private/tmp/qwtest");
+    assert_eq!(sessions[3]["cwd"], "/private/tmp/qwtest");
 
     let located = ask(
         &client,
