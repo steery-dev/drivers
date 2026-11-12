@@ -47,6 +47,13 @@ pub struct Head {
     person: bool,
 }
 
+impl Head {
+    /// The folder the conversation ran in, as its first record says.
+    pub fn cwd(&self) -> Option<&Path> {
+        self.cwd.as_deref()
+    }
+}
+
 impl Store {
     pub fn new(root: &Path) -> Self {
         Self {

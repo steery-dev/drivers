@@ -131,8 +131,7 @@ pub(crate) fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         },
     ];
     // One group per event with no `matcher`, which matches every tool, beside whatever the
-    // person hooked there. Droid reads an exit of 2 as a block, so a hook whose command
-    // cannot run says nothing instead. Its `timeout` is in seconds.
+    // person hooked there ([`super::hooks::command`]). Its `timeout` is in seconds.
     entries.extend(super::hooks::EVENTS.iter().map(|event| Entry {
         path: hooks.clone(),
         format: Format::Json,
@@ -140,11 +139,32 @@ pub(crate) fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         value: json!({
             "hooks": [{
                 "type": "command",
-                "command": format!("{} {} || true", setup.hook, event.name),
+                "command": super::hooks::command(&setup.hook, event.name),
                 "timeout": event.waits,
             }],
         }),
         carries: vec![Part::Hooks],
     }));
     entries
+}
+
+/// Whether Steery's `PreToolUse` hook is in `~/.factory/hooks.json`, on every tool: a group
+/// with no `matcher` that runs the command setup writes ([`super::hooks::guards`]). A turn
+/// Steery starts runs with `--skip-permissions-unsafe`, so this hook is its only gate.
+pub(crate) fn gated(root: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root.join("hooks.json")) else {
+        return false;
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    document[super::hooks::BEFORE_CALL]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|group| group.get("matcher").is_none())
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .any(|hook| {
+            hook["type"] == "command" && hook["command"].as_str().is_some_and(super::hooks::guards)
+        })
 }

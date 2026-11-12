@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
-use steery_sdk::client::Client;
+use steery_sdk::client::{CallError, Client};
 use steery_sdk::{method, wire};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -504,4 +504,232 @@ async fn plans_an_install_or_an_update() {
     );
     assert_eq!(plan["entries"], json!([]));
     let _ = std::fs::remove_dir_all(&old);
+}
+
+/// Each line of a recorded turn of `fixtures/droid/turns/<name>`, read in order as one run
+/// on `stream`.
+async fn turn(client: &Client, name: &str, stream: &str) -> Vec<Value> {
+    let text = std::fs::read_to_string(fixtures().join("turns").join(name)).unwrap();
+    let mut read = Vec::new();
+    for line in text.lines() {
+        read.push(
+            call(
+                client,
+                method::TURN_READ,
+                json!({"turn": name, "stream": stream, "line": line}),
+            )
+            .await,
+        );
+    }
+    read
+}
+
+/// Steery lists the models `droid exec --help` 1.9.0 printed, plans Droid's turns only
+/// behind its own `PreToolUse` hook, and reads what `droid exec -o stream-json` wrote: a
+/// turn whose call ran, one whose call Steery's hook denied, one Factory refused signed out,
+/// and Droid's refusals of a model and a thinking level it does not run.
+#[tokio::test]
+async fn starts_and_reads_droid_turns() {
+    let home = home("drive", None);
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let droid = bin.join("droid");
+    let help = fixtures().join("turns/exec-help.txt");
+    std::fs::write(
+        &droid,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in exec) cat '{}';; *) echo droid 1.9.0;; esac\n",
+            help.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&droid, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let client = start(&home).await;
+    let ask = |params: Value| {
+        let client = &client;
+        async move { client.call(method::START, params, WAIT).await }
+    };
+    let cwd = std::env::temp_dir();
+    let new = json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false});
+
+    let models = call(&client, method::MODELS, json!({})).await;
+    let listed = models["models"].as_array().unwrap();
+    assert_eq!(listed[0]["model"], "gpt-6.1-sol", "{models}");
+    assert_eq!(listed[0]["label"], "GPT-6.1 Sol");
+    assert_eq!(
+        listed[0]["thinking"],
+        json!(["low", "medium", "high", "xhigh", "max"])
+    );
+    let custom = listed
+        .iter()
+        .find(|model| model["model"] == "custom:Qwen3-local-0")
+        .unwrap();
+    assert_eq!(custom["label"], "Qwen3 local");
+    assert!(
+        custom
+            .get("thinking")
+            .is_none_or(|levels| levels == &json!([]))
+    );
+    assert_eq!(
+        models["watch"],
+        json!([home.join(".factory/settings.json")])
+    );
+
+    // With no Steery hook before each call, Droid would run every call unasked.
+    let ungated = ask(new.clone()).await.unwrap_err();
+    assert!(
+        matches!(&ungated, CallError::Refused { word, line: Some(line) }
+            if word == "refused" && line.contains("PreToolUse")),
+        "{ungated:?}"
+    );
+    let plan = call(&client, method::SETUP_PLAN, setup()).await;
+    let gate = plan["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["at"] == "/PreToolUse/-")
+        .unwrap();
+    std::fs::write(
+        home.join(".factory/hooks.json"),
+        json!({"PreToolUse": [gate["value"]]}).to_string(),
+    )
+    .unwrap();
+
+    let launched = ask(new.clone()).await.unwrap();
+    assert_eq!(
+        launched["argv"],
+        json!([
+            droid,
+            "exec",
+            "-o",
+            "stream-json",
+            "--skip-permissions-unsafe",
+            "--cwd",
+            cwd
+        ])
+    );
+    assert_eq!(launched["stdin"], "words");
+    let resumed = ask(
+        json!({"act": "continue", "external_id": RESUMED, "cwd": cwd,
+        "folder": cwd, "worktree": false, "model": "gpt-6.1-sol", "thinking": "high"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resumed["argv"],
+        json!([
+            droid,
+            "exec",
+            "-o",
+            "stream-json",
+            "--skip-permissions-unsafe",
+            "-s",
+            RESUMED,
+            "-m",
+            "gpt-6.1-sol",
+            "-r",
+            "high",
+            "--cwd",
+            cwd
+        ])
+    );
+    let forked = ask(json!({"act": "fork", "external_id": RESUMED, "cwd": cwd,
+        "folder": cwd, "worktree": false}))
+    .await
+    .unwrap();
+    assert_eq!(forked["argv"][5], "--fork");
+    // `-s` of an id Droid does not keep opens a new conversation under it.
+    for (params, word) in [
+        (
+            json!({"act": "continue", "external_id": "00000000-0000-4000-8000-00000000abcd",
+                   "cwd": cwd, "folder": cwd, "worktree": false}),
+            "not-found",
+        ),
+        (
+            json!({"act": "continue", "external_id": RESUMED, "cwd": "/private/tmp/gone-droid",
+                   "folder": cwd, "worktree": false}),
+            "no-place",
+        ),
+        (
+            json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false,
+                   "model": "nosuch-model"}),
+            "model-missing",
+        ),
+        (
+            json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false,
+                   "model": "custom:Qwen3-local-0", "thinking": "high"}),
+            "selection-unsupported",
+        ),
+    ] {
+        let error = ask(params).await.unwrap_err().to_string();
+        assert!(error.contains(word), "{word}: {error}");
+    }
+    let terminal = call(
+        &client,
+        method::TERMINAL,
+        json!({"external_id": RESUMED, "cwd": cwd}),
+    )
+    .await;
+    assert_eq!(
+        terminal["command"],
+        format!("cd '/private/tmp/droid-obs' && droid --resume '{RESUMED}'")
+    );
+
+    let ran = turn(&client, "unsafe.stdout.jsonl", "stdout").await;
+    assert_eq!(ran[0]["named"], "479fce20-98db-4a1c-bca1-c65c9ced789f");
+    assert_eq!(ran[0]["took"], false);
+    assert_eq!(ran[0]["events"][0]["model"], "custom:Qwen3-local-0");
+    assert_eq!(ran[1]["took"], true);
+    assert_eq!(
+        ran[1]["events"][0]["turn"],
+        "aebc626b-5a1d-4091-8c13-1b263d1f4f78"
+    );
+    let events: Vec<&Value> = ran
+        .iter()
+        .flat_map(|line| line["events"].as_array())
+        .flatten()
+        .collect();
+    let began = events
+        .iter()
+        .find(|event| event["type"] == "call_began")
+        .unwrap();
+    assert_eq!(began["call"]["id"], "call_7868be9a5e4bf94b_0");
+    assert_eq!(began["call"]["input"]["command"], "echo drive-check");
+    let ended = events
+        .iter()
+        .find(|event| event["type"] == "call_ended")
+        .unwrap();
+    assert_eq!(ended["ok"], true);
+    let ends: Vec<&Value> = ran.iter().filter_map(|line| line.get("ended")).collect();
+    assert_eq!(ends, [&json!({"state": "finished"})]);
+
+    let denied = turn(&client, "denied-unsafe.stdout.jsonl", "stdout").await;
+    let ended = denied
+        .iter()
+        .flat_map(|line| line["events"].as_array())
+        .flatten()
+        .find(|event| event["type"] == "call_ended")
+        .unwrap();
+    assert_eq!(ended["ok"], false);
+    assert_eq!(ended["tail"], "Error: Steery denied it");
+    assert_eq!(
+        denied.last().unwrap()["ended"],
+        json!({"state": "finished"})
+    );
+
+    let signed_out = turn(&client, "signedout.stdout.jsonl", "stdout").await;
+    assert_eq!(signed_out[1]["refused"], "refused");
+    assert_eq!(signed_out[1]["ended"]["state"], "failed");
+    assert!(
+        signed_out[1]["ended"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Authentication failed")
+    );
+    let model = turn(&client, "badmodel.stderr", "stderr").await;
+    assert_eq!(model[0]["refused"], "model-missing");
+    let effort = turn(&client, "badeffort.stderr", "stderr").await;
+    assert_eq!(effort[0]["refused"], "selection-unsupported");
+    let _ = std::fs::remove_dir_all(&home);
 }

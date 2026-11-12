@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/private/tmp/ddh/work","session_id":"a47c94f1-2a71-4124-9bf1-c0e1ffd1d509","model":"claude-haiku-4-5-20251001","reasoning_effort":"high"}
+{"type":"error","source":"cli","message":"Error: Authentication failed. Please log in using /login or set a valid FACTORY_API_KEY environment variable.","timestamp":1794508795276,"session_id":"a47c94f1-2a71-4124-9bf1-c0e1ffd1d509"}
