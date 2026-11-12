@@ -23,6 +23,8 @@ pub enum Harness {
     Gemini,
     /// Google's Antigravity CLI, whose executable is `agy`.
     Antigravity,
+    /// OpenClaw, whose executable is `openclaw`.
+    OpenClaw,
 }
 
 impl Harness {
@@ -39,6 +41,7 @@ impl Harness {
             Self::Goose => "goose",
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
+            Self::OpenClaw => "openclaw",
         }
     }
 
@@ -55,6 +58,7 @@ impl Harness {
             Self::Goose => "Goose",
             Self::Gemini => "Gemini CLI",
             Self::Antigravity => "Antigravity",
+            Self::OpenClaw => "OpenClaw",
         }
     }
 
@@ -71,6 +75,7 @@ impl Harness {
             Self::Goose => "Go",
             Self::Gemini => "Gm",
             Self::Antigravity => "Ag",
+            Self::OpenClaw => "Ow",
         }
     }
 
@@ -87,6 +92,7 @@ impl Harness {
             Self::Goose => "#101010",
             Self::Gemini => "#4285f4",
             Self::Antigravity => "#b1502f",
+            Self::OpenClaw => "#e8453c",
         }
     }
 
