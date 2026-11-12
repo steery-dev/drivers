@@ -1003,7 +1003,8 @@ Grok's turns headless (`grok -p … --output-format streaming-messages-json`).
   `{"type": "acp"}` after a `register`.
   - A TUI joins the leader only in leader mode: `[cli] use_leader = true`, or `--leader`.
     Leader mode is off by default, and a sandbox profile turns it off. Such a window has no
-    door: `say` is refused `no-door`. `terminal` opens `grok --leader --resume <id>`.
+    door: `say` is refused `no-door`. `terminal` opens `grok --leader --resume <id>`, and
+    `setup/plan` notes this to the person, without reading the config.
   - `held`: a conversation that `active_sessions.json` names and the leader keeps resident.
     Its stop is `owner`, with the running prompt's id as the token. Else Drive's `held`.
   - The driver follows a conversation with `session/resume`, which attaches it to the
