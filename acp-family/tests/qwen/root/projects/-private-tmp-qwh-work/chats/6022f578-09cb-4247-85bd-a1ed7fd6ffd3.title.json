@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "displayName": "Use the run_shell_command tool to run: echo hi > a.txt /no_think",
+  "source": "prompt",
+  "updatedAt": "2026-11-12T13:28:32.685Z"
+}
