@@ -10,10 +10,11 @@
 //! `fork` names the one it came from.
 //!
 //! `openclaw agent` runs (`created_via` `run`) are listed: a person typed each at the CLI.
-//! A key that a sub-agent's spawn made (`spawned_by` or `parent_session_key`) is listed under
-//! the conversation that spawned it; no live store has one, so that link is read off
-//! `src/config/sessions/session-accessor.sqlite-canonical-inventory.ts:122-124` alone. Keys
-//! that cron or OpenClaw itself made (`cron`, `internal`) have no person and are excluded.
+//! So are the keys `openclaw acp` makes (`created_via` `operator`), which name the key of
+//! their requester in `parent_session_key` alone. A key that a sub-agent's spawn made
+//! (`spawned_by`, `created_via` `spawn`) is listed under the conversation that spawned it.
+//! Keys that cron or OpenClaw itself made (`cron`, `internal`) have no person and are
+//! excluded.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
@@ -25,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_driver_common::lines::BATCH;
 use steery_sdk::wire::harness::{
-    Events, Execution, List, Listed, Locate, Located, Read, Session, SubAgent,
+    Event, Events, Execution, List, Listed, Locate, Located, Read, Session, SubAgent,
 };
 use steery_sdk::{Error, refusal};
 
@@ -77,6 +78,9 @@ struct Node {
     fork_source: Option<String>,
     /// The model's context window, `entry_json.contextTokens`.
     context: Option<u64>,
+    /// Whether a run writes the key now: `entry_json.activeWriterRunId` is set, and the
+    /// `status` that the run's end writes is not.
+    writing: bool,
 }
 
 /// One agent's store, its windows chained into conversations.
@@ -103,7 +107,7 @@ impl Agent {
         {
             let mut statement = connection.prepare(
                 "SELECT session_id, session_key, previous_session_id, reason, created_at,
-                        updated_at, parent_session_key, spawned_by
+                        updated_at, spawned_by
                  FROM session_windows ORDER BY created_at, session_id",
             )?;
             let mut rows = statement.query([])?;
@@ -117,10 +121,7 @@ impl Agent {
                     updated_at: millis(row.get(5)?),
                     spawned: row
                         .get::<_, Option<String>>(6)?
-                        .is_some_and(|s| !s.is_empty())
-                        || row
-                            .get::<_, Option<String>>(7)?
-                            .is_some_and(|s| !s.is_empty()),
+                        .is_some_and(|s| !s.is_empty()),
                 };
                 order.push(window.id.clone());
                 windows.insert(window.id.clone(), window);
@@ -130,20 +131,24 @@ impl Agent {
         {
             let mut statement = connection.prepare(
                 "SELECT session_key, current_session_id, status, created_via,
-                        coalesce(nullif(spawned_by, ''), nullif(parent_session_key, '')),
+                        nullif(spawned_by, ''),
                         coalesce(nullif(label, ''), nullif(display_name, '')),
-                        fork_source_session_id, json_extract(entry_json, '$.contextTokens')
+                        fork_source_session_id, json_extract(entry_json, '$.contextTokens'),
+                        json_extract(entry_json, '$.activeWriterRunId')
                  FROM session_nodes",
             )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 let key: String = row.get(0)?;
                 let context: Option<i64> = row.get(7).ok().flatten();
+                let status: Option<String> = row.get(2)?;
+                let writer: Option<String> = row.get(8).ok().flatten();
                 nodes.insert(
                     key,
                     Node {
                         current: row.get(1)?,
-                        status: row.get(2)?,
+                        writing: status.is_none() && writer.is_some_and(|run| !run.is_empty()),
+                        status,
                         created_via: row.get(3)?,
                         parent: row.get(4)?,
                         title: row.get(5)?,
@@ -627,4 +632,112 @@ impl Store {
             after: None,
         })
     }
+
+    /// Where the conversation `id` (its first window's id) stands for a turn: none where no
+    /// listed conversation has that id.
+    pub fn standing(&self, id: &str) -> Result<Option<Standing>, Error> {
+        let Ok((agent, first)) = self.find(id) else {
+            return Ok(None);
+        };
+        if first != id || agent.spawned(&first) || agent.headless(&first) {
+            return Ok(None);
+        }
+        let newest = agent.chains[&first].last().unwrap_or(&first);
+        let key = agent.windows[newest].key.clone();
+        let node = agent.nodes.get(&key);
+        Ok(Some(Standing {
+            newest: agent.of_key(&key) == Some(&first),
+            running: node.is_some_and(|node| node.writing),
+            cwd: agent.cwd(&first),
+            key,
+        }))
+    }
+
+    /// The conversation that `openclaw acp`'s session `acp` writes, by its first window's id.
+    /// A session that the turn resumed is named by its key; one it made anew by the id that
+    /// `openclaw acp` drew, under the key `<agent>:acp-bridge:<id>` (`server.ts` `newSession`).
+    pub fn conversation(&self, acp: &str) -> Option<String> {
+        let (agent, key) = self.keyed(acp)?;
+        agent.of_key(&key).cloned()
+    }
+
+    /// Whether a run writes the conversation of `openclaw acp`'s session `acp` now.
+    pub fn writing(&self, acp: &str) -> bool {
+        self.keyed(acp)
+            .is_some_and(|(agent, key)| agent.nodes.get(&key).is_some_and(|node| node.writing))
+    }
+
+    /// The store and the key of `openclaw acp`'s session `acp`.
+    fn keyed(&self, acp: &str) -> Option<(Agent, String)> {
+        let bridged = format!(":acp-bridge:{acp}");
+        self.stores.iter().find_map(|path| {
+            let agent = Agent::load(path).ok()?;
+            let key = agent
+                .nodes
+                .keys()
+                .find(|key| key.as_str() == acp || key.ends_with(&bridged))?
+                .clone();
+            Some((agent, key))
+        })
+    }
+
+    /// How many records the conversation `id` has: the mark that `said_after` reads after.
+    pub fn last(&self, id: &str) -> Result<usize, Error> {
+        let (agent, first) = self.find(id)?;
+        Ok(agent.records(&first).map_err(failed)?.len())
+    }
+
+    /// The words of each `user` message among the conversation's records after the first
+    /// `after`.
+    pub fn said_after(&self, id: &str, after: usize) -> Result<Vec<String>, Error> {
+        let (agent, first) = self.find(id)?;
+        Ok(agent
+            .records(&first)
+            .map_err(failed)?
+            .into_iter()
+            .skip(after)
+            .filter_map(|entry| {
+                let message = entry.record.get("message")?;
+                (message.get("role").and_then(Value::as_str) == Some("user"))
+                    .then(|| events::said(message.get("content")))
+            })
+            .collect())
+    }
+
+    /// Every event of the conversation `id`'s active path, as `read` folds them.
+    pub fn events(&self, id: &str) -> Result<Vec<Event>, Error> {
+        let (agent, first) = self.find(id)?;
+        let path = active(agent.records(&first).map_err(failed)?);
+        let servers = servers(&self.root);
+        let children = agent.children();
+        let mut fold = Fold {
+            events: Vec::new(),
+            path: &path,
+            servers: &servers,
+            children: &children,
+            context: agent.node(&first).and_then(|node| node.context),
+        };
+        for index in 0..path.len() {
+            fold.entry(index);
+        }
+        Ok(fold.events)
+    }
+
+    /// The configured MCP servers' names, as OpenClaw writes them in its tools' names.
+    pub fn servers(&self) -> Vec<String> {
+        servers(&self.root)
+    }
+}
+
+/// Where a conversation stands for a turn of this driver's.
+pub struct Standing {
+    /// The key OpenClaw keeps it under, which `openclaw acp` resumes.
+    pub key: String,
+    /// Whether the key writes this conversation now. A key writes only its newest: one that
+    /// a reset left behind cannot be gone on with.
+    pub newest: bool,
+    /// Whether a run of the key writes now, which only its own client can cancel.
+    pub running: bool,
+    /// The folder its first window names.
+    pub cwd: Option<PathBuf>,
 }
