@@ -40,6 +40,7 @@ short name, its tint and its mark.
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
+| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -84,6 +85,7 @@ agrees (PROTOCOL.md §4.1).
 | `cline` | npm's global folder | `npm install --global cline`, offered where npm is on `PATH` |
 | `goose` | `GOOSE_BIN_DIR`, else `~/.local/bin` | `bash -c "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \| CONFIGURE=false bash"`, offered where bash, curl and tar are on `PATH` |
 | `gemini` | npm's global folder (`npm prefix -g`) | `npm install -g @google/gemini-cli`. Offered only where npm is here and `node --version` names 20 or newer within 5 s. Else refused, with the requirement that is missing. |
+| `qwen` | npm's global folder (`npm prefix -g`) | `npm install -g @qwen-code/qwen-code`. Offered only where npm is here and `node --version` names 22 or newer within 5 s. Else refused, with the requirement that is missing. |
 | `antigravity` | `~/.local/bin` (it adds the folder to the shell's profile) | `bash -c "curl -fsSL https://antigravity.google/cli/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -315,6 +317,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `cline` | Cline's MCP settings file: `CLINE_MCP_SETTINGS_PATH`, else `<CLINE_DIR or ~/.cline>/data/settings/cline_mcp_settings.json`. `mcpServers.<name>`, nested `transport` or flat shape. `disabled: true` off. | the same file: Cline reads none per folder | not when the file is not JSON |
 | `goose` | `/etc/goose/config.yaml`, the files `GOOSE_ADDITIONAL_CONFIG_FILES` names, then `<GOOSE_PATH_ROOT>/config` or `<XDG_CONFIG_HOME or ~/.config>/goose`'s `config.yaml`, a later file's entry over an earlier's. `extensions.<key>` of type `stdio`, `streamable_http` or `builtin`; `enabled: false` off. | the same files: Goose reads none per folder | never: plugins and recipes bring extensions |
 | `gemini` | `mcpServers` of the system defaults, `settings.json`, the system settings, and each extension's `gemini-extension.json`. `mcp.allowed`, `mcp.excluded` and `mcp-server-enablement.json` turn servers off. | `.gemini/settings.json` where `trustedFolders.json` trusts the folder. A folder not trusted lists none. | never: an administrator's remote settings |
+| `qwen` | `mcpServers` of the system defaults, `settings.json`, the system settings, `mcp.serverCommand` (named `mcp`), and each extension that `extension-enablement.json` leaves on: its `qwen-extension.json`, else its `.mcp.json`. `mcp.allowed` and `mcp.excluded` turn servers off. | `.qwen/settings.json` where the folder is trusted (`trustedFolders.json`, or folder trust off), and `.mcp.json`. These are listed only where `mcpApprovals.json` approves them under their config's hash, or `tools.approvalMode` is `yolo`. | never: servers on Qwen's command line or added in a running conversation |
 | `antigravity` | `~/.gemini/config/mcp_config.json` `mcpServers`, then each plugin's `mcp_config.json` in `~/.gemini/config/plugins/<plugin>/`, named `<plugin>_<server>`. `disabled: true` off; a plugin off where `config.json` has `plugins.<plugin>.enabled: false`. | `.agents/mcp_config.json` and `.agents/plugins/<plugin>/mcp_config.json` in the folder. The person's server wins a name both give. | never: `--add-dir` widens the workspace, a plugin installed while Antigravity runs |
 
 ## Adding a driver
