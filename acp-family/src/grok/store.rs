@@ -14,6 +14,7 @@ use super::events;
 
 const SUMMARY: &str = "summary.json";
 const UPDATES: &str = "updates.jsonl";
+const HISTORY: &str = "chat_history.jsonl";
 
 /// Grok's conversations under its root.
 pub struct Store {
@@ -187,14 +188,36 @@ impl Store {
             parent,
         )
     }
+
+    /// The folder of the conversation `id`, where Grok keeps it: a headless run's too, as a
+    /// turn Steery starts is one.
+    pub fn find(&self, id: &str) -> Result<Found, Error> {
+        let index = self.index();
+        let folder = conversation(&index, id)?;
+        Ok(Found {
+            transcript: folder.transcript(),
+            history: folder.dir.join(HISTORY),
+            parent: folder.parent.clone(),
+        })
+    }
 }
 
-/// The conversation `id` names: one with a person at it.
+/// Where a conversation's files are, and the conversation it was forked from.
+pub struct Found {
+    /// `updates.jsonl`.
+    pub transcript: PathBuf,
+    /// `chat_history.jsonl`.
+    pub history: PathBuf,
+    pub parent: Option<String>,
+}
+
+/// The conversation `id` names: any but a sub-agent's run. A headless run is one by its id
+/// (a turn Steery starts is headless), though `list` excludes it.
 fn conversation<'a>(index: &'a Index, id: &str) -> Result<&'a Folder, Error> {
     index
         .by_id
         .get(id)
-        .filter(|folder| !folder.headless() && !folder.sub_agent())
+        .filter(|folder| !folder.sub_agent())
         .ok_or_else(|| not_found(id))
 }
 
