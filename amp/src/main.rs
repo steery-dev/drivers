@@ -104,7 +104,7 @@ impl Program for Amp {
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         match method {
             method::SETUP_PLAN => {
-                result(setup::plan(self.home()?, steery_sdk::params(params)?, self.needs()).await)
+                result(setup::plan(self.home()?, steery_sdk::params(params)?, self.needs()).await?)
             }
             method::SESSIONS_LIST => {
                 let asked: harness::List = steery_sdk::params(params)?;
@@ -118,7 +118,7 @@ impl Program for Amp {
                 let _: harness::Fold = steery_sdk::params(params)?;
                 Err(Error::refused(
                     refusal::SELECTION_UNSUPPORTED,
-                    "Amp has no plugin door that sends its records",
+                    "Amp's plugin sends no entries: the driver reads threads through Amp's CLI",
                 ))
             }
             method::MCP_LIST => result(mcp::list(self.home()?, steery_sdk::params(params)?).await?),
@@ -139,7 +139,7 @@ impl Program for Amp {
             method::READER => result(drive::reader(steery_sdk::params(params)?)?),
             method::TERMINAL => result(drive::terminal(steery_sdk::params(params)?).await?),
             // `hook/read` and `hook/answer` (no hook is declared), `reader/read` (`reader`
-            // refuses), and every method of live, which the levels rule out.
+            // refuses), and every method of live, which Steery's plugin door answers.
             _ => Err(Error::Unknown),
         }
     }
@@ -148,7 +148,7 @@ impl Program for Amp {
 /// Amp as Steery reads it.
 fn info() -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe, wire::Level::Drive],
+        levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some(UPDATE.into()),
@@ -171,8 +171,8 @@ fn info() -> wire::HarnessInfo {
             call_bound: None,
         },
         reader: None,
-        // A continue runs in the same thread, in the mode it began in; Amp has no fork, no
-        // door, and no thinking pick.
+        // A continue runs in the same thread, in the mode it began in; Amp has no fork and no
+        // thinking pick. Live goes through Steery's plugin, which every `amp` process loads.
         facts: wire::HarnessFacts {
             touches: false,
             by_file: false,
@@ -182,7 +182,7 @@ fn info() -> wire::HarnessInfo {
                 model: true,
                 thinking: false,
             },
-            door: None,
+            door: Some(harness::LiveDoor::Plugin),
             checks_idle: false,
             worktrees: false,
             acts: vec![harness::Act::Continue, harness::Act::New],

@@ -280,10 +280,16 @@ async fn amp_drives_a_turn_and_reads_its_lines() {
     .unwrap();
     assert_eq!(
         &new["argv"].as_array().unwrap()[1..],
-        json!(["-x", "--stream-json", "--no-archive-after-execute", "-m", "low"])
-            .as_array()
-            .unwrap()
-            .as_slice(),
+        json!([
+            "-x",
+            "--stream-json",
+            "--no-archive-after-execute",
+            "-m",
+            "low"
+        ])
+        .as_array()
+        .unwrap()
+        .as_slice(),
         "{new}"
     );
     let mut lines = Vec::new();
@@ -308,15 +314,29 @@ async fn amp_drives_a_turn_and_reads_its_lines() {
     .unwrap();
     let lines = turn("t2", again);
     assert_eq!(lines.len(), 3);
-    let took = call(&driver, method::TURN_READ, lines[1].clone()).await.unwrap();
+    let took = call(&driver, method::TURN_READ, lines[1].clone())
+        .await
+        .unwrap();
     assert_eq!(took, json!({"named": PERSON, "took": true}));
 
     for (asked, word) in [
-        (json!({"act": "continue", "external_id": PERSON, "model": "high"}), "selection-unsupported"),
+        (
+            json!({"act": "continue", "external_id": PERSON, "model": "high"}),
+            "selection-unsupported",
+        ),
         (json!({"act": "new", "model": "sonnet"}), "model-missing"),
-        (json!({"act": "new", "thinking": "high"}), "selection-unsupported"),
-        (json!({"act": "fork", "external_id": PERSON}), "selection-unsupported"),
-        (json!({"act": "continue", "external_id": "T-00000000-0000-4000-8000-00000000dead"}), "not-found"),
+        (
+            json!({"act": "new", "thinking": "high"}),
+            "selection-unsupported",
+        ),
+        (
+            json!({"act": "fork", "external_id": PERSON}),
+            "selection-unsupported",
+        ),
+        (
+            json!({"act": "continue", "external_id": "T-00000000-0000-4000-8000-00000000dead"}),
+            "not-found",
+        ),
     ] {
         let mut asked = asked;
         asked["cwd"] = json!(work);
@@ -384,7 +404,8 @@ async fn amp_drives_a_turn_and_reads_its_lines() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Signed out, the plan holds Steery's MCP entry and skill and asks for a sign-in; an Amp
+/// Signed out, the plan holds Steery's MCP entry, skill and plugin (its door filled in) and
+/// asks for a sign-in; an Amp
 /// API key that Amp takes meets the need and comes back as `AMP_API_KEY`, and one it does
 /// not is refused without the key in the line.
 #[tokio::test]
@@ -409,6 +430,15 @@ async fn amp_signed_out_needs_a_sign_in_that_a_key_gives() {
     assert_eq!(
         entries[1]["path"],
         json!(home.join(".config/amp/skills/steery/SKILL.md"))
+    );
+    assert_eq!(
+        entries[2]["path"],
+        json!(home.join(".config/amp/plugins/steery.ts"))
+    );
+    let plugin = entries[2]["value"].as_str().unwrap();
+    assert!(
+        plugin.contains(r#"const DOOR = "http://127.0.0.1:7/door";"#),
+        "{plugin}"
     );
     assert_eq!(planned["needs"][0]["id"], "sign-in", "{planned}");
 
