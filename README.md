@@ -42,6 +42,7 @@ short name, its tint and its mark.
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
+| `droid` | Droid | [`acp-family`](acp-family/) | observe |
 | `crush` | Crush | [`crush`](crush/) | observe, drive |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -88,6 +89,7 @@ agrees (PROTOCOL.md §4.1).
 | `gemini` | npm's global folder (`npm prefix -g`) | `npm install -g @google/gemini-cli`. Offered only where npm is here and `node --version` names 20 or newer within 5 s. Else refused, with the requirement that is missing. |
 | `antigravity` | `~/.local/bin` (it adds the folder to the shell's profile) | `bash -c "curl -fsSL https://antigravity.google/cli/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `openclaw` | npm's global folder, else `~/.npm-global/bin` (the installer's user prefix), else `~/.local/bin` (its git install's wrapper) | `bash -c "curl -fsSL https://openclaw.ai/install.sh \| bash -s -- --no-onboard --no-prompt"`, offered where bash and curl are on `PATH` |
+| `droid` | `~/.local/bin` | `sh -c "curl -fsSL https://app.factory.ai/cli \| sh"`, offered where curl and sh are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -128,6 +130,7 @@ signed in, as the harness itself says.
 | `gemini` | ``run `gemini` in a terminal and choose how to sign in`` | `gemini models list` lists signed in or not, so the driver reads what Gemini reads first: `security.auth.selectedType`, else the type that `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI` or `GEMINI_API_KEY` picks. No type: not signed in. Google sign-in: `oauth_creds.json` there, else not told (the Keychain). Key: `GEMINI_API_KEY` there, else not told (the Keychain). |
 | `antigravity` | ``run `agy` in a terminal and sign in with Google, or set `GEMINI_API_KEY` `` | `agy models`. Exit 0 with a list: signed in. `Please sign in` or `environment variable is not set` on standard error: not signed in. A Google sign-in lives in the system keyring, so the command is what tells. |
 | `openclaw` | ``run `openclaw onboard` in a terminal`` | `openclaw models status --json --check`. Exit 0 or 2 (a sign-in expires soon): signed in. Exit 1 (`auth.missingProvidersInUse` names the providers): not signed in. |
+| `droid` | ``run `droid` in a terminal and sign in, or set `FACTORY_API_KEY`; a custom model of your own runs without a Factory account`` | not told: a custom model in Droid's settings runs turns with no account, so the plan asks for no sign-in and only notes it |
 | `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
@@ -325,6 +328,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `gemini` | `mcpServers` of the system defaults, `settings.json`, the system settings, and each extension's `gemini-extension.json`. `mcp.allowed`, `mcp.excluded` and `mcp-server-enablement.json` turn servers off. | `.gemini/settings.json` where `trustedFolders.json` trusts the folder. A folder not trusted lists none. | never: an administrator's remote settings |
 | `antigravity` | `~/.gemini/config/mcp_config.json` `mcpServers`, then each plugin's `mcp_config.json` in `~/.gemini/config/plugins/<plugin>/`, named `<plugin>_<server>`. `disabled: true` off; a plugin off where `config.json` has `plugins.<plugin>.enabled: false`. | `.agents/mcp_config.json` and `.agents/plugins/<plugin>/mcp_config.json` in the folder. The person's server wins a name both give. | never: `--add-dir` widens the workspace, a plugin installed while Antigravity runs |
 | `openclaw` | `mcp.servers` of `<state>/openclaw.json` (comments and trailing commas read). `enabled: false` off. A server with a `command` runs it, so it keeps no URL. | the same file: OpenClaw reads none per folder | never: enabled plugins bring servers |
+| `droid` | `~/.factory/mcp.json` `mcpServers`. `disabled: true` off. | `.factory/mcp.json` in the folder and in each folder above it, the nearest ranked first. Droid loads one definition of a name given at several levels; its documentation does not say which. | never: servers its organization manages win and are not readable |
 | `crush` | `/etc/crush/crush.json`, then `<CRUSH_GLOBAL_CONFIG or XDG_CONFIG_HOME/crush or ~/.config/crush>/crush.json`, then the `crush.json` of Crush's data folder. `mcp.<name>`, a later file's fields over an earlier's. `disabled: true` off. | each folder's `crush.json`, `.crush.json`, from the project's git root down to it, then `.crush/crush.json`. The store's `mcp_disabled_servers` and `mcp_enabled_servers` over every file. | not where a `crushrc` that Crush reads exists: it is a shell script |
 
 ## Adding a driver
@@ -1189,6 +1193,53 @@ gateway's `chat.send` and `chat.abort` need an operator token, not built).
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-openclaw
 cargo test
+```
+
+## Droid: `acp-family/src/droid/`
+
+One binary, `steery-driver-droid`, at observe only, from release 1.9.0. Droid keeps everything
+in `~/.factory`. Each conversation is one JSON-lines file under `sessions/`, in one of three
+layouts: `sessions/<folder>/<id>.jsonl` (the folder is the conversation's `cwd` with each `/`
+as `-`), `sessions/<id>.jsonl`, and `sessions/btw/<id>.jsonl` (a side question). Beside each,
+`<id>.settings.json` holds its model and the tokens it spent.
+
+- **Conversations.** The first record, `session_start`, gives the title, the folder, and in a
+  fork `parent` and `forkedAtMessageId`. A fork reads as its own conversation beside its
+  source, its `parent` named. Each `message` names its parent by `parentId`; a turn runs from a
+  person's prompt (a user message with `interactionMode`) to its `agent_turn_outcome`, matched
+  by `turnId`. `model_provider_unreachable` and other failed outcomes fail the turn; a turn
+  with no outcome whose file stood still for 60 s reads as interrupted. A resumed conversation
+  appends to its own file. `llm_only` and `context-…` messages (the system reminders Droid
+  sends the model) are not the person's words. A file with no person's prompt is excluded.
+- **Setup.** Entries the runtime writes:
+  - Steery's MCP server at `/mcpServers/steery` of `~/.factory/mcp.json`.
+  - One hook per event below in `~/.factory/hooks.json`, beside the person's own. Droid runs
+    the user's hooks in every folder, with no trust prompt.
+  - Steery's skill in `~/.factory/skills/steery/SKILL.md`.
+  - No `droid`: Factory's installer, `curl -fsSL https://app.factory.ai/cli | sh`. Older than
+    1.9.0: refused, with `droid update`.
+- **Hooks.** `SessionStart`, `UserPromptSubmit`, `PreToolUse` (asks), `PostToolUse`,
+  `Notification`, `Stop`, `SessionEnd`. Each document comes on standard input in Claude Code's
+  shape (`session_id`, `transcript_path`, `cwd`, `hook_event_name`, …); the answer is printed
+  in Claude Code's shape too (`hookSpecificOutput.permissionDecision`, `additionalContext`,
+  `decision: "block"`). A tool's document carries no call id. `SessionStart` appends Steery's
+  lead to `CLAUDE_ENV_FILE`.
+- **Knowing.** `FACTORY_SESSION_ID` in the agent's shell names the conversation.
+
+Ran (Droid 1.9.0, `~/.local/bin/droid`, no Factory account, ollama `qwen3:1.7b` as a custom
+model): real `droid exec` conversations in `/tmp/droid-obs` (an `Execute` call, a resume, a
+fork, a failed turn, an interrupted turn, an MCP call) listed and read from `~/.factory`;
+`hook/read` over the documents Droid handed a logging hook for each event above; `setup/plan`
+and `mcp/list` against `~/.factory`.
+
+Not verified: sub-agents (`Task`, `SubagentStop`), compaction (`PreCompact`), a `Notification`
+document (none fired in `droid exec`), the `sessions/<id>.jsonl` and `sessions/btw/` layouts
+(read from the store's shape, no real file), which of several same-named MCP servers Droid
+loads, and the installer on a host without Droid.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-droid
 ```
 
 ## Amp: `amp/`
