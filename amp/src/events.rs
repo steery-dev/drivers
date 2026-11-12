@@ -56,7 +56,7 @@ struct Cursor {
 }
 
 /// `thread`'s events after `cursor`, or its newest within `tail` bytes.
-fn fold(thread: &Value, cursor: Option<&str>, tail: Option<u64>) -> Events {
+pub(crate) fn fold(thread: &Value, cursor: Option<&str>, tail: Option<u64>) -> Events {
     let empty = Vec::new();
     let messages = thread
         .get("messages")

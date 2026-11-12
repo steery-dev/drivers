@@ -42,18 +42,26 @@ const LINK_WITHIN: Duration = Duration::from_secs(15);
 /// How long Amp has to list one thread with a key given: inside `needs/give`'s 30 s.
 const KEY_WITHIN: Duration = Duration::from_secs(20);
 
-/// Whether Amp is signed out here: no `AMP_API_KEY`, and `amp threads list --json --limit 1`
-/// exits 1 saying so within the probe's time. Amp that does not answer in time, or fails
-/// otherwise (offline), is not called signed out.
+/// Whether Amp is signed out here: no `AMP_API_KEY`, and Amp says so ([`signed_in`]).
 pub async fn signed_out(binary: &std::path::Path) -> bool {
     if std::env::var_os(KEY).is_some_and(|key| !key.is_empty()) {
         return false;
     }
+    signed_in(binary).await == Some(false)
+}
+
+/// What Amp says of its account here: `amp threads list --json --limit 1` lists (true), or
+/// exits 1 saying to sign in (false), within the probe's time. Amp that does not answer in
+/// time, or fails otherwise (offline), says nothing.
+pub async fn signed_in(binary: &std::path::Path) -> Option<bool> {
     let mut command = helper(binary);
     command.args(["threads", "list", "--json", "--limit", "1"]);
-    ask(command)
-        .await
-        .is_ok_and(|answer| answer.code == Some(1) && answer.said.contains(SIGNED_OUT))
+    let answer = ask(command).await.ok()?;
+    match answer.code {
+        Some(0) => Some(true),
+        Some(1) if answer.said.contains(SIGNED_OUT) => Some(false),
+        _ => None,
+    }
 }
 
 /// The need, where Amp is found here and signed out.
