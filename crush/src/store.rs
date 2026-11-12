@@ -286,10 +286,14 @@ impl Store {
     }
 
     /// The store that keeps `id`, a lead's or a sub-agent's: the file a Crush that has the
-    /// session's project open holds.
-    pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
-        let (db, _) = self.find(id)?;
-        Ok(db.project.db())
+    /// session's project open holds. None where no store keeps it.
+    pub fn transcript(&self, id: &str) -> Result<Option<PathBuf>, Error> {
+        for db in self.dbs() {
+            if db.row(id)?.is_some() {
+                return Ok(Some(db.project.db()));
+            }
+        }
+        Ok(None)
     }
 
     /// The folder of the project that keeps `id`.

@@ -112,22 +112,26 @@ async fn turn(home: &Path, binary: &Path, args: Vec<String>) -> Result<ExitCode,
     let mut terminate = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut session: Option<String> = None;
     let mut kept: Vec<String> = Vec::new();
+    let mut keep = |line: String, session: &mut Option<String>| {
+        if session.is_none()
+            && let Some(id) = named(&line)
+        {
+            *session = Some(id.to_owned());
+            say(&Line {
+                named: session.clone(),
+                ..Line::default()
+            });
+        }
+        kept.push(line);
+        if kept.len() > KEPT {
+            kept.remove(0);
+        }
+    };
     let mut open = true;
     let status = loop {
         tokio::select! {
             line = log.next_line(), if open => match line {
-                Ok(Some(line)) => {
-                    if session.is_none()
-                        && let Some(id) = named(&line)
-                    {
-                        session = Some(id.to_owned());
-                        say(&Line { named: session.clone(), ..Line::default() });
-                    }
-                    kept.push(line);
-                    if kept.len() > KEPT {
-                        kept.remove(0);
-                    }
-                }
+                Ok(Some(line)) => keep(line, &mut session),
                 _ => open = false,
             },
             _ = interrupt.recv() => cancel(pid, start),
@@ -135,9 +139,9 @@ async fn turn(home: &Path, binary: &Path, args: Vec<String>) -> Result<ExitCode,
             status = crush.wait() => break status.map_err(|e| e.to_string())?,
         }
     };
-    // What Crush wrote after the last read, before it exited.
+    // What Crush wrote after the last read, before it exited: it can name the session.
     while let Ok(Some(line)) = log.next_line().await {
-        kept.push(line);
+        keep(line, &mut session);
     }
     if !status.success()
         && let Some(message) = failure(kept.iter().map(String::as_str))
