@@ -43,7 +43,7 @@ short name, its tint and its mark.
 | `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
-| `crush` | Crush | [`crush`](crush/) | observe |
+| `crush` | Crush | [`crush`](crush/) | observe, drive |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -130,7 +130,7 @@ signed in, as the harness itself says.
 | `gemini` | ``run `gemini` in a terminal and choose how to sign in`` | `gemini models list` lists signed in or not, so the driver reads what Gemini reads first: `security.auth.selectedType`, else the type that `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI` or `GEMINI_API_KEY` picks. No type: not signed in. Google sign-in: `oauth_creds.json` there, else not told (the Keychain). Key: `GEMINI_API_KEY` there, else not told (the Keychain). |
 | `antigravity` | ``run `agy` in a terminal and sign in with Google, or set `GEMINI_API_KEY` `` | `agy models`. Exit 0 with a list: signed in. `Please sign in` or `environment variable is not set` on standard error: not signed in. A Google sign-in lives in the system keyring, so the command is what tells. |
 | `openclaw` | ``run `openclaw onboard` in a terminal`` | `openclaw models status --json --check`. Exit 0 or 2 (a sign-in expires soon): signed in. Exit 1 (`auth.missingProvidersInUse` names the providers): not signed in. |
-| `crush` | ``run `crush` in a terminal and pick a provider`` | not told: the driver answers no `models` yet |
+| `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -1237,7 +1237,7 @@ cd plugin && npm install && npm run check
 
 ## Crush: `crush/`
 
-One binary, `steery-driver-crush`, with no settings, at observe only. Crush keeps each
+One binary, `steery-driver-crush`, with no settings, at drive. Crush keeps each
 project's sessions in that project's SQLite store, `<project>/.crush/crush.db`. The
 projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DATA`, else
 `$XDG_DATA_HOME/crush`, else `~/.local/share/crush`. The driver opens each store read only.
@@ -1255,11 +1255,33 @@ projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DA
     response, so a read gives them once, at its end.
   - An answer that the model still writes has no `finish`. It holds the cursor back.
   - `sessions/fold` is refused `selection-unsupported`: the driver has no door.
-- **Setup** (`setup/plan`). The plan has two entries: the MCP entry in the person's
-  `crush.json` (`mcp.steery`, `type: http` and its URL), and the skill in Crush's own skills
-  folder (`$CRUSH_SKILLS_DIR`, else `<XDG_CONFIG_HOME or ~/.config>/crush/skills`). Crush
-  sends no `_meta` with an MCP call, so the entry sends no `Steery-*` header.
+- **Setup** (`setup/plan`). The plan has the MCP entry in the person's `crush.json`
+  (`mcp.steery`, `type: http` and its URL), the skill in Crush's own skills folder
+  (`$CRUSH_SKILLS_DIR`, else `<XDG_CONFIG_HOME or ~/.config>/crush/skills`), and one hook
+  entry per event, appended to `hooks.<event>` of the same `crush.json`. Crush sends no
+  `_meta` with an MCP call, so the entry sends no `Steery-*` header.
 - **MCP servers** (`mcp/list`): see MCP servers.
+- **Drive** (`start`, `turn/read`, `stop`, `held`, `idle`, `models`, `receipt/*`,
+  `terminal`, `hook/read`, `hook/answer`). Acts: new and continue; no fork, no worktree.
+  - `start` runs `steery-driver-crush turn <home> <crush> run -q -v`, with `-s <id>`,
+    `-m <model>` and `--reasoning-effort <level>` where given, the words on standard input.
+    `crush run` prints only the answer, so the turn mode reads Crush's log (`-v`) for the
+    session id, then the project's store for how the turn ended.
+  - A continue runs only in the project whose store keeps the session: else `no-place`.
+  - `crush run` approves every call of its session itself (`AutoApproveSession`), so
+    Steery's `PreToolUse` hook is the turn's only gate. `start` is refused `refused` where
+    the person's `crush.json` lacks it.
+  - Hooks: `PreToolUse` (asks, 24 h), `PostToolUse` and `PostToolUseFailure` (say, 5 s).
+    Words for the session reach it in the `context` of a call's result.
+  - Crush runs a call whose hook fails. The `PreToolUse` entry runs the hook in a subshell
+    and exits 2 where it fails in a turn Steery started: the turn mode passes
+    `STEERY_STARTED` to Crush under its own pid, and the hook's `$PPID` is that pid.
+  - `stop`: the turn mode gets the runtime's signal and sends Crush SIGINT, as Ctrl-C.
+    Crush writes the turn `canceled`.
+  - `held`: every Crush with the project open holds its store, so the runtime looks there.
+  - `models`: `crush models` on a terminal, each `<provider>/<id>`, with labels, thinking
+    and costs from Crush's `providers.json`; `models.large` first.
+  - `terminal`: `cd '<project>' && crush --session <id>`.
 
 Crush puts no session id in a shell command's environment or an MCP call. The skill tells
 the agent to run `crush session last --json` in its folder and send `meta.uuid`. A live
