@@ -40,7 +40,7 @@ short name, its tint and its mark.
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive |
-| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe |
+| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe, drive |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
 | `droid` | Droid | [`acp-family`](acp-family/) | observe |
@@ -1080,6 +1080,60 @@ Grok's turns headless (`grok -p … --output-format streaming-messages-json`).
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-grok
 cargo test
+```
+
+## Qwen Code: `acp-family/src/qwen/`
+
+One binary, `steery-driver-qwen`, at observe and drive, from release 0.27.2. Qwen keeps
+everything under its root, `QWEN_HOME` or `~/.qwen`. Each conversation is one JSON-lines chat
+file, `projects/<folder>/chats/<id>.jsonl` (the folder is the conversation's `cwd` with each
+character that is not a letter or a digit as `-`), with `<id>.title.json` beside it.
+
+- **Drive** (`held`, `idle`, `stop`, `models`, `start`, `turn/read`, `reader`, `terminal`).
+  Acts `new`, `continue` and `fork`. No words while a turn runs.
+  - `held`: Qwen keeps no lock and no pid. The runtime looks for the processes that hold
+    or name the chat file. `qwen --acp` serves every conversation its client opens, so it
+    is named beyond, not stopped.
+  - `idle`: how the last turn in the chat file's end ended. It stands while nobody holds it.
+  - `models`: `session/new`'s `models.availableModels` of a `qwen --acp` that is never
+    prompted, the current one first. Qwen has no thinking level a run can pick.
+  - `start`: `qwen -o stream-json --approval-mode yolo [-r <id> [--fork-session]] [-m m]
+    [--add-dir r]`, with the words on standard input, which Qwen reads as the prompt.
+    - `yolo` runs every call unasked, so Steery's `PreToolUse` hook is the turn's one gate.
+      `start` is refused `refused` where no settings scope that Qwen loads in the folder
+      holds Steery's guarded hook, or `disableAllHooks` turns hooks off.
+    - The guard: where the hook fails in a turn Steery started (`STEERY_STARTED` names the
+      pid of Qwen's parent), the call is blocked (exit 2). In the person's own `qwen` it
+      lets the call go. Its timeout is the longest Qwen waits, as a timed-out hook lets the
+      call run.
+    - A continue or a fork of a conversation Qwen does not keep here is refused
+      `not-found`. A model `models` does not list is refused `model-missing`. A thinking
+      pick, a worktree and a hand-over are refused `selection-unsupported`.
+  - `turn/read`: `system` `init` names the conversation (a fork's new id). A `tool_use` or
+    `tool_result` is a call that began or ended. `result` ends the turn: `success`
+    finished, else failed with its error; an `API Error: 404 model ... not found` is
+    refused `model-missing`. On standard error, `No saved session found with ID` is refused
+    `not-found` and an auth error `refused`.
+  - `stop`: Qwen has no way to end a turn from outside its process. The runtime's signal
+    ends it: Qwen exits 130 with no `result`, and the turn reads interrupted.
+  - `reader`: `qwen -o text --chat-recording=false --approval-mode plan`, its tools held to
+    `read_file`, `grep_search`, `glob` or none, and no MCP server.
+  - `terminal`: `cd '<cwd>' && qwen -r <id>`, with `QWEN_HOME` where the root is not
+    `~/.qwen`.
+
+Ran (Qwen Code 0.27.2, `/opt/homebrew/bin/qwen`, ollama `qwen3:1.7b`, a temporary
+`QWEN_HOME`): a `new` turn through `start` that ran `run_shell_command` past the hook and
+finished; a `continue` with the hook denying, the call blocked and the turn finished; a
+`fork` whose `init` named a new conversation, its chat file holding the source's records and
+the source's file left as it was; a `stop` by SIGINT (exit 130, interrupted);
+a missing hook binary blocking every call of a turn Steery started, and letting the calls
+run where `STEERY_STARTED` names another process; `start` refused where
+the settings hold no hook. The recorded turns are in `acp-family/tests/qwen/turns`.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-qwen
+cargo test --test qwen
 ```
 
 ## Antigravity: `acp-family/src/antigravity/`

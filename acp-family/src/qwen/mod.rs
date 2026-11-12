@@ -144,7 +144,11 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: vec![harness::Act::Continue, harness::Act::New],
+                acts: vec![
+                    harness::Act::Continue,
+                    harness::Act::Fork,
+                    harness::Act::New,
+                ],
                 touches: false,
             },
             hooks: hooks::table(),
