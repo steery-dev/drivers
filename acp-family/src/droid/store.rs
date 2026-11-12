@@ -150,7 +150,10 @@ impl Store {
                 continue;
             }
             let session = Self::session(&file, &head);
-            if list.seen_since.is_none_or(|since| session.updated_at >= since) {
+            if list
+                .seen_since
+                .is_none_or(|since| session.updated_at >= since)
+            {
                 sessions.push(session);
             }
         }
@@ -207,9 +210,9 @@ impl Store {
             None => (0, None),
             Some(cursor) => {
                 let (length, turn) = cursor.split_once('/').unwrap_or((cursor, ""));
-                let length = length
-                    .parse::<u64>()
-                    .map_err(|_| Error::invalid(format!("not a cursor of this driver: {cursor}")))?;
+                let length = length.parse::<u64>().map_err(|_| {
+                    Error::invalid(format!("not a cursor of this driver: {cursor}"))
+                })?;
                 (length, (!turn.is_empty()).then(|| turn.to_owned()))
             }
         };
@@ -222,7 +225,9 @@ impl Store {
             .and_then(|(_, at)| UNIX_EPOCH.checked_add(Duration::from_millis(at)))
             .and_then(|at| SystemTime::now().duration_since(at).ok())
             .is_some_and(|age| age >= SETTLE);
-        let mut kept = settled.clone().filter(|turn| parsed.open.as_ref() == Some(turn));
+        let mut kept = settled
+            .clone()
+            .filter(|turn| parsed.open.as_ref() == Some(turn));
         if still
             && let Some(turn) = parsed.open.clone()
             && kept.is_none()
@@ -310,7 +315,8 @@ fn settings(file: &Path) -> Value {
 }
 
 fn jsonl(path: &Path) -> bool {
-    path.extension().is_some_and(|extension| extension == "jsonl")
+    path.extension()
+        .is_some_and(|extension| extension == "jsonl")
 }
 
 fn stem(file: &Path) -> Option<String> {

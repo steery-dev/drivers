@@ -131,13 +131,16 @@ impl Program for Driver {
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         let place = self.place()?;
         match method {
-            method::SETUP_PLAN => result(
-                setup::plan(&place.home, &place.root, steery_sdk::params(params)?).await,
-            ),
+            method::SETUP_PLAN => {
+                result(setup::plan(&place.home, &place.root, steery_sdk::params(params)?).await)
+            }
             method::SESSIONS_LIST => {
                 let asked: harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
-                result(self.changes.answer(after.as_deref(), place.store.list(asked)))
+                result(
+                    self.changes
+                        .answer(after.as_deref(), place.store.list(asked)),
+                )
             }
             method::SESSIONS_LOCATE => result(place.store.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => result(place.store.read(steery_sdk::params(params)?)?),

@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use steery_driver_common::program::{executable, lacks, on_path, others_note, release_within, version};
+use steery_driver_common::program::{
+    executable, lacks, on_path, others_note, release_within, version,
+};
 use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Setup};
 
 use super::{EXECUTABLE, MINIMUM};

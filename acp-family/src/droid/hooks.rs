@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{
-    Answer, Append, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment,
-    HookRead, Moment, Says, Via,
+    Answer, Append, Decision, Hook, HookAnswer, HookAnswered, HookKind, HookMoment, HookRead,
+    Moment, Says, Via,
 };
 
 use super::events;
@@ -156,10 +156,13 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
         outcome: None,
         continued: event.kind == HookKind::TurnEnd
             && document.get("stop_hook_active").and_then(Value::as_bool) == Some(true),
-        // Droid says `prompt_input_exit` as its person leaves the prompt, as Claude Code
-        // does; a `droid exec` run ends `other`.
+        // Droid's reference names the reasons `clear`, `logout`, `prompt_input_exit` and
+        // `other`; a `droid exec` run ends `other`.
         person_exited: event.kind == HookKind::SessionEnd
-            && matches!(text(document, "reason"), Some("prompt_input_exit" | "clear")),
+            && matches!(
+                text(document, "reason"),
+                Some("prompt_input_exit" | "clear" | "logout")
+            ),
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()
@@ -182,7 +185,11 @@ fn call_id(file: &Path, tool: &str, input: &Value) -> Option<String> {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             continue;
         };
-        for block in record["message"]["content"].as_array().into_iter().flatten() {
+        for block in record["message"]["content"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
             match block["type"].as_str() {
                 Some("tool_use") if block["name"] == tool && block["input"] == *input => {
                     if let Some(id) = block["id"].as_str() {
@@ -223,8 +230,8 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
             lead,
         },
     } = answer;
-    let event =
-        event(&name).ok_or_else(|| Error::invalid(format!("Steery has no hook on Droid's {name}")))?;
+    let event = event(&name)
+        .ok_or_else(|| Error::invalid(format!("Steery has no hook on Droid's {name}")))?;
     let document = parse(&document)?;
     let output = match (event.kind, decision) {
         (_, None) => say.map(|say| context(event, say)).transpose()?,
