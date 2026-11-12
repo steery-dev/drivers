@@ -150,7 +150,9 @@ fn home(root: &Path) {
         "helper",
         1,
         json!({"type": "message", "id": "h1", "parentId": null,
-               "message": {"role": "user", "content": "Help.", "timestamp": 1794487295000u64}}),
+               "message": {"role": "user", "timestamp": 1794487295000u64,
+                           "content": "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n\n[Subagent Context] You are running as a subagent (depth 1/5).\n\n[Subagent Task]\n\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>\n\nHelp.\n\n<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\n\nBegin.\n\n<<<END_OPENCLAW_INTERNAL_CONTEXT>>>",
+                           "__openclaw": {"senderIsOwner": false}}}),
     );
 }
 

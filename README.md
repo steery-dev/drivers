@@ -1043,7 +1043,8 @@ driver opens read-only.
   windows that `previous_session_id` links by `compaction`, `rollover` or `recovery` read as
   one. Its records are the rows of `transcript_events`, JSON or zstd-packed, each naming its
   parent; the read walks the path from the active leaf, through `leaf` records. A sub-agent
-  is a `session_nodes` row whose `spawned_by` names the parent. A heartbeat poll or a retry
+  is a `session_nodes` row whose `spawned_by` names the parent; its task is its first
+  message with OpenClaw's internal context blocks left out. A heartbeat poll or a retry
   prompt begins a turn with no words of the person's. `run-failed-before-reply` fails the
   turn. An in-place compaction is `compacted` with its token counts and summary.
 - **Setup.** Two entries:
@@ -1068,10 +1069,12 @@ conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd re
 `openclaw sessions compact`) and a heartbeat, listed and read from `~/.openclaw`;
 `setup/plan`, `mcp/list` and `models` against `~/.openclaw` (468 models, `signed_in: true`);
 and against an empty `OPENCLAW_STATE_DIR` with no key, where `models status --check` exits 1
-and the plan asks for `sign-in`.
+and the plan asks for `sign-in`. A real sub-agent, spawned by `sessions_spawn` through the
+gateway's `tools.invoke` (with `gateway.tools.allow` lifting its default deny for the probe),
+listed under its lead, left out of the list, and read in place: its task, its answer.
 
-Not verified: window chains, forks, `leaf` records and sub-agents (none in a real store yet;
-the small model never called `sessions_spawn`); `needs/give` with a real OpenRouter key; the
+Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
+idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the
 installer on a host without OpenClaw; `~/.npm-global/bin` and `~/.local/bin` as install
 folders (read from `install.sh`, not seen installed).
 

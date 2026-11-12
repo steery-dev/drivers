@@ -6,7 +6,9 @@
 //! OpenClaw also writes `user` messages that no person typed: a heartbeat's poll and the
 //! prompts it sends to retry a turn, each with a `provenance`
 //! (`src/auto-reply/heartbeat.ts:19`). A turn that ends with no reply gets a
-//! `run-failed-before-reply` `custom_message` after the agent's last message.
+//! `run-failed-before-reply` `custom_message` after the agent's last message. A spawned
+//! sub-agent's first `user` message wraps its task in internal context blocks, which the
+//! person's words leave out (`src/agents/internal-runtime-context.ts`).
 
 use std::collections::HashMap;
 
@@ -23,6 +25,11 @@ const HEARTBEAT: &str = "[OpenClaw heartbeat poll]";
 
 /// The record that closes a turn that gave no reply.
 const FAILED_BEFORE_REPLY: &str = "run-failed-before-reply";
+
+/// The lines that open and close an internal context block
+/// (`packages/llm-core/src/types.ts:392`).
+const CONTEXT_BEGIN: &str = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>";
+const CONTEXT_END: &str = "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";
 
 /// Steery's MCP server, as its setup names it in `mcp.servers`.
 const STEERY: &str = "steery";
@@ -94,6 +101,35 @@ pub fn said(content: Option<&Value>) -> String {
 pub fn machine(message: &Value) -> bool {
     message.get("provenance").is_some_and(|p| !p.is_null())
         || said(message.get("content")).trim() == HEARTBEAT
+}
+
+/// The text outside internal context blocks, which nest; an unclosed block runs to the end.
+fn outside_context(text: &str) -> String {
+    let mut depth = 0usize;
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        match line.trim() {
+            CONTEXT_BEGIN => depth += 1,
+            CONTEXT_END if depth > 0 => depth -= 1,
+            CONTEXT_END => {}
+            _ if depth == 0 => kept.push(line),
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    let mut blank = false;
+    for line in kept.join("\n").trim().lines() {
+        if line.trim().is_empty() {
+            blank = true;
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str(if blank { "\n\n" } else { "\n" });
+        }
+        out.push_str(line);
+        blank = false;
+    }
+    out
 }
 
 fn first_line(text: &str) -> Option<&str> {
@@ -207,7 +243,10 @@ impl Fold<'_> {
     fn asked(&mut self, at: u64, id: String, message: &Value) {
         self.events.push(Event::TurnBegan { at, turn: None });
         if !machine(message) {
-            self.words(at, id, Voice::Person, &said(message.get("content")), None);
+            let text = outside_context(&said(message.get("content")));
+            if !text.is_empty() {
+                self.words(at, id, Voice::Person, &text, None);
+            }
         }
     }
 
