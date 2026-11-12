@@ -38,11 +38,12 @@ pub(crate) const BEFORE_CALL: &str = "PreToolUse";
 /// What follows `<hook> PreToolUse` in Qwen's settings. `--approval-mode yolo` runs every
 /// call that no hook denies, and Qwen runs a call whose hook exits other than 2. So where
 /// Steery's hook fails (the runtime gone, the binary moved) this exits 2, Qwen's block, with
-/// standard error as its reason. It does so only in a turn Steery started: the runtime
-/// starts `qwen` itself with `STEERY_STARTED` naming its pid (PROTOCOL.md §3.3), and Qwen
-/// runs the hook in `bash -c`, so `$PPID` is Qwen. A person's own Qwen, even one that
-/// inherited the variable, says nothing, as every other hook does.
-const GUARD: &str = r#" || { s=$?; case "${STEERY_STARTED:-}" in "${PPID:-0}":turn*) echo "Steery's hook failed (exit $s) in a turn Steery started, so the call is blocked" >&2; exit 2;; esac; exit 0; }"#;
+/// standard error as its reason. It does so only in a turn Steery started: the runtime's
+/// adapter starts `qwen` itself, with `STEERY_STARTED` naming the adapter's own pid
+/// (PROTOCOL.md §3.3), and Qwen runs the hook in a shell of its own, so `$PPID` is Qwen and
+/// Qwen's parent is that pid. A person's own Qwen, even one that inherited the variable,
+/// says nothing, as every other hook does.
+const GUARD: &str = r#" || { s=$?; p=$(ps -o ppid= -p "${PPID:-0}" | tr -d " "); case "${STEERY_STARTED:-}" in "$p":turn*) echo "Steery's hook failed (exit $s) in a turn Steery started, so the call is blocked" >&2; exit 2;; esac; exit 0; }"#;
 
 /// The command setup writes for `event`, after the runtime's `hook` command. A hook whose
 /// command cannot run (a machine mid-upgrade, a filled disk) says nothing, as Qwen reads

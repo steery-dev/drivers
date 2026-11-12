@@ -178,16 +178,16 @@ fn servers(root: &Path, cwd: Option<&Path>, places: &Places) -> McpServers {
         }
     };
     let entries = |scope: &Value| scope.get("mcpServers").and_then(Value::as_object).cloned();
-    put(entries(&defaults).as_ref(), Scope::Person);
-    put(entries(&user).as_ref(), Scope::Person);
+    put(entries(defaults).as_ref(), Scope::Person);
+    put(entries(user).as_ref(), Scope::Person);
     let project: Map<String, Value> = project
         .into_iter()
         .filter(|(_, entry)| entry.is_object())
         .map(|(name, entry)| (name, claude(entry)))
         .collect();
     put(Some(&project), Scope::Project);
-    put(entries(&workspace).as_ref(), Scope::Workspace);
-    put(entries(&system).as_ref(), Scope::System);
+    put(entries(workspace).as_ref(), Scope::Workspace);
+    put(entries(system).as_ref(), Scope::System);
     if let Some(command) = last(&scopes, "/mcp/serverCommand")
         .and_then(Value::as_str)
         .filter(|command| !command.is_empty())
