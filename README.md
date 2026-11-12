@@ -42,7 +42,7 @@ short name, its tint and its mark.
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe, drive |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
-| `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
+| `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive, live (OpenClaw's gateway: `picks`) |
 | `droid` | Droid | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
 
@@ -1174,7 +1174,7 @@ cargo test
 
 ## OpenClaw: `acp-family/src/openclaw/`
 
-One binary, `steery-driver-openclaw`, at observe and drive, from release 2026.11.3. OpenClaw keeps
+One binary, `steery-driver-openclaw`, at observe, drive and live, from release 2026.11.3. OpenClaw keeps
 everything in its state folder, `OPENCLAW_STATE_DIR` or `~/.openclaw`. Each agent's
 conversations are in its SQLite store, `agents/<agent>/agent/openclaw-agent.sqlite`, which the
 driver opens read-only.
@@ -1219,9 +1219,38 @@ driver opens read-only.
   - Words told mid-turn go in as the next prompt, after the running one ends: a second
     prompt cancels the running one.
   - A permission is the gateway's exec approval, relayed with the call's `rawInput`.
-    `hook/read` names it as the `exec` call. It reaches ACP only where exec `ask` is on.
-  - `held`: the newest window of a key that a run writes now (`activeWriterRunId`).
+    `hook/read` names it as the `exec` call. It reaches ACP where the gateway waits on a
+    person for it: exec `ask`, or the session's `permissionMode: guarded`.
+  - `held`: the live door's holder where the gateway answers for the session (below); else
+    the newest window of a key that a run writes now (`activeWriterRunId`).
   - `terminal`: `openclaw tui --session <key>` in the conversation's folder.
+
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`), door `picks`. OpenClaw's door
+  is its gateway, `ws://127.0.0.1:<port>`: every client (TUI, Control UI, apps, channels,
+  `openclaw acp`) runs its turns there. The port is `OPENCLAW_GATEWAY_PORT`, else
+  `gateway.port`, else 18789.
+  - The driver joins as an operator (`gateway-client`, mode `backend`, scopes
+    `operator.read` and `operator.write`) with the gateway's own secret from
+    `openclaw.json`: `gateway.auth.token`, or `gateway.auth.password` in mode `password`,
+    else `OPENCLAW_GATEWAY_TOKEN` or `OPENCLAW_GATEWAY_PASSWORD`. It answers
+    `connect.challenge`, then `sessions.subscribe`.
+  - A conversation is reached by its key, where the key writes it now and
+    `sessions.describe` knows the key. Else `no-door`.
+  - `held`: `{person: {door: picks, stop: {owner: <run id>}}}`, `null` where no run writes it.
+  - `say`: `chat.send` with the driver's own run id as `idempotencyKey`, so `took` is that the
+    gateway named the same run. `steer` into a running run: `queueMode: steer`, in at the
+    run's next boundary. Else `followup`, which starts a run where none runs. `immediate`
+    while a run writes or words wait: `harness-busy`.
+  - `pick`: `sessions.patch` of `model` (`<provider>/<model>`, as `models` split it) and
+    `thinkingLevel`, read back from `resolved`. A model the last `models` lacks is
+    `model-missing`. A patch that raced a change of the session
+    (`SESSION_MUTATION_AUTHORIZATION_CHANGED`) is sent once more.
+  - `stop`: `chat.abort` of the run `held` named, checked against `say`; proof is the run's
+    lifecycle `end` with `aborted: true`.
+  - `session/changed`: from the session's `agent` events (lifecycle, tool, approval,
+    compaction) and `sessions.changed` rows: the turn and its says, calls and ended calls,
+    an exec approval as a `confirm` dialog, `compacting`, `pending`, model, thinking and
+    `context_left`. A closed connection sends an empty state.
 
 Ran (OpenClaw 2026.11.3, `/opt/homebrew/bin/openclaw`, ollama `qwen3:1.7b`): five real
 conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd record, one
@@ -1237,14 +1266,27 @@ Drive ran on the live gateway (`127.0.0.1:18789`, ollama `qwen3:1.7b` and `qwen3
 `receipt/find` true for its delivery, false for another; `--model ollama/qwen3:0.6b` set
 by `sessions.patch`, both answers from `qwen3:0.6b`; words told on the inbox heard and
 answered as the next prompt; with exec `ask: always`, an `exec` approval through the hook,
-read by `hook/read`, allowed once, then the turn-end hook; `held` and `idle` going `running`
-then `finished` during a turn; `steery programs test` all `ok`.
+read by `hook/read`, allowed once, then the turn-end hook; with `permissionMode: guarded`,
+`touch` rejected at the hook (`hook/answer` deny: option `deny`), the gateway's result
+`Exec denied (… user-denied)` and no file; `held` and `idle` going `running` then
+`finished` during a turn; `steery programs test` all `ok`.
+
+Live ran on the same gateway (`qwen3:1.7b`, a session that `chat.send` began): `held` with
+`owner: null`, then the run id; `say immediate` starting a run (`took: true`), a second
+`immediate` refused `harness-busy`; `say steer` into that run while its `exec sleep 8` ran,
+its words read after the tool result and answered in the same run (`alpha-doneKIWI`), the
+turn settled with both says; `pick` of `qwen3:0.6b` and `off` read back, `no-such-model`
+refused `model-missing`; `say queue` then `stop`: refused `other-turn` for an older say,
+then `stopped: true`, settled `failed` with `aborted (rpc)`; `session/changed` naming the
+`exec` call, its end and `context_left`. A `pick` right after an abort was refused
+`SESSION_MUTATION_AUTHORIZATION_CHANGED` once, before the retry was built.
 
 Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
 idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the
 installer on a host without OpenClaw; `~/.npm-global/bin` and `~/.local/bin` as install
-folders (read from `install.sh`, not seen installed); a reject at the hook; live (the
-gateway's `chat.send` and `chat.abort` need an operator token, not built).
+folders (read from `install.sh`, not seen installed); the raced `pick` retry itself (the race
+did not come again); an exec approval as a live `dialog`; `retry` and `jobs` (no gateway
+event for them seen); a gateway on a non-loopback bind or with a password.
 
 ```sh
 cd acp-family && cargo build

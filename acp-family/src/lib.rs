@@ -72,7 +72,7 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             Some("turn") => {
                 turn::main(openclaw::drive::Turns::new(), std::env::args().skip(2)).await
             }
-            _ => steery_sdk::serve(|_notifier| openclaw::Driver::default()).await,
+            _ => steery_sdk::serve(openclaw::Driver::new).await,
         },
         Harness::Droid => steery_sdk::serve(|_notifier| droid::Driver::default()).await,
     }
