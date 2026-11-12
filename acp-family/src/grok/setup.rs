@@ -60,6 +60,15 @@ pub async fn plan(root: &Path, setup: Setup, needs: bool) -> Planned {
             Some(&root.join("bin")),
             &binary,
         ));
+        // A static note, not a read of `[cli] use_leader`: xAI's remote settings and a
+        // sandbox profile also decide leader mode, so config.toml alone cannot say.
+        notes.push(
+            "Steery reaches an open Grok window only in leader mode: one opened with \
+             `grok --leader`, or every window with `use_leader = true` under `[cli]` in \
+             config.toml. Leader mode is off by default. The windows that Steery opens use \
+             `--leader`."
+                .into(),
+        );
         entries = self::entries(root, &setup);
         if needs && super::sign_in::lacking(root).await {
             asked.push(super::sign_in::need());
