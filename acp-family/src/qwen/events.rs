@@ -262,25 +262,8 @@ impl Fold {
             .as_ref()
             .map(|response| output(&response["response"]))
             .unwrap_or_default();
-        self.events.push(Event::CallEnded {
-            at,
-            id: id.clone(),
-            ok: result["status"] == "success",
-            chars: output.chars().count() as u64,
-            tail: tail(&output),
-            waited: Vec::new(),
-        });
-        if !output.trim().is_empty() {
-            self.events.push(Event::Words {
-                at,
-                id: format!("{id}#result"),
-                voice: Voice::Tool,
-                text: output,
-                message: None,
-                call: Some(id),
-                clips: Vec::new(),
-            });
-        }
+        self.events
+            .extend(ended(at, id, result["status"] == "success", output));
     }
 
     fn system(&mut self, id: &str, at: u64, record: &Value) {
@@ -446,6 +429,31 @@ pub(super) fn call(id: &str, name: &str, input: Value) -> Call {
         parent: None,
         response: None,
     }
+}
+
+/// A call's end, and the words of its result: as a chat file's `tool_result` gives them,
+/// and a turn's stream-json, whose `tool_result` carries the same text.
+pub(super) fn ended(at: u64, id: String, ok: bool, output: String) -> Vec<Event> {
+    let mut events = vec![Event::CallEnded {
+        at,
+        id: id.clone(),
+        ok,
+        chars: output.chars().count() as u64,
+        tail: tail(&output),
+        waited: Vec::new(),
+    }];
+    if !output.trim().is_empty() {
+        events.push(Event::Words {
+            at,
+            id: format!("{id}#result"),
+            voice: Voice::Tool,
+            text: output,
+            message: None,
+            call: Some(id),
+            clips: Vec::new(),
+        });
+    }
+    events
 }
 
 /// The group of one of Qwen's own tools (`TOOL_NAME_ALIASES`).
