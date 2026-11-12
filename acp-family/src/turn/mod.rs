@@ -146,6 +146,17 @@ pub trait Host {
         queued: &[String],
         unmarked: &mut Option<tokio::time::Instant>,
     ) -> bool;
+
+    /// The command that sets `session`'s model, where the harness's ACP has no `model`
+    /// config option; none sets it with [`Host::pick`].
+    fn sets_model(
+        &self,
+        _binary: &std::path::Path,
+        _session: &str,
+        _model: &str,
+    ) -> Option<tokio::process::Command> {
+        None
+    }
 }
 
 /// What a turn is asked to do, as its command line says it.
@@ -290,6 +301,12 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         host.opened(&session).map_err(failed)?;
         for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
             if let Some(value) = value {
+                if option == "model"
+                    && let Some(command) = host.sets_model(&asked.binary, &session, value)
+                {
+                    set_model(command, label).await?;
+                    continue;
+                }
                 let (method, params) = host.pick(&session, option, value);
                 acp.call(method, params).await?;
             }
@@ -445,6 +462,40 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
     }
     acp.close().await;
     outcome
+}
+
+/// Run the command that sets the session's model ([`Host::sets_model`]); a failure is the
+/// turn's refusal line.
+async fn set_model(mut command: tokio::process::Command, label: &str) -> Result<(), String> {
+    let output = command
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(|e| {
+            format!(
+                "{}: {label} did not set the model: {e}",
+                refusal::START_FAILED
+            )
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&output.stderr);
+    let said = said
+        .lines()
+        .chain(
+            std::str::from_utf8(&output.stdout)
+                .unwrap_or_default()
+                .lines(),
+        )
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("it exited without a line");
+    Err(format!(
+        "{}: {label} kept its model: {said}",
+        refusal::REFUSED
+    ))
 }
 
 /// The answer to a permission asked in a turn that is cancelled.
