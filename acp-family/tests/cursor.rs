@@ -13,10 +13,10 @@ use steery_sdk::{method, wire};
 
 const CHAT: &str = "70895076-1186-4e4d-918d-239ace528a16";
 
-/// A home of this test's own, with the fixture chat filed twice: as a person's chat, and
-/// as a `-p` run's, which holds no `prompt_history.json`.
-fn home() -> PathBuf {
-    let home = std::env::temp_dir().join(format!("steery-cursor-test-{}", std::process::id()));
+/// A home of this test's own (`name`), with the fixture chat filed twice: as a person's
+/// chat, and as a `-p` run's, which holds no `prompt_history.json`.
+fn home(name: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("steery-cursor-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/cursor")
@@ -83,7 +83,7 @@ fn lines(events: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn reads_a_chat_cursor_wrote_and_the_hooks_cursor_runs() {
-    let home = home();
+    let home = home("observe");
     let client = start(&home).await;
 
     let listed = client
@@ -373,4 +373,142 @@ async fn hooks(client: &Client, home: &Path) {
         let error = answer(event, refused).await.unwrap_err();
         assert!(error.contains("Cursor does not"), "{event}: {error}");
     }
+}
+
+/// Each line of a recorded turn, read in order as one run, and what the last read said.
+async fn turn(client: &Client, turn: &str, lines: &[(&str, &str)]) -> Vec<Value> {
+    let mut read = Vec::new();
+    for (stream, line) in lines {
+        read.push(
+            client
+                .call(
+                    method::TURN_READ,
+                    json!({"turn": turn, "stream": stream, "line": line}),
+                    Duration::from_secs(10),
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    read
+}
+
+/// The lines of a recorded turn, `stream` each.
+fn recorded<'a>(text: &'a str, stream: &'a str) -> Vec<(&'a str, &'a str)> {
+    text.lines().map(|line| (stream, line)).collect()
+}
+
+/// Steery plans Cursor's turns, refuses a continue of a chat Cursor does not keep, and reads
+/// what `cursor-agent -p --output-format stream-json` 2026.11.05 wrote: a turn that ran a
+/// shell command and finished, and turns that Cursor refused for its usage limit and for a
+/// folder its person did not trust.
+#[tokio::test]
+async fn starts_and_reads_cursor_turns() {
+    let home = home("drive");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let cursor = bin.join("cursor-agent");
+    std::fs::write(&cursor, "#!/bin/sh\n").unwrap();
+    let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(&cursor, mode).unwrap();
+    let client = start(&home).await;
+    let call = |method: &'static str, params: Value| {
+        let client = &client;
+        async move { client.call(method, params, Duration::from_secs(10)).await }
+    };
+    let cwd = std::env::temp_dir();
+
+    let new = call(
+        method::START,
+        json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        new["argv"],
+        json!([cursor, "-p", "--output-format", "stream-json"])
+    );
+    assert_eq!(new["stdin"], "words");
+    let resumed = call(
+        method::START,
+        json!({"act": "continue", "external_id": CHAT, "cwd": cwd, "folder": cwd,
+               "worktree": false, "model": "auto"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resumed["argv"],
+        json!([
+            cursor,
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--resume",
+            CHAT,
+            "--model",
+            "auto"
+        ])
+    );
+    // `--resume` of an id Cursor does not know starts a new chat under it.
+    let unknown = call(
+        method::START,
+        json!({"act": "continue", "external_id": "0c1d2e3f-0000-4000-8000-000000000000",
+               "cwd": cwd, "folder": cwd, "worktree": false}),
+    )
+    .await
+    .unwrap_err();
+    assert!(unknown.to_string().contains("not-found"), "{unknown}");
+    let thinking = call(
+        method::START,
+        json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false, "thinking": "high"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        thinking.to_string().contains("selection-unsupported"),
+        "{thinking}"
+    );
+
+    let turns = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/cursor/turns");
+    let text = |name: &str| std::fs::read_to_string(turns.join(name)).unwrap();
+
+    let finished = turn(
+        &client,
+        "finished",
+        &recorded(&text("finished.stdout.jsonl"), "stdout"),
+    )
+    .await;
+    assert_eq!(finished[0]["named"], "d53c73cb-9604-457b-9d6c-ecb3f82fee69");
+    assert_eq!(finished[0]["took"], false);
+    assert_eq!(finished[1]["took"], true);
+    let ended: Vec<&Value> = finished
+        .iter()
+        .filter_map(|line| line.get("ended"))
+        .collect();
+    assert_eq!(ended, [&json!({"state": "finished"})]);
+    assert!(finished.last().unwrap().get("ended").is_some());
+
+    let stdout = text("usage-limit.stdout.jsonl");
+    let stderr = text("usage-limit.stderr");
+    let mut lines = recorded(&stdout, "stdout");
+    lines.extend(recorded(&stderr, "stderr"));
+    let limit = turn(&client, "usage-limit", &lines).await;
+    assert_eq!(limit[1]["took"], true);
+    assert_eq!(
+        limit[2],
+        json!({"ended": {"state": "failed", "error": stderr.trim()}, "refused": "refused"})
+    );
+
+    let untrusted = turn(
+        &client,
+        "untrusted",
+        &recorded(&text("untrusted.stderr"), "stderr"),
+    )
+    .await;
+    let refused: Vec<&Value> = untrusted
+        .iter()
+        .filter_map(|line| line.get("refused"))
+        .collect();
+    assert_eq!(refused, [&json!("untrusted")]);
+    assert_eq!(untrusted[1]["ended"]["state"], "failed");
 }
