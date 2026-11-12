@@ -25,6 +25,8 @@ pub enum Harness {
     Antigravity,
     /// OpenClaw, whose executable is `openclaw`.
     OpenClaw,
+    /// Factory's Droid, whose executable is `droid`.
+    Droid,
 }
 
 impl Harness {
@@ -42,6 +44,7 @@ impl Harness {
             Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
             Self::OpenClaw => "openclaw",
+            Self::Droid => "droid",
         }
     }
 
@@ -59,6 +62,7 @@ impl Harness {
             Self::Gemini => "Gemini CLI",
             Self::Antigravity => "Antigravity",
             Self::OpenClaw => "OpenClaw",
+            Self::Droid => "Droid",
         }
     }
 
@@ -76,6 +80,7 @@ impl Harness {
             Self::Gemini => "Gm",
             Self::Antigravity => "Ag",
             Self::OpenClaw => "Ow",
+            Self::Droid => "Dr",
         }
     }
 
@@ -93,6 +98,7 @@ impl Harness {
             Self::Gemini => "#4285f4",
             Self::Antigravity => "#b1502f",
             Self::OpenClaw => "#e8453c",
+            Self::Droid => "#ee6018",
         }
     }
 

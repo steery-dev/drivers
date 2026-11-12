@@ -1,0 +1,36 @@
+{
+  "assistantActiveTimeMs": 235,
+  "model": "custom:Qwen3-local-0",
+  "reasoningEffort": "high",
+  "interactionMode": "auto",
+  "autonomyLevel": "low",
+  "autonomyMode": "auto-low",
+  "compactionThresholdCheckEnabled": true,
+  "allowSubagentsInScripts": false,
+  "tags": [
+    {
+      "name": "exec"
+    }
+  ],
+  "toolExecutionMode": "direct_only",
+  "toolExecutionModeModelId": "custom:Qwen3-local-0",
+  "tokenUsage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "thinkingTokens": 0,
+    "factoryCredits": 0
+  },
+  "childInclusiveTokenUsageBySessionId": {},
+  "inclusiveTokenUsage": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "thinkingTokens": 0,
+    "factoryCredits": 0
+  },
+  "providerLock": "generic-chat-completion-api",
+  "providerLockTimestamp": "2026-11-12T14:49:09.299Z"
+}
