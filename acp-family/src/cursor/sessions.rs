@@ -150,6 +150,40 @@ impl Store {
                 .find_map(|project| folder(project.join(id), false))
         })
     }
+
+    /// The store of chat `id`, a person's or a run's.
+    pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
+        self.find(id)
+            .map(|folder| folder.store())
+            .ok_or_else(not_found)
+    }
+
+    /// The words of the person in each turn of chat `id`, oldest first.
+    pub fn said(&self, id: &str) -> Result<Vec<String>, Error> {
+        let folder = self.find(id).ok_or_else(not_found)?;
+        let said = || -> Result<Vec<String>, String> {
+            let chat = Chat::open(&folder.store())?;
+            let root = chat.root()?;
+            let mut said = Vec::new();
+            for id in &root.turns {
+                let Some(turn) = chat.blob(id)?.and_then(|bytes| Turn::read(&bytes)) else {
+                    continue;
+                };
+                let user = chat
+                    .blob(&turn.user)?
+                    .map(|bytes| User::read(&bytes))
+                    .unwrap_or_default();
+                said.push(user.text);
+            }
+            Ok(said)
+        };
+        said().map_err(|why| {
+            Error::refused(
+                "refused",
+                format!("Cursor's store of this chat cannot be read: {why}."),
+            )
+        })
+    }
 }
 
 /// The chat in `path`, where it holds a store. A chat of an ACP client always has a person

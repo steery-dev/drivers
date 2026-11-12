@@ -35,11 +35,11 @@ short name, its tint and its mark.
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe, drive, live (Hermes's gateway: `picks`) |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `copilot` | Copilot | [`acp-family`](acp-family/) | observe, drive, live |
-| `cursor` | Cursor | [`acp-family`](acp-family/) | observe |
+| `cursor` | Cursor | [`acp-family`](acp-family/) | observe, drive |
 | `cline` | Cline | [`acp-family`](acp-family/) | observe, drive, live |
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
-| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
+| `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive |
@@ -121,7 +121,7 @@ signed in, as the harness itself says.
 | `grok` | ``run `grok login` in a terminal`` | `grok models`' first line. `You are logged in with …` or `You are using XAI_API_KEY.`: signed in. `You are not authenticated.`: not signed in. |
 | `copilot` | ``run `copilot login` in a terminal`` | its own server's (`copilot --headless --stdio`) `auth.getStatus` `isAuthenticated`, bound 10 s. It counts a `gh` sign-in and `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`. |
 | `opencode` | ``run `opencode auth login` in a terminal`` | not told. OpenCode's free models need no account, so an empty model list never means signed out. |
-| `cursor` | ``run `cursor-agent login` in a terminal`` | not told (`cursor-agent status` says signed in while turns refuse) |
+| `cursor` | ``run `cursor-agent login` in a terminal`` | `models` runs `cursor-agent models`: `Authentication required` means not signed in. `cursor-agent status` says signed in while turns refuse, so the driver does not ask it. |
 | `amp` | ``run `amp login` in a terminal`` | `amp threads list --json --limit 1`. Exit 0: signed in. Exit 1 with `Run 'amp login'`: not signed in. `setup/plan` asks the same, and an `AMP_API_KEY` counts as signed in. |
 | `cline` | ``run `cline auth` in a terminal`` | `models` starts `cline --acp`: `session/new` refused with ACP `-32000` (auth required) means not signed in. |
 | `goose` | ``run `goose configure` in a terminal`` | `models` starts `goose acp`: `session/new` refused with `Failed to resolve provider and model` means not signed in. |
@@ -963,6 +963,45 @@ it, and it is one JSON-RPC client of about 170 lines (`rpc.rs`). Drive asks it
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-copilot
 cargo test
+```
+
+## Cursor: `acp-family/src/cursor/`
+
+One binary, `steery-driver-cursor`, from release 2026.7.1. Cursor keeps each chat in a SQLite
+file, `store.db`, under `chats/<md5 of its folder>/<id>/` or `acp-sessions/<id>/`.
+
+- **Drive** (`held`, `idle`, `stop`, `receipt/*`, `models`, `start`, `turn/read`,
+  `terminal`). Acts `new` and `continue`. No fork, and no words while a turn runs.
+  - `held`: the process that holds SQLite's lock on the chat's `store.db`. Cursor holds it
+    while the chat is open. Else the runtime looks.
+  - `idle`: how the chat's last turn ended in `store.db`. It stands while nobody holds it.
+  - `models`: each `<id> - <name>` line of `cursor-agent models`, the default first. Cursor
+    has no thinking setting of its own: a level is part of a model's id.
+  - `start`: `cursor-agent -p --output-format stream-json [--resume <id>] [--model m]
+    [--add-dir r]`, with the words on standard input.
+    - Cursor does not refuse `--resume` of an id it does not know: it starts a new chat
+      under it. So a continue of a chat that Cursor does not keep is refused `not-found`.
+    - A continue is refused `no-place` where its folder is gone.
+    - `--model` also makes the model Cursor's default: Cursor writes it into
+      `cli-config.json`. A continue keeps that model (`keeps.model`).
+    - A thinking pick, a worktree, a fork and a hand-over are refused
+      `selection-unsupported`.
+    - The turn runs without `--force`. Steery's `preToolUse` hook answers each call.
+  - `turn/read`: the first line, `system` `init`, names the chat, new or resumed. The `user`
+    line is the words Cursor took. The last line, `result`, ends the turn. Cursor writes a
+    refusal on standard error and exits 1: `ActionRequiredError: ...` (a usage limit, a
+    model the plan leaves out) and `Error: ...` (signed out) end the turn `failed` with
+    that line, refused `refused`. `Workspace Trust Required` is refused `untrusted`.
+  - `stop`: Cursor has no way to end a turn from outside its process. The runtime's signals
+    end the turn. They do not reach Cursor's `worker-server`, which outlives every turn.
+  - `receipt/*`: the mark is the number of the chat's turns. A receipt is the one person's
+    words after it that carry the delivery marker.
+  - `terminal`: `cd '<cwd>' && cursor-agent --resume <id>`.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-cursor
+cargo test --test cursor
 ```
 
 ## Cline: `acp-family/src/cline/`

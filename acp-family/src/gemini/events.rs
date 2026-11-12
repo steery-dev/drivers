@@ -256,6 +256,34 @@ pub fn read(path: &Path, cursor: Option<&str>, tail: Option<u64>) -> Result<Even
     })
 }
 
+/// Where a conversation stands by the newest records of its chat file.
+pub struct Stands {
+    pub model: Option<String>,
+    /// When its newest message was written.
+    pub at: u64,
+    pub state: TurnState,
+}
+
+/// Where the conversation of `path` stands by its newest [`BATCH`] bytes, or none where
+/// they hold no message. True only while nobody runs a turn of it: a turn whose newest
+/// message is no answer was then cut off.
+pub fn stands(path: &Path) -> Result<Option<Stands>, Error> {
+    let read = read(path, None, Some(BATCH))?;
+    let state = Cursor::parse(&read.cursor)?.st;
+    let Some(last) = state.last else {
+        return Ok(None);
+    };
+    Ok(Some(Stands {
+        model: state.model,
+        at: last.at,
+        state: if last.answer || last.done {
+            TurnState::Finished
+        } else {
+            TurnState::Interrupted
+        },
+    }))
+}
+
 #[cfg(unix)]
 fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt as _;
