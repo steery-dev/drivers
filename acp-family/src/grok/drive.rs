@@ -17,9 +17,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 use steery_sdk::wire::harness::{
-    Act, Beyond, Event, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked,
-    Marked, ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample,
-    Sampled, Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, TurnState,
+    Act, Beyond, Event, Execution, Held, HeldBy, Holder, HolderStop, Launch, Look, Looked, Marked,
+    ReadAs, Reader, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample, Sampled,
+    Start, Stdin, Stop, Stopped, Terminal, TerminalCommand, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
@@ -176,7 +176,7 @@ pub fn held(root: &Path, store: &Store, held: Held) -> HeldBy {
 }
 
 /// The live process that Grok's registry names for `id`, and when it started.
-fn registered(root: &Path, id: &str) -> Option<(u32, u64)> {
+pub(super) fn registered(root: &Path, id: &str) -> Option<(u32, u64)> {
     let text = std::fs::read(root.join("active_sessions.json")).ok()?;
     let entries: Value = serde_json::from_slice(&text).ok()?;
     entries
@@ -284,8 +284,9 @@ pub fn find(_: ReceiptFind) -> Result<Receipt, Error> {
     ))
 }
 
-/// `terminal`: `cd '<cwd>' && grok --resume <id>`, with `GROK_HOME='<root>'` before grok
-/// where Grok's home is not its default.
+/// `terminal`: `cd '<cwd>' && grok --leader --resume <id>`, with `GROK_HOME='<root>'` before
+/// grok where Grok's home is not its default. `--leader` runs the window through Grok's
+/// leader whatever `[cli] use_leader` says, so Steery's door reaches it.
 pub fn terminal(
     home: &Path,
     root: &Path,
@@ -307,7 +308,7 @@ pub fn terminal(
     if root != home.join(".grok") {
         command.push_str(&format!("GROK_HOME={} ", quoted(&text(root)?)));
     }
-    command.push_str(&format!("grok --resume {id}"));
+    command.push_str(&format!("grok --leader --resume {id}"));
     let line = match &terminal.holder {
         Some(Holder::Person {
             stop: HolderStop::Process { pid, .. },
@@ -355,7 +356,9 @@ pub fn reader(root: &Path, reader: Reader) -> Result<ReaderPlan, Error> {
     let binary = super::binary(root)
         .ok_or_else(|| Error::refused(refusal::NO_BINARY, "grok is not installed here"))?;
     if !reader.cwd.is_absolute() {
-        return Err(Error::invalid("the reader's folder is not an absolute path"));
+        return Err(Error::invalid(
+            "the reader's folder is not an absolute path",
+        ));
     }
     effort(reader.thinking.as_deref())?;
     let mut argv = vec![
@@ -439,9 +442,7 @@ mod kernel {
         let mut info: BsdInfo = unsafe { std::mem::zeroed() };
         let size = c_int::try_from(std::mem::size_of::<BsdInfo>()).ok()?;
         // SAFETY: the buffer is one `BsdInfo`, and `size` is its size.
-        let read = unsafe {
-            proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
-        };
+        let read = unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
         if read != size || info.status == SZOMB {
             return None;
         }

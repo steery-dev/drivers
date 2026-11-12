@@ -30,7 +30,7 @@ short name, its tint and its mark.
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
-| `grok` | Grok Build | [`acp-family`](acp-family/) | observe, drive |
+| `grok` | Grok Build | [`acp-family`](acp-family/) | observe, drive, live (Grok's leader: `picks`) |
 | `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe, drive, live (Hermes's gateway: `picks`) |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
@@ -41,6 +41,7 @@ short name, its tint and its mark.
 | `amp` | Amp | [`amp`](amp/) | observe |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
+| `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
 | `crush` | Crush | [`crush`](crush/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -86,6 +87,7 @@ agrees (PROTOCOL.md §4.1).
 | `goose` | `GOOSE_BIN_DIR`, else `~/.local/bin` | `bash -c "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh \| CONFIGURE=false bash"`, offered where bash, curl and tar are on `PATH` |
 | `gemini` | npm's global folder (`npm prefix -g`) | `npm install -g @google/gemini-cli`. Offered only where npm is here and `node --version` names 20 or newer within 5 s. Else refused, with the requirement that is missing. |
 | `antigravity` | `~/.local/bin` (it adds the folder to the shell's profile) | `bash -c "curl -fsSL https://antigravity.google/cli/install.sh \| bash"`, offered where bash and curl are on `PATH` |
+| `openclaw` | npm's global folder, else `~/.npm-global/bin` (the installer's user prefix), else `~/.local/bin` (its git install's wrapper) | `bash -c "curl -fsSL https://openclaw.ai/install.sh \| bash -s -- --no-onboard --no-prompt"`, offered where bash and curl are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -125,6 +127,8 @@ signed in, as the harness itself says.
 | `goose` | ``run `goose configure` in a terminal`` | `models` starts `goose acp`: `session/new` refused with `Failed to resolve provider and model` means not signed in. |
 | `gemini` | ``run `gemini` in a terminal and choose how to sign in`` | `gemini models list` lists signed in or not, so the driver reads what Gemini reads first: `security.auth.selectedType`, else the type that `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI` or `GEMINI_API_KEY` picks. No type: not signed in. Google sign-in: `oauth_creds.json` there, else not told (the Keychain). Key: `GEMINI_API_KEY` there, else not told (the Keychain). |
 | `antigravity` | ``run `agy` in a terminal and sign in with Google, or set `GEMINI_API_KEY` `` | `agy models`. Exit 0 with a list: signed in. `Please sign in` or `environment variable is not set` on standard error: not signed in. A Google sign-in lives in the system keyring, so the command is what tells. |
+| `openclaw` | ``run `openclaw onboard` in a terminal`` | `openclaw models status --json --check`. Exit 0 or 2 (a sign-in expires soon): signed in. Exit 1 (`auth.missingProvidersInUse` names the providers): not signed in. |
+| `crush` | ``run `crush` in a terminal and pick a provider`` | not told: the driver answers no `models` yet |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -168,6 +172,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 | `pi` | `api-key` | none |
 | `grok` | `grok-sign-in`, `api-key` (xAI, kept as `XAI_API_KEY`) | `grok login --device-auth`'s page (`accounts.x.ai/oauth2/device?user_code=…`), with its code in the step's label. A key counts where `grok models` with it, in an empty `GROK_HOME`, fetched xAI's models. |
 | `amp` | `amp`, `api-key` (Amp) | the link that `amp login` prints after "Open this URL in your browser to authorize:". |
+| `openclaw` | `openclaw-sign-in`, `api-key` (OpenRouter, kept as `OPENROUTER_API_KEY`) | none. `openclaw models auth login` and `openclaw onboard` pick a provider interactively, so the person runs one on this host's terminal and the driver checks `models status --check` again. A key counts where `models status --check` with it exits 0 or 2. |
 
 omp lists its providers' ids and names (RPC `get_login_providers`, the `omp login` picker). It
 does not list how each provider signs in. Most providers only read an API key on their prompt.
@@ -282,7 +287,7 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline` and `hermes` do this. omp, pi, Kilo
+  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok` and `antigravity` do this. omp, pi, Kilo
   and OpenCode have no door of their own, so their door is `plugin`. This repository keeps
   Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in `acp-family/plugin/kilo.ts`
   and OpenCode's in `acp-family/plugin/opencode.ts`, and `setup/plan` installs it. The plugin
@@ -318,6 +323,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `goose` | `/etc/goose/config.yaml`, the files `GOOSE_ADDITIONAL_CONFIG_FILES` names, then `<GOOSE_PATH_ROOT>/config` or `<XDG_CONFIG_HOME or ~/.config>/goose`'s `config.yaml`, a later file's entry over an earlier's. `extensions.<key>` of type `stdio`, `streamable_http` or `builtin`; `enabled: false` off. | the same files: Goose reads none per folder | never: plugins and recipes bring extensions |
 | `gemini` | `mcpServers` of the system defaults, `settings.json`, the system settings, and each extension's `gemini-extension.json`. `mcp.allowed`, `mcp.excluded` and `mcp-server-enablement.json` turn servers off. | `.gemini/settings.json` where `trustedFolders.json` trusts the folder. A folder not trusted lists none. | never: an administrator's remote settings |
 | `antigravity` | `~/.gemini/config/mcp_config.json` `mcpServers`, then each plugin's `mcp_config.json` in `~/.gemini/config/plugins/<plugin>/`, named `<plugin>_<server>`. `disabled: true` off; a plugin off where `config.json` has `plugins.<plugin>.enabled: false`. | `.agents/mcp_config.json` and `.agents/plugins/<plugin>/mcp_config.json` in the folder. The person's server wins a name both give. | never: `--add-dir` widens the workspace, a plugin installed while Antigravity runs |
+| `openclaw` | `mcp.servers` of `<state>/openclaw.json` (comments and trailing commas read). `enabled: false` off. A server with a `command` runs it, so it keeps no URL. | the same file: OpenClaw reads none per folder | never: enabled plugins bring servers |
 | `crush` | `/etc/crush/crush.json`, then `<CRUSH_GLOBAL_CONFIG or XDG_CONFIG_HOME/crush or ~/.config/crush>/crush.json`, then the `crush.json` of Crush's data folder. `mcp.<name>`, a later file's fields over an earlier's. `disabled: true` off. | each folder's `crush.json`, `.crush.json`, from the project's git root down to it, then `.crush/crush.json`. The store's `mcp_disabled_servers` and `mcp_enabled_servers` over every file. | not where a `crushrc` that Crush reads exists: it is a shell script |
 
 ## Adding a driver
@@ -994,6 +1000,41 @@ steery programs test target/debug/steery-driver-cline
 cargo test
 ```
 
+## Grok Build: `acp-family/src/grok/`
+
+One binary, `steery-driver-grok`, from release 1.0.77. Grok keeps its conversations in
+`<GROK_HOME or ~/.grok>/sessions/<encoded folder>/<id>/updates.jsonl`. The driver starts
+Grok's turns headless (`grok -p … --output-format streaming-messages-json`).
+
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`), door `picks`. Grok's door is
+  its leader: `grok agent leader` on the Unix socket `<root>/leader.sock` (`GROK_LEADER_SOCKET`
+  overrides it). Each frame is a 4-byte big-endian length and JSON; ACP rides in
+  `{"type": "acp"}` after a `register`.
+  - A TUI joins the leader only in leader mode: `[cli] use_leader = true`, or `--leader`.
+    Leader mode is off by default, and a sandbox profile turns it off. Such a window has no
+    door: `say` is refused `no-door`. `terminal` opens `grok --leader --resume <id>`, and
+    `setup/plan` notes this to the person, without reading the config.
+  - `held`: a conversation that `active_sessions.json` names and the leader keeps resident.
+    Its stop is `owner`, with the running prompt's id as the token. Else Drive's `held`.
+  - The driver follows a conversation with `session/resume`, which attaches it to the
+    leader's broadcasts with no replay.
+  - `say`: `session/prompt`; the leader queues a prompt that comes while a turn runs.
+    `steer` while a turn runs is `_x.ai/interject`, which goes in at the turn's next safe
+    point. `immediate` is refused `harness-busy` while a turn runs or words wait.
+  - `pick`: `session/set_model` with `_meta.reasoningEffort`. A thinking level Grok does not
+    list is refused `selection-unsupported`.
+  - `stop`: `session/cancel`, where the token still names the turn that runs. The proof is
+    the conversation going idle.
+  - `session/changed`: the leader's `session/update` broadcasts (`tool_call`,
+    `tool_call_update`, `turn_completed`) and `_x.ai/sessions/changed` roster rows for the
+    model and thinking.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-grok
+cargo test
+```
+
 ## Antigravity: `acp-family/src/antigravity/`
 
 One binary, `steery-driver-antigravity`, from release 1.5.5. The driver starts Antigravity's
@@ -1028,6 +1069,57 @@ turns through its own ACP server (`agy acp`).
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-antigravity
 cargo test
+```
+
+## OpenClaw: `acp-family/src/openclaw/`
+
+One binary, `steery-driver-openclaw`, at observe only, from release 2026.11.3. OpenClaw keeps
+everything in its state folder, `OPENCLAW_STATE_DIR` or `~/.openclaw`. Each agent's
+conversations are in its SQLite store, `agents/<agent>/agent/openclaw-agent.sqlite`, which the
+driver opens read-only.
+
+- **Conversations.** A conversation is a window of `session_windows`, by its `session_id`;
+  windows that `previous_session_id` links by `compaction`, `rollover` or `recovery` read as
+  one. Its records are the rows of `transcript_events`, JSON or zstd-packed, each naming its
+  parent; the read walks the path from the active leaf, through `leaf` records. A sub-agent
+  is a `session_nodes` row whose `spawned_by` names the parent; its task is its first
+  message with OpenClaw's internal context blocks left out. A heartbeat poll or a retry
+  prompt begins a turn with no words of the person's. `run-failed-before-reply` fails the
+  turn. An in-place compaction is `compacted` with its token counts and summary.
+- **Setup.** Two entries:
+  - Steery's MCP server at `/mcp/servers/steery` of `openclaw.json`, with `transport:
+    streamable-http` (a URL server without it speaks SSE) and `requestTimeoutMs`. `openclaw
+    acp` refuses the servers that an ACP client forwards, so Steery's server sits in the
+    person's own `mcp.servers`. `openclaw mcp set` refuses while the gateway runs. A server
+    written into the file directly works: `openclaw mcp status --json` then shows it `ok`.
+    OpenClaw parses JSON5, and the runtime writes plain JSON. Thus where the file is not
+    plain JSON, the plan notes it.
+  - Steery's skill in `skills/steery/SKILL.md`, the managed skills folder, which every agent
+    reads.
+  - OpenClaw's hooks are JavaScript modules, not commands. Thus the driver declares no hooks.
+- **Needs** (protocol 5): `sign-in`, where `openclaw models status --json --check` exits 1.
+  See Signing in.
+- **`models`**: `openclaw models list --json`, the models of its configured providers that
+  are `available`, with the one tagged `default` first. Each key `<provider>/<model>` is split
+  at its first `/`.
+
+Ran (OpenClaw 2026.11.3, `/opt/homebrew/bin/openclaw`, ollama `qwen3:1.7b`): five real
+conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd record, one
+`openclaw sessions compact`) and a heartbeat, listed and read from `~/.openclaw`;
+`setup/plan`, `mcp/list` and `models` against `~/.openclaw` (468 models, `signed_in: true`);
+and against an empty `OPENCLAW_STATE_DIR` with no key, where `models status --check` exits 1
+and the plan asks for `sign-in`. A real sub-agent, spawned by `sessions_spawn` through the
+gateway's `tools.invoke` (with `gateway.tools.allow` lifting its default deny for the probe),
+listed under its lead, left out of the list, and read in place: its task, its answer.
+
+Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
+idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the
+installer on a host without OpenClaw; `~/.npm-global/bin` and `~/.local/bin` as install
+folders (read from `install.sh`, not seen installed).
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-openclaw
 ```
 
 ## Amp: `amp/`
