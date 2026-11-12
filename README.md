@@ -42,6 +42,7 @@ short name, its tint and its mark.
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe |
+| `crush` | Crush | [`crush`](crush/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -87,6 +88,7 @@ agrees (PROTOCOL.md §4.1).
 | `gemini` | npm's global folder (`npm prefix -g`) | `npm install -g @google/gemini-cli`. Offered only where npm is here and `node --version` names 20 or newer within 5 s. Else refused, with the requirement that is missing. |
 | `antigravity` | `~/.local/bin` (it adds the folder to the shell's profile) | `bash -c "curl -fsSL https://antigravity.google/cli/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `openclaw` | npm's global folder, else `~/.npm-global/bin` (the installer's user prefix), else `~/.local/bin` (its git install's wrapper) | `bash -c "curl -fsSL https://openclaw.ai/install.sh \| bash -s -- --no-onboard --no-prompt"`, offered where bash and curl are on `PATH` |
+| `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -126,6 +128,7 @@ signed in, as the harness itself says.
 | `gemini` | ``run `gemini` in a terminal and choose how to sign in`` | `gemini models list` lists signed in or not, so the driver reads what Gemini reads first: `security.auth.selectedType`, else the type that `GOOGLE_GENAI_USE_GCA`, `GOOGLE_GENAI_USE_VERTEXAI` or `GEMINI_API_KEY` picks. No type: not signed in. Google sign-in: `oauth_creds.json` there, else not told (the Keychain). Key: `GEMINI_API_KEY` there, else not told (the Keychain). |
 | `antigravity` | ``run `agy` in a terminal and sign in with Google, or set `GEMINI_API_KEY` `` | `agy models`. Exit 0 with a list: signed in. `Please sign in` or `environment variable is not set` on standard error: not signed in. A Google sign-in lives in the system keyring, so the command is what tells. |
 | `openclaw` | ``run `openclaw onboard` in a terminal`` | `openclaw models status --json --check`. Exit 0 or 2 (a sign-in expires soon): signed in. Exit 1 (`auth.missingProvidersInUse` names the providers): not signed in. |
+| `crush` | ``run `crush` in a terminal and pick a provider`` | not told: the driver answers no `models` yet |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -321,6 +324,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `gemini` | `mcpServers` of the system defaults, `settings.json`, the system settings, and each extension's `gemini-extension.json`. `mcp.allowed`, `mcp.excluded` and `mcp-server-enablement.json` turn servers off. | `.gemini/settings.json` where `trustedFolders.json` trusts the folder. A folder not trusted lists none. | never: an administrator's remote settings |
 | `antigravity` | `~/.gemini/config/mcp_config.json` `mcpServers`, then each plugin's `mcp_config.json` in `~/.gemini/config/plugins/<plugin>/`, named `<plugin>_<server>`. `disabled: true` off; a plugin off where `config.json` has `plugins.<plugin>.enabled: false`. | `.agents/mcp_config.json` and `.agents/plugins/<plugin>/mcp_config.json` in the folder. The person's server wins a name both give. | never: `--add-dir` widens the workspace, a plugin installed while Antigravity runs |
 | `openclaw` | `mcp.servers` of `<state>/openclaw.json` (comments and trailing commas read). `enabled: false` off. A server with a `command` runs it, so it keeps no URL. | the same file: OpenClaw reads none per folder | never: enabled plugins bring servers |
+| `crush` | `/etc/crush/crush.json`, then `<CRUSH_GLOBAL_CONFIG or XDG_CONFIG_HOME/crush or ~/.config/crush>/crush.json`, then the `crush.json` of Crush's data folder. `mcp.<name>`, a later file's fields over an earlier's. `disabled: true` off. | each folder's `crush.json`, `.crush.json`, from the project's git root down to it, then `.crush/crush.json`. The store's `mcp_disabled_servers` and `mcp_enabled_servers` over every file. | not where a `crushrc` that Crush reads exists: it is a shell script |
 
 ## Adding a driver
 
@@ -1177,6 +1181,44 @@ Build and check it, with Amp on `PATH`:
 ```sh
 cd amp && cargo build
 steery programs test target/debug/steery-driver-amp
+cargo test
+```
+
+## Crush: `crush/`
+
+One binary, `steery-driver-crush`, with no settings, at observe only. Crush keeps each
+project's sessions in that project's SQLite store, `<project>/.crush/crush.db`. The
+projects are listed in `projects.json` of Crush's data folder: `$CRUSH_GLOBAL_DATA`, else
+`$XDG_DATA_HOME/crush`, else `~/.local/share/crush`. The driver opens each store read only.
+
+- **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`).
+  - `sessions/list` lists every session of every project, where the project is.
+    A sub-agent (`parent_session_id`) is listed under its lead. A session whose id begins
+    `title-` is Crush's own, which names its lead, and is never listed.
+  - `sessions/read` reads a session's `messages` in `created_at` order, 200 at a time.
+    The events are these: turns and how they ended, the person's words and pictures, the
+    agent's words and thinking, calls and their results, a sub-agent's start, a summary, and
+    the model. An `agent` call's sub-agent is the session `<message>$$<call>`.
+  - A turn ends at an answer's `finish`: `end_turn` finished, `canceled` interrupted,
+    `error` failed with the provider's words. Crush keeps tokens only of a session's newest
+    response, so a read gives them once, at its end.
+  - An answer that the model still writes has no `finish`. It holds the cursor back.
+  - `sessions/fold` is refused `selection-unsupported`: the driver has no door.
+- **Setup** (`setup/plan`). The plan has two entries: the MCP entry in the person's
+  `crush.json` (`mcp.steery`, `type: http` and its URL), and the skill in Crush's own skills
+  folder (`$CRUSH_SKILLS_DIR`, else `<XDG_CONFIG_HOME or ~/.config>/crush/skills`). Crush
+  sends no `_meta` with an MCP call, so the entry sends no `Steery-*` header.
+- **MCP servers** (`mcp/list`): see MCP servers.
+
+Crush puts no session id in a shell command's environment or an MCP call. The skill tells
+the agent to run `crush session last --json` in its folder and send `meta.uuid`. A live
+turn checked it: the agent's `bash` call printed its own session's id.
+
+Build and check it, with Crush on `PATH`:
+
+```sh
+cd crush && cargo build
+steery programs test target/debug/steery-driver-crush
 cargo test
 ```
 

@@ -1,0 +1,20 @@
+[package]
+name = "steery-driver-crush"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Steery's driver for Crush: it reads Crush's sessions from each project's SQLite store and plans Crush's setup."
+
+[dependencies]
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
+steery-driver-common = { path = "../common" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# Its own workspace, so it builds alone.
+[workspace]

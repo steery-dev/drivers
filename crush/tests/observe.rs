@@ -1,0 +1,328 @@
+//! The driver, run as the runtime runs it, over standard input and output, against two
+//! project stores that Crush 0.100.0 wrote (`tests/fixtures`, each a `sqlite3 .dump`): one a
+//! live turn with an Ollama model that ran tools, with a sub-agent and Crush's own title
+//! session added to it, one a turn that the provider refused. A stand-in `crush` on `PATH`
+//! answers `--version` only.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use steery_sdk::client::{CallError, Client};
+use steery_sdk::{method, wire};
+
+const LEAD: &str = "34ab414b-f784-479a-8b51-ca382fd4c734";
+const EARLIER: &str = "dddc5db0-c8d5-45ea-9b8f-69aac032878a";
+const SUB: &str = "lead-agent-1$$call_sub1";
+const FAILED: &str = "96194384-084a-4271-a8f1-4fe264e9f6d5";
+
+/// A project at `home/<name>` whose store holds `fixture`.
+fn project(home: &Path, name: &str, fixture: &str) -> PathBuf {
+    let path = home.join(name);
+    std::fs::create_dir_all(path.join(".crush")).unwrap();
+    let sql = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture),
+    )
+    .unwrap();
+    rusqlite::Connection::open(path.join(".crush/crush.db"))
+        .unwrap()
+        .execute_batch(&sql)
+        .unwrap();
+    path
+}
+
+/// A home with Crush installed (the stand-in) and the two projects that `projects.json` lists.
+fn home(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let home = std::env::temp_dir().join(format!("steery-crush-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("crush"),
+        "#!/bin/sh\n[ \"$1\" = --version ] && echo 'crush version v0.100.0'\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(bin.join("crush"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let work = project(&home, "work", "live.sql");
+    let failed = project(&home, "failed", "failed.sql");
+    let data = home.join(".local/share/crush");
+    std::fs::create_dir_all(&data).unwrap();
+    let listed = json!({"projects": [
+        {"path": work, "data_dir": work.join(".crush"), "last_accessed": "2026-11-12T14:45:40Z"},
+        {"path": failed, "data_dir": failed.join(".crush"), "last_accessed": "2026-11-12T08:48:03Z"},
+        {"path": "relative", "data_dir": "relative/.crush", "last_accessed": "2026-11-12T08:48:03Z"},
+    ]});
+    std::fs::write(data.join("projects.json"), listed.to_string()).unwrap();
+    (home, work, failed)
+}
+
+/// The driver, in an environment holding only `HOME` and `PATH`, initialized.
+async fn start(home: &Path) -> Client {
+    let client = Client::spawn(
+        Path::new("/usr/bin/env"),
+        &[
+            "-i".into(),
+            format!("HOME={}", home.display()),
+            format!("PATH={}:/usr/bin:/bin", home.join("bin").display()),
+            env!("CARGO_BIN_EXE_steery-driver-crush").into(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let offered = wire::InitializeParams {
+        protocol: vec![12, 13],
+        runtime: wire::Runtime {
+            release: "7.0.0".into(),
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+        },
+        home: home.to_owned(),
+        config: home.join(".config/steery"),
+        settings: Default::default(),
+    };
+    assert_eq!(client.initialize(&offered).await.unwrap().protocol, 13);
+    client
+}
+
+async fn call(client: &Client, method: &str, params: Value) -> Result<Value, CallError> {
+    client.call(method, params, Duration::from_secs(30)).await
+}
+
+fn kinds(read: &Value) -> Vec<&str> {
+    read["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect()
+}
+
+/// Each project's sessions are listed where they ran, a sub-agent under its lead and Crush's
+/// own title session nowhere. A read folds the lead into its turn, calls and tokens; a
+/// cursor read is empty; the sub-agent reads alone and locates to its lead; a refused turn
+/// ends `failed` with the provider's words; a session no store has is `not-found`.
+#[tokio::test]
+async fn crush_lists_and_reads_each_projects_sessions() {
+    let (home, work, failed) = home("sessions");
+    let driver = start(&home).await;
+
+    let listed = call(&driver, method::SESSIONS_LIST, json!({"transcripts": []}))
+        .await
+        .unwrap();
+    assert_eq!(listed["complete"], true, "{listed}");
+    let sessions = listed["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = sessions
+        .iter()
+        .map(|session| session["external_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [EARLIER, LEAD, FAILED], "{listed}");
+    let lead = &sessions[1];
+    assert_eq!(lead["cwd"], json!(work));
+    assert_eq!(lead["sub_agents"][0]["external_id"], SUB, "{lead}");
+    assert_eq!(lead["sub_agents"][0]["task"], "Look around", "{lead}");
+    assert_eq!(sessions[2]["cwd"], json!(failed));
+    assert!(!listed.to_string().contains("title-"), "{listed}");
+
+    let read = call(&driver, method::SESSIONS_READ, json!({"external_id": LEAD}))
+        .await
+        .unwrap();
+    assert_eq!(read["whole"], true, "{read}");
+    assert_eq!(read["more"], false, "{read}");
+    let kinds = kinds(&read);
+    for kind in [
+        "turn_began",
+        "words",
+        "model",
+        "call_began",
+        "call_ended",
+        "sub_agent",
+        "turn_ended",
+        "tokens",
+    ] {
+        assert!(kinds.contains(&kind), "{kind} in {kinds:?}");
+    }
+    let events = read["events"].as_array().unwrap();
+    let bash = events
+        .iter()
+        .find(|event| event["type"] == "call_began")
+        .unwrap();
+    assert_eq!(bash["call"]["tool"], "bash", "{bash}");
+    assert_eq!(bash["call"]["group"], "shell", "{bash}");
+    let refused = events
+        .iter()
+        .find(|event| event["type"] == "call_ended" && event["ok"] == false)
+        .unwrap();
+    assert_eq!(refused["id"], "call_4xpo9i6i", "{refused}");
+    let started = events
+        .iter()
+        .find(|event| event["type"] == "sub_agent")
+        .unwrap();
+    assert_eq!(started["external_id"], SUB, "{started}");
+    assert_eq!(started["call"], "call_sub1", "{started}");
+    let ended = events
+        .iter()
+        .find(|event| event["type"] == "turn_ended")
+        .unwrap();
+    assert_eq!(ended["state"], "finished", "{ended}");
+
+    let again = call(
+        &driver,
+        method::SESSIONS_READ,
+        json!({"external_id": LEAD, "cursor": read["cursor"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["events"], json!([]), "{again}");
+
+    let sub = call(
+        &driver,
+        method::SESSIONS_READ,
+        json!({"external_id": LEAD, "sub_agent": SUB}),
+    )
+    .await
+    .unwrap();
+    let said: Vec<&str> = sub["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|event| event["text"].as_str())
+        .collect();
+    assert_eq!(said, ["List the folder.", "Two files."], "{sub}");
+    let located = call(
+        &driver,
+        method::SESSIONS_LOCATE,
+        json!({"external_id": SUB}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(located["session"]["external_id"], LEAD, "{located}");
+
+    let read = call(
+        &driver,
+        method::SESSIONS_READ,
+        json!({"external_id": FAILED}),
+    )
+    .await
+    .unwrap();
+    let ended = read["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "turn_ended")
+        .unwrap();
+    assert_eq!(ended["state"], "failed", "{ended}");
+    assert_eq!(
+        ended["failure"]["line"], "Unauthorized: User not found.",
+        "{ended}"
+    );
+    assert_eq!(ended["failure"]["service"], true, "{ended}");
+
+    for missing in [
+        json!({"external_id": "title-".to_owned() + LEAD}),
+        json!({"external_id": "gone"}),
+    ] {
+        let missing = call(&driver, method::SESSIONS_READ, missing).await;
+        assert!(
+            matches!(&missing, Err(CallError::Refused { word, .. }) if word == "not-found"),
+            "{missing:?}"
+        );
+    }
+    driver.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The servers of every file Crush reads, a later file's entry over an earlier's, and the
+/// person's toggles in the project's store over both; only a server's bare URL comes back.
+/// The plan holds Steery's MCP entry and the skill in Crush's own skills folder.
+#[tokio::test]
+async fn crush_lists_its_servers_and_plans_its_setup() {
+    let (home, work, _) = home("mcp");
+    let config = home.join(".config/crush");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("crush.json"),
+        json!({"mcp": {
+            "tracker": {"type": "http", "url": "https://bot:SECRET@mcp.example.com/mcp?k=SECRET",
+                        "headers": {"Authorization": "Bearer SECRET"}},
+            "files": {"type": "stdio", "command": "npx", "args": ["--token", "SECRET"]},
+            "later": {"type": "stdio", "command": "later", "disabled": true},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        work.join(".crush.json"),
+        json!({"mcp": {"files": {"disabled": true}, "local": {"type": "sse", "url": "http://127.0.0.1:9/sse"}}})
+            .to_string(),
+    )
+    .unwrap();
+    rusqlite::Connection::open(work.join(".crush/crush.db"))
+        .unwrap()
+        .execute_batch(
+            "insert into mcp_enabled_servers values ('later'); \
+             insert into mcp_disabled_servers values ('tracker');",
+        )
+        .unwrap();
+    let driver = start(&home).await;
+
+    let everywhere = call(&driver, method::MCP_LIST, json!({})).await.unwrap();
+    assert!(!everywhere.to_string().contains("SECRET"), "{everywhere}");
+    assert_eq!(
+        everywhere["servers"],
+        json!([{"server": "files"}, {"server": "tracker", "url": "https://mcp.example.com/mcp"}]),
+        "{everywhere}"
+    );
+    let here = call(&driver, method::MCP_LIST, json!({"cwd": work}))
+        .await
+        .unwrap();
+    assert_eq!(
+        here["servers"],
+        json!([{"server": "later"}, {"server": "local", "url": "http://127.0.0.1:9/sse"}]),
+        "{here}"
+    );
+    assert_eq!(here["complete"], true, "{here}");
+    assert!(
+        here["watch"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(work.join(".crush.json")))
+    );
+
+    std::fs::write(work.join("crushrc"), "echo '{}'\n").unwrap();
+    let shell = call(&driver, method::MCP_LIST, json!({"cwd": work}))
+        .await
+        .unwrap();
+    assert_eq!(shell["complete"], false, "{shell}");
+
+    let planned = call(
+        &driver,
+        method::SETUP_PLAN,
+        json!({"mcp_url": "http://127.0.0.1:7/mcp", "skill": "# Steery", "hook": "steery hook",
+               "door": "http://127.0.0.1:7/door", "release": "7.0.0", "timeout": 60}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(planned["found"]["release"], "0.100.0", "{planned}");
+    let entries = planned["entries"].as_array().unwrap();
+    assert_eq!(
+        entries[0]["path"],
+        json!(config.join("crush.json")),
+        "{planned}"
+    );
+    assert_eq!(entries[0]["at"], "/mcp/steery", "{planned}");
+    assert_eq!(
+        entries[0]["value"],
+        json!({"type": "http", "url": "http://127.0.0.1:7/mcp"})
+    );
+    assert_eq!(
+        entries[1]["path"],
+        json!(config.join("skills/steery/SKILL.md"))
+    );
+    assert!(planned.get("needs").is_none(), "{planned}");
+    driver.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&home);
+}
