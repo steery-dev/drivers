@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/private/tmp/cursor-observe-ws","session_id":"2bcab45a-c9bc-485f-8c94-1fccd0cf3fc3","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply ok"}]},"session_id":"2bcab45a-c9bc-485f-8c94-1fccd0cf3fc3"}

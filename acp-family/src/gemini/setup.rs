@@ -1,8 +1,9 @@
 //! `setup/plan`: what sets Gemini CLI up for Steery, each an entry the runtime writes and
 //! records: Steery's MCP server under `/mcpServers/steery` and one hook per event Steery
 //! reads ([`super::hooks::EVENTS`]) beside the person's own, both in the user
-//! `<root>/settings.json`; Steery's skill in `<root>/skills/steery/SKILL.md`; and the
-//! folders the runtime names in `<root>/trustedFolders.json`.
+//! `<root>/settings.json`; Steery's skill in `<root>/skills/steery/SKILL.md`; the hook
+//! command line that a turn Steery runs asks at a permission, in `<root>/steery/hook`; and
+//! the folders the runtime names in `<root>/trustedFolders.json`.
 //!
 //! Gemini runs the hooks of `settings.json` only in a folder its person trusted
 //! (`hookRegistry.ts`, folder trust is on by default). Its `trusted_hooks.json` holds only
@@ -14,6 +15,11 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use steery_driver_common::program::{ask, helper, on_path, release_within, version};
 use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Setup};
+
+/// Steery's hook command line, which a turn runs at a permission Gemini asks for.
+pub(crate) fn hook_file(root: &Path) -> PathBuf {
+    root.join("steery").join("hook")
+}
 
 /// The oldest Node.js that Gemini CLI's package runs on (its `engines.node`).
 const NODE: (u64, u64, u64) = (20, 0, 0);
@@ -110,6 +116,13 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
             at: None,
             value: json!(setup.skill),
             carries: vec![Part::Skill],
+        },
+        Entry {
+            path: hook_file(root),
+            format: Format::Text,
+            at: None,
+            value: json!(setup.hook),
+            carries: vec![Part::Hooks],
         },
     ];
     // One group per event with no `matcher`, which matches every tool and source, beside
@@ -248,6 +261,16 @@ mod tests {
         assert_eq!(
             (skill.path, skill.value),
             (root.join("skills/steery/SKILL.md"), json!("# Steery"))
+        );
+        // The command line a turn of Steery's runs at a permission.
+        let hook_file = entries.next().unwrap();
+        assert_eq!(
+            (hook_file.path, hook_file.value, hook_file.carries),
+            (
+                root.join("steery/hook"),
+                json!("/opt/steery/hook"),
+                vec![Part::Hooks]
+            )
         );
         // What setup writes is what the hooks read: one entry per declared hook.
         for hook in super::super::hooks::table() {

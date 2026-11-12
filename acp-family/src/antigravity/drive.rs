@@ -67,10 +67,11 @@ impl crate::turn::Host for Turns {
     /// An ACP session writes no history, so the turn marks its conversation as driven, in
     /// the root of the home `start` gave it ([`store::drove`]). A mark it cannot write leaves
     /// the conversation unlisted; standard error is the turn's refusal, so it says nothing.
-    fn opened(&self, session: &str) {
+    fn opened(&self, session: &str) -> std::io::Result<()> {
         if let Some(home) = std::env::var_os("HOME") {
             let _ = store::drove(&super::root(Path::new(&home)), session);
         }
+        Ok(())
     }
 }
 

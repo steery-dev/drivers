@@ -1,7 +1,9 @@
-//! Steery's driver for Gemini CLI at observe: it reads Gemini's conversations from
+//! Steery's driver for Gemini CLI at drive: it reads Gemini's conversations from
 //! `<root>/tmp/<project>/chats/`, plans the entries that set Gemini up for Steery, reads
-//! its hooks' moments, lists the MCP servers it loads and the models it offers.
+//! its hooks' moments, lists the MCP servers it loads and the models it offers, and starts
+//! Gemini's turns through its own ACP server ([`drive`]).
 
+pub(crate) mod drive;
 mod events;
 mod hooks;
 mod mcp;
@@ -10,7 +12,7 @@ mod setup;
 mod store;
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 use steery_sdk::wire::{self, harness};
@@ -24,11 +26,13 @@ pub(crate) const MINIMUM: &str = "0.67.0";
 /// npm's package of Gemini CLI.
 pub(crate) const PACKAGE: &str = "@google/gemini-cli";
 
-/// The driver: what `initialize` said, and the listings it answered.
+/// The driver: what `initialize` said, the listings it answered, and the models Gemini
+/// listed last.
 #[derive(Default)]
 pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
+    listed: Mutex<Vec<harness::Model>>,
 }
 
 /// The person's home, Gemini's root, and what was read of its chat files.
@@ -63,9 +67,9 @@ impl Driver {
         Ok(&self.place()?.store)
     }
 
-    fn info() -> wire::HarnessInfo {
+    fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: MINIMUM.into(),
                 update: Some(format!("npm install -g {PACKAGE}@latest")),
@@ -109,10 +113,18 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![harness::Act::Continue, harness::Act::New],
                 touches: false,
             },
-            hooks: hooks::table(),
+            // Gemini's own hooks, and the permissions a turn of this driver's asks for.
+            hooks: hooks::table()
+                .into_iter()
+                .chain(
+                    crate::turn::hooks::table(protocol)
+                        .into_iter()
+                        .filter(|hook| hook.event == crate::turn::hooks::PERMISSION),
+                )
+                .collect(),
         }
     }
 }
@@ -131,7 +143,7 @@ impl Program for Driver {
         Ok(wire::Initialized {
             protocol,
             program: Harness::Gemini.program()?,
-            harness: Some(Box::new(Self::info())),
+            harness: Some(Box::new(Self::info(protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -167,12 +179,62 @@ impl Program for Driver {
                     steery_sdk::params(params)?,
                 )?)
             }
-            method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
-            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::HOOK_READ => {
+                let read: harness::HookRead = steery_sdk::params(params)?;
+                if read.event == crate::turn::hooks::PERMISSION {
+                    result(drive::permission(self.store()?, &read)?)
+                } else {
+                    result(hooks::read(read)?)
+                }
+            }
+            method::HOOK_ANSWER => {
+                let answer: harness::HookAnswer = steery_sdk::params(params)?;
+                if answer.event == crate::turn::hooks::PERMISSION {
+                    result(crate::turn::hooks::answer("Gemini CLI", answer)?)
+                } else {
+                    result(hooks::answer(answer)?)
+                }
+            }
             method::MODELS => {
                 let _: wire::Empty = steery_sdk::params(params)?;
-                result(models::list(&self.place()?.root).await?)
+                let models = models::list(&self.place()?.root).await?;
+                *self.listed.lock().unwrap_or_else(|e| e.into_inner()) = models.models.clone();
+                result(models)
             }
+            method::HELD => result(drive::held(self.store()?, &steery_sdk::params(params)?)?),
+            method::IDLE => result(drive::idle(self.store()?, &steery_sdk::params(params)?)),
+            method::START => {
+                let listed = self
+                    .listed
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let place = self.place()?;
+                result(drive::start(
+                    &place.root,
+                    &place.store,
+                    &listed,
+                    steery_sdk::params(params)?,
+                )?)
+            }
+            method::TURN_READ => result(crate::turn::drive::turn_line(
+                "Gemini CLI",
+                steery_sdk::params(params)?,
+            )),
+            method::STOP => result(crate::turn::drive::stop(
+                "Gemini CLI",
+                &steery_sdk::params(params)?,
+            )?),
+            method::RECEIPT_MARK => {
+                result(drive::mark(self.store()?, &steery_sdk::params(params)?)?)
+            }
+            method::RECEIPT_FIND => {
+                result(drive::find(self.store()?, &steery_sdk::params(params)?)?)
+            }
+            method::TERMINAL => result(drive::terminal(
+                self.store()?,
+                &steery_sdk::params(params)?,
+            )?),
             _ => Err(Error::Unknown),
         }
     }

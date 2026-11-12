@@ -112,6 +112,28 @@ pub trait Host {
         "effort"
     }
 
+    /// The request that sets `option` of the session to `value`: by default, as one of its
+    /// config options.
+    fn pick(&self, session: &str, option: &str, value: &str) -> (&'static str, Value) {
+        (
+            "session/set_config_option",
+            json!({"sessionId": session, "configId": option, "value": value}),
+        )
+    }
+
+    /// The harness opened `session` for the turn, before any words go in: a harness whose
+    /// store does not tell a driven conversation from a headless one marks it here.
+    fn opened(&self, _session: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Whether the turn asks Steery's hook for words to go on once the harness runs
+    /// nothing more of the session: not where the harness runs Steery's own hook at a
+    /// turn's end, which makes it go on.
+    fn goes_on(&self) -> bool {
+        true
+    }
+
     /// Whether the harness still runs a turn of `session` once every prompt the turn sent
     /// has its answer, as words another client queued into it can make it; `acp` is the pid
     /// of the harness's ACP server, `queued` the words whose prompt the harness answered
@@ -124,10 +146,6 @@ pub trait Host {
         queued: &[String],
         unmarked: &mut Option<tokio::time::Instant>,
     ) -> bool;
-
-    /// The harness opened `session` for the turn, before any words go in: a harness whose
-    /// store does not tell a driven conversation from a headless one marks it here.
-    fn opened(&self, _session: &str) {}
 }
 
 /// What a turn is asked to do, as its command line says it.
@@ -269,11 +287,11 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
                     .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?
             }
         };
-        host.opened(&session);
+        host.opened(&session).map_err(failed)?;
         for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
             if let Some(value) = value {
-                let params = json!({"sessionId": session, "configId": option, "value": value});
-                acp.call("session/set_config_option", params).await?;
+                let (method, params) = host.pick(&session, option, value);
+                acp.call(method, params).await?;
             }
         }
         // The prompts that wait for the harness's answer, with their words, by their ids.
@@ -404,7 +422,9 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
         }
         // The harness runs nothing more of the session: Steery's hook may give it words to
         // go on.
-        let (Some(hook), None, Some(reason)) = (&asked.hook, cancelled, stopped.take()) else {
+        let (Some(hook), None, Some(reason), true) =
+            (&asked.hook, cancelled, stopped.take(), host.goes_on())
+        else {
             break;
         };
         let Some(words) = go_on(hook, &session, &reason, continued).await else {
