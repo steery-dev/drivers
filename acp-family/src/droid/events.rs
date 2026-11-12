@@ -180,17 +180,12 @@ impl Reading<'_> {
             let Some(call) = block["tool_use_id"].as_str() else {
                 continue;
             };
-            let text = result_text(&block["content"]);
-            let lines: Vec<&str> = text.lines().collect();
-            let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
-            self.push(Event::CallEnded {
+            self.push(call_ended(
                 at,
-                id: call.to_owned(),
-                ok: block["is_error"] != true,
-                chars: text.chars().count() as u64,
-                tail: (!tail.is_empty()).then_some(tail),
-                waited: Vec::new(),
-            });
+                call,
+                block["is_error"] != true,
+                &result_text(&block["content"]),
+            ));
         }
         let text = texts(blocks);
         if text.is_empty() {
@@ -296,6 +291,20 @@ impl Reading<'_> {
             state,
             failure,
         });
+    }
+}
+
+/// The end of call `id`, with what it gave back.
+pub(crate) fn call_ended(at: u64, id: &str, ok: bool, text: &str) -> Event {
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
+    Event::CallEnded {
+        at,
+        id: id.to_owned(),
+        ok,
+        chars: text.chars().count() as u64,
+        tail: (!tail.is_empty()).then_some(tail),
+        waited: Vec::new(),
     }
 }
 

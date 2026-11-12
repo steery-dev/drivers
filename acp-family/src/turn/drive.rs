@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use steery_driver_common::receipt::{DELIVERED, marked};
 use steery_sdk::wire::harness::{
-    Act, Ended, Launch, Model, Receipt, Start, Stdin, Stop, Stopped, Stream, TerminalCommand,
-    TurnLine, TurnRead, TurnState,
+    Act, Ended, Event, Execution, Launch, Model, Receipt, Sample, Start, Stdin, Stop, Stopped,
+    Stream, TerminalCommand, TurnLine, TurnRead, TurnState,
 };
 use steery_sdk::{Error, refusal};
 
@@ -22,6 +22,40 @@ const ANSWERING: [&str; 5] = [
     "tool_call_update",
     "plan",
 ];
+
+/// `idle`'s sample of the last turn in `events`, where it ended: a store read.
+pub fn sample(events: &[Event]) -> Option<Sample> {
+    let mut started_at = None;
+    let mut ended = None;
+    for event in events {
+        match event {
+            Event::TurnBegan { at, .. } => {
+                started_at = Some(*at);
+                ended = None;
+            }
+            Event::TurnEnded {
+                at, state, failure, ..
+            } => ended = Some((*at, *state, failure.as_ref().map(|f| f.line.clone()))),
+            _ => {}
+        }
+    }
+    let (ended_at, state, error) = ended?;
+    Some(Sample {
+        state: match state {
+            TurnState::Finished => Execution::Finished,
+            TurnState::Failed => Execution::Failed,
+            TurnState::Interrupted => Execution::Interrupted,
+        },
+        observed_at: now(),
+        started_at,
+        ended_at: Some(ended_at),
+        model: None,
+        thinking: None,
+        error,
+        vacant: false,
+        if_unheld: true,
+    })
+}
 
 /// A model and thinking level that the harness's last list has; an empty list checks
 /// nothing.

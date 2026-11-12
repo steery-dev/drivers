@@ -1,7 +1,8 @@
 //! The Qwen Code driver, run as the runtime runs it, over a `$QWEN_HOME` holding chats that
 //! Qwen Code 0.27.2 wrote (`tests/qwen/root`): turns that ran a shell command, a turn whose
 //! conversation was compressed, a conversation of two prompts, and two turns whose model
-//! refused them (a sign-in failure and a connection failure).
+//! refused them (a sign-in failure and a connection failure). Its turns read what
+//! `qwen -o stream-json` 0.27.2 printed (`tests/qwen/turns`).
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,8 +17,8 @@ const REFUSED: &str = "beaa9903-0b5a-4be4-bcde-2b6515e54ed4";
 const TWO_PROMPTS: &str = "5ce1cae9-3180-43b0-93ef-01cbca61d62b";
 
 /// A home of this test's own, whose `.qwen` holds a copy of the fixture.
-fn home() -> PathBuf {
-    let home = std::env::temp_dir().join(format!("steery-qwen-test-{}", std::process::id()));
+fn home(name: &str) -> PathBuf {
+    let home = std::env::temp_dir().join(format!("steery-qwen-test-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     copy(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/qwen/root"),
@@ -26,14 +27,31 @@ fn home() -> PathBuf {
     home
 }
 
+/// Copies the fixture, giving each chat the file time Qwen left on it: its last record's
+/// `timestamp`. A checkout gives every file the same time, and the listing orders by it.
 fn copy(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap().flatten() {
         let target = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() {
             copy(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
+            continue;
+        }
+        std::fs::copy(entry.path(), &target).unwrap();
+        if target
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+        {
+            let text = std::fs::read_to_string(&target).unwrap();
+            let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+            let at =
+                chrono::DateTime::parse_from_rfc3339(last["timestamp"].as_str().unwrap()).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_modified(at.into())
+                .unwrap();
         }
     }
 }
@@ -44,6 +62,7 @@ async fn start(home: &Path) -> Client {
         &[
             "-i".into(),
             format!("HOME={}", home.display()),
+            format!("PATH={}", home.join("bin").display()),
             format!(
                 "QWEN_CODE_SYSTEM_SETTINGS_PATH={}",
                 home.join("system/settings.json").display()
@@ -109,7 +128,7 @@ fn chat(home: &Path, project: &str, id: &str) -> PathBuf {
 
 #[tokio::test]
 async fn reads_the_chats_qwen_wrote() {
-    let home = home();
+    let home = home("chats");
     let client = start(&home).await;
 
     let listed = ask(&client, method::SESSIONS_LIST, json!({}))
@@ -121,8 +140,8 @@ async fn reads_the_chats_qwen_wrote() {
         .iter()
         .map(|session| session["external_id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, [REFUSED, FAILED_SHELL, COMPRESSED, TWO_PROMPTS]);
-    let two = &sessions[3];
+    assert_eq!(ids, [TWO_PROMPTS, COMPRESSED, FAILED_SHELL, REFUSED]);
+    let two = &sessions[0];
     assert_eq!(two["cwd"], "/tmp/qwh/work");
     assert_eq!(
         two["transcripts"][0].as_str().unwrap(),
@@ -134,7 +153,7 @@ async fn reads_the_chats_qwen_wrote() {
             .unwrap()
             .starts_with("Reply with the single word: pong")
     );
-    assert_eq!(sessions[0]["cwd"], "/private/tmp/qwtest");
+    assert_eq!(sessions[3]["cwd"], "/private/tmp/qwtest");
 
     let located = ask(
         &client,
@@ -479,4 +498,178 @@ async fn mcp(client: &Client, home: &Path) {
         .map(|s| s["server"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["fromext", "person", "sys"]);
+}
+
+/// What each read of a recorded turn said, a short line each: the conversation it named,
+/// its events, how it ended and the refusal.
+async fn turn(client: &Client, turn: &str, lines_of: &[(&str, String)]) -> Vec<String> {
+    let mut said = Vec::new();
+    for (stream, line) in lines_of {
+        let read = ask(
+            client,
+            method::TURN_READ,
+            json!({"turn": turn, "stream": stream, "line": line}),
+        )
+        .await
+        .unwrap();
+        if let Some(named) = read["named"].as_str() {
+            said.push(format!("named {named}"));
+        }
+        if let Some(events) = read.get("events") {
+            said.extend(lines(events));
+        }
+        if let Some(ended) = read.get("ended") {
+            said.push(format!("ended {}", ended["state"].as_str().unwrap()));
+        }
+        if let Some(refused) = read["refused"].as_str() {
+            said.push(format!("refused {refused}"));
+        }
+    }
+    said
+}
+
+/// The lines of a recorded turn's file, `stream` each.
+fn recorded(name: &str, stream: &'static str) -> Vec<(&'static str, String)> {
+    let turns = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/qwen/turns");
+    std::fs::read_to_string(turns.join(name))
+        .unwrap()
+        .lines()
+        .map(|line| (stream, line.to_owned()))
+        .collect()
+}
+
+/// Steery plans Qwen's turns only where its guarded `PreToolUse` hook is in the settings
+/// Qwen loads, refuses a continue of a conversation Qwen does not keep, and reads what
+/// `qwen -o stream-json` 0.27.2 printed: a turn that ran a shell command and finished, one
+/// whose call Steery's hook denied, one stopped with SIGINT, and turns Qwen would not run
+/// (an unknown conversation, a model its provider does not serve).
+#[tokio::test]
+async fn starts_and_reads_qwen_turns() {
+    let home = home("drive");
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let qwen = bin.join("qwen");
+    std::fs::write(&qwen, "#!/bin/sh\necho 0.27.2\n").unwrap();
+    let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+    std::fs::set_permissions(&qwen, mode).unwrap();
+    let client = start(&home).await;
+    let cwd = home.join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let new = json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false});
+
+    let ungated = ask(&client, method::START, new.clone()).await.unwrap_err();
+    assert!(ungated.contains("refused"), "{ungated}");
+
+    let planned = ask(
+        &client,
+        method::SETUP_PLAN,
+        json!({"mcp_url": "http://127.0.0.1:1/mcp", "skill": "", "hook": "/opt/steery hook",
+               "door": "", "release": "7.0.0", "timeout": 60, "trusts": []}),
+    )
+    .await
+    .unwrap();
+    let before_call = planned["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["at"] == "/hooks/PreToolUse/-")
+        .unwrap();
+    std::fs::write(
+        home.join(".qwen/settings.json"),
+        json!({"hooks": {"PreToolUse": [before_call["value"]]}}).to_string(),
+    )
+    .unwrap();
+
+    let started = ask(&client, method::START, new).await.unwrap();
+    assert_eq!(
+        started["argv"],
+        json!([qwen, "-o", "stream-json", "--approval-mode", "yolo"])
+    );
+    assert_eq!(started["stdin"], "words");
+    let resumed = ask(
+        &client,
+        method::START,
+        json!({"act": "continue", "external_id": TWO_PROMPTS, "cwd": cwd, "folder": cwd,
+               "worktree": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        resumed["argv"],
+        json!([
+            qwen,
+            "-o",
+            "stream-json",
+            "--approval-mode",
+            "yolo",
+            "-r",
+            TWO_PROMPTS
+        ])
+    );
+    let unknown = ask(
+        &client,
+        method::START,
+        json!({"act": "continue", "external_id": "0c1d2e3f-0000-4000-8000-000000000000",
+               "cwd": cwd, "folder": cwd, "worktree": false}),
+    )
+    .await
+    .unwrap_err();
+    assert!(unknown.contains("not-found"), "{unknown}");
+    let thinking = ask(
+        &client,
+        method::START,
+        json!({"act": "new", "cwd": cwd, "folder": cwd, "worktree": false, "thinking": "high"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(thinking.contains("selection-unsupported"), "{thinking}");
+
+    let finished = recorded("finished.stdout.jsonl", "stdout");
+    assert_eq!(
+        turn(&client, "finished", &finished).await,
+        [
+            "named b8bcaca4-04a6-42d0-987d-c6e17ad38798",
+            "model",
+            "call_began shell run_shell_command",
+            "call_ended true",
+            "words tool",
+            "ended finished",
+        ]
+    );
+    let denied = recorded("denied.stdout.jsonl", "stdout");
+    let denied = turn(&client, "denied", &denied).await;
+    assert_eq!(
+        denied[..5],
+        [
+            "named b8bcaca4-04a6-42d0-987d-c6e17ad38798",
+            "model",
+            "call_began shell run_shell_command",
+            "call_ended false",
+            "words tool",
+        ]
+    );
+    assert_eq!(denied.last().unwrap(), "ended finished");
+
+    // A stopped turn prints no `result`: the runtime ends it on its own signal.
+    let mut stopped = recorded("stopped.stdout.jsonl", "stdout");
+    stopped.extend(recorded("stopped.stderr", "stderr"));
+    let stopped = turn(&client, "stopped", &stopped).await;
+    assert!(
+        stopped.iter().all(|line| !line.starts_with("ended")),
+        "{stopped:?}"
+    );
+    assert!(stopped.contains(&"call_began shell run_shell_command".to_owned()));
+
+    let unknown = recorded("unknown.stderr", "stderr");
+    assert_eq!(
+        turn(&client, "unknown", &unknown).await,
+        ["ended failed", "refused not-found"]
+    );
+    let mut missing = recorded("model-missing.stdout.jsonl", "stdout");
+    missing.extend(recorded("model-missing.stderr", "stderr"));
+    let missing = turn(&client, "model-missing", &missing).await;
+    assert_eq!(
+        missing[missing.len() - 2..],
+        ["ended failed", "refused model-missing"]
+    );
 }

@@ -1,12 +1,16 @@
-//! Steery's driver for Qwen Code at observe: it reads Qwen's conversations from
+//! Steery's driver for Qwen Code at observe and drive: it reads Qwen's conversations from
 //! `<base>/projects/<project>/chats/`, plans the entries that set Qwen up for Steery, reads
-//! its hooks' moments and lists the MCP servers it loads.
+//! its hooks' moments, lists the MCP servers and models it loads, and plans the turns that
+//! the runtime runs as `qwen` itself ([`drive`]).
 
+mod drive;
 mod events;
 mod hooks;
 mod mcp;
+mod models;
 mod setup;
 mod store;
+mod turn;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -23,11 +27,12 @@ pub(crate) const MINIMUM: &str = "0.27.2";
 /// npm's package of Qwen Code.
 pub(crate) const PACKAGE: &str = "@qwen-code/qwen-code";
 
-/// The driver: what `initialize` said, and the listings it answered.
+/// The driver: what `initialize` said, the listings it answered, and the turns it read.
 #[derive(Default)]
 pub struct Driver {
     place: OnceLock<Place>,
     changes: steery_sdk::listing::Changes,
+    turns: turn::Turns,
 }
 
 /// The person's home, Qwen's root, and what was read of its chat files.
@@ -82,7 +87,7 @@ impl Driver {
 
     fn info() -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe],
+            levels: vec![wire::Level::Observe, wire::Level::Drive],
             minimum: Some(wire::Minimum {
                 release: MINIMUM.into(),
                 update: Some(format!("npm install -g {PACKAGE}@latest")),
@@ -113,7 +118,21 @@ impl Driver {
                 cuts_tool_text: false,
                 call_bound: None,
             },
-            reader: None,
+            // `--core-tools` allows only the tools named, `--exclude-tools` holds back the
+            // rest, `--allowed-mcp-server-names ""` starts no MCP server and
+            // `--chat-recording=false` saves nothing. Qwen still reads `QWEN.md` and its
+            // extensions.
+            reader: Some(wire::ReaderFacts {
+                sealed: wire::Sealed {
+                    tools: true,
+                    mcp: true,
+                    instructions: false,
+                    extensions: false,
+                    history: true,
+                },
+                known: Vec::new(),
+                unnamed: true,
+            }),
             facts: wire::HarnessFacts {
                 by_file: false,
                 resumes_in_place: true,
@@ -125,7 +144,11 @@ impl Driver {
                 door: None,
                 checks_idle: false,
                 worktrees: false,
-                acts: Vec::<harness::Act>::new(),
+                acts: vec![
+                    harness::Act::Continue,
+                    harness::Act::Fork,
+                    harness::Act::New,
+                ],
                 touches: false,
             },
             hooks: hooks::table(),
@@ -182,6 +205,40 @@ impl Program for Driver {
                 result(mcp::list(
                     &place.home,
                     &place.root,
+                    steery_sdk::params(params)?,
+                )?)
+            }
+            method::MODELS => {
+                let _: wire::Empty = steery_sdk::params(params)?;
+                result(models::list(&self.place()?.root).await?)
+            }
+            method::HELD => {
+                let held: harness::Held = steery_sdk::params(params)?;
+                result(drive::held(self.store()?, &held))
+            }
+            method::IDLE => result(drive::idle(self.store()?, steery_sdk::params(params)?)),
+            method::START => result(
+                drive::start(
+                    &self.place()?.root,
+                    self.store()?,
+                    steery_sdk::params(params)?,
+                )
+                .await?,
+            ),
+            method::TURN_READ => result(self.turns.read(steery_sdk::params(params)?)),
+            method::STOP => {
+                let stop: harness::Stop = steery_sdk::params(params)?;
+                result(crate::turn::drive::stop("Qwen Code", &stop)?)
+            }
+            method::RECEIPT_MARK => result(drive::mark(steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
+            method::READER => result(drive::reader(steery_sdk::params(params)?)?),
+            method::TERMINAL => {
+                let place = self.place()?;
+                result(drive::terminal(
+                    &place.home,
+                    &place.root,
+                    &place.store,
                     steery_sdk::params(params)?,
                 )?)
             }
