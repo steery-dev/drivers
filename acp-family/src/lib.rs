@@ -68,7 +68,12 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             _ => steery_sdk::serve(antigravity::Driver::new).await,
         },
         Harness::Qwen => steery_sdk::serve(|_notifier| qwen::Driver::default()).await,
-        Harness::OpenClaw => steery_sdk::serve(|_notifier| openclaw::Driver::default()).await,
+        Harness::OpenClaw => match std::env::args().nth(1).as_deref() {
+            Some("turn") => {
+                turn::main(openclaw::drive::Turns::new(), std::env::args().skip(2)).await
+            }
+            _ => steery_sdk::serve(|_notifier| openclaw::Driver::default()).await,
+        },
         Harness::Droid => steery_sdk::serve(|_notifier| droid::Driver::default()).await,
     }
 }

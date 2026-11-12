@@ -1,7 +1,9 @@
 //! `setup/plan`: what sets OpenClaw up for Steery, each an entry the runtime writes and
-//! records: Steery's MCP server at `/mcp/servers/steery` of `<root>/openclaw.json`, and
+//! records: Steery's MCP server at `/mcp/servers/steery` of `<root>/openclaw.json`,
 //! Steery's skill in `<root>/skills/steery/SKILL.md`, the managed skills folder OpenClaw
-//! reads for every agent (`src/skills/loading/workspace-skill-sources.ts:101,148`).
+//! reads for every agent (`src/skills/loading/workspace-skill-sources.ts:101,148`), and
+//! Steery's hook command line, which a turn of this driver's runs at a permission OpenClaw
+//! asks for.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +31,11 @@ pub(crate) fn binary(home: &Path) -> Option<PathBuf> {
 /// The npm user prefix's `bin` that OpenClaw's installer falls back to.
 fn installed(home: &Path) -> PathBuf {
     home.join(".npm-global/bin")
+}
+
+/// Steery's hook command line. OpenClaw reads nothing under its state folder's `steery`.
+pub fn hook_file(root: &Path) -> PathBuf {
+    root.join("steery/hook")
 }
 
 /// The plan for this machine, with the person's `home` and OpenClaw's state folder `root`.
@@ -134,7 +141,14 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
         value: json!(setup.skill),
         carries: vec![Part::Skill],
     };
-    vec![mcp, skill]
+    let hook = Entry {
+        path: hook_file(root),
+        format: Format::Text,
+        at: None,
+        value: json!(setup.hook),
+        carries: vec![Part::Hooks],
+    };
+    vec![mcp, skill, hook]
 }
 
 /// OpenClaw's own installer, where `bash` and `curl` are here: it installs Node where it
