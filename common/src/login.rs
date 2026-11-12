@@ -128,6 +128,28 @@ impl Login {
     }
 }
 
+/// What `command` shows on a terminal of the driver's until it exits, without escape
+/// sequences, and how it exited: for a harness that prints a thing only to a terminal.
+/// None where it ran past `within`; it is killed then.
+pub async fn shown(
+    command: Command,
+    within: Duration,
+) -> std::io::Result<Option<(std::process::ExitStatus, String)>> {
+    let mut run = Login::start(command, String::new(), false)?;
+    let mut said = run.said.clone();
+    let ended = tokio::time::timeout(within, async {
+        let status = run.child.wait().await?;
+        // The reader ends as the terminal closes, after the last words.
+        while said.changed().await.is_ok() {}
+        std::io::Result::Ok(status)
+    })
+    .await;
+    match ended {
+        Ok(status) => Ok(Some((status?, plain(&said.borrow())))),
+        Err(_) => Ok(None),
+    }
+}
+
 /// The login waiting for its person on this host: one at a time, a new one ending the one
 /// before. A driver started again has none.
 #[derive(Default, Clone)]
