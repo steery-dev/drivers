@@ -5,6 +5,7 @@
 mod events;
 mod hooks;
 mod mcp;
+mod setup;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -154,6 +155,9 @@ impl Program for Driver {
 
     async fn call(&self, method: &str, params: Value) -> Result<Value, Error> {
         match method {
+            method::SETUP_PLAN => {
+                result(setup::plan(&self.place()?.root, steery_sdk::params(params)?).await)
+            }
             method::SESSIONS_LIST => {
                 let asked: harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
