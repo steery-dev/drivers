@@ -40,7 +40,7 @@ short name, its tint and its mark.
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe |
-| `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive |
+| `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -988,6 +988,42 @@ server (`cline --acp`).
 ```sh
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-cline
+cargo test
+```
+
+## Antigravity: `acp-family/src/antigravity/`
+
+One binary, `steery-driver-antigravity`, from release 1.5.5. The driver starts Antigravity's
+turns through its own ACP server (`agy acp`).
+
+- **Live** (`held`, `say`, `stop`, `session/changed`), door `keeps`. Antigravity's door is
+  the language server inside each `agy` window. It speaks Connect (HTTP/1.1, JSON) on a
+  loopback port of the window's process. It takes a request only with the CSRF token that the
+  window read from `ANTIGRAVITY_SERVER_CSRF_TOKEN` as it started. Without that variable the
+  token is random and never leaves the window.
+  - A window that started without the variable has no door: `say` is refused `no-door`.
+    `setup/plan` notes this. In `terminal` the shell makes a fresh token as the command runs,
+    so the window it opens has a door and no history keeps the token. The driver reads the
+    token from the window process's environment.
+  - `held`: the process that holds the conversation's presence lock, where a port of it
+    answers `Heartbeat` with that token. Its stop is `owner`, with a token of the window and
+    the turn's start. Else Drive's `held`.
+  - `say`: `SendUserCascadeMessage` with the say's id as `clientMessageId`. `queue` is
+    `MESSAGE_DELIVERY_STRATEGY_WHEN_IDLE`, which goes in at once where nothing runs. `steer`
+    is `MESSAGE_DELIVERY_STRATEGY_NEXT_INVOCATION` while a turn runs. `immediate` is refused
+    `harness-busy` while a turn runs or words wait.
+  - `pick` is refused `selection-unsupported`. The server takes a model only together with
+    words, and the person's next turn goes back to the model in the window's footer.
+  - `stop`: `CancelCascadeInvocation`, where the token still names the turn that runs.
+    Steered words that wait stay waiting, and go in first at the next turn.
+  - `session/changed`: the window's `StreamAgentStateUpdates`. Its first message is the
+    whole state, then what changed: `status` (`CASCADE_RUN_STATUS_IDLE` ends a turn),
+    `pendingAgentMessagesUpdate`, and the steps of `mainTrajectoryUpdate` for the says that
+    went in and the calls that run.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-antigravity
 cargo test
 ```
 
