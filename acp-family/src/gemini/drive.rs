@@ -1,8 +1,10 @@
-//! Gemini CLI at drive: Steery starts Gemini's turns itself. A turn is this driver's own
-//! binary in its turn mode, speaking ACP to `gemini --acp` ([`crate::turn`]), which runs the
-//! conversation in the turn's own process. Gemini keeps no mark of a running turn, no lock
-//! and no pid, so who holds a conversation is for the runtime to look for, and what stands
-//! of it is true only while nobody does.
+//! Gemini CLI at drive and live: Steery starts Gemini's turns itself. A turn is this
+//! driver's own binary in its turn mode, speaking ACP to `gemini --acp` ([`crate::turn`]),
+//! which runs the conversation in the turn's own process. The runtime keeps that process
+//! past its words, and it dials Steery's plugin door as the conversation's copy
+//! ([`crate::turn::door`]): every word, pick and stop comes through there. Gemini keeps no
+//! mark of a running turn, no lock and no pid, so who else holds a conversation is for the
+//! runtime to look for, and what stands of it is true only while nobody does.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -67,6 +69,17 @@ impl crate::turn::Host for Turns {
             "session/set_model",
             json!({"sessionId": session, "modelId": value}),
         )
+    }
+
+    /// Gemini's core names every call `<tool>__<its own id>`, the tool as its transcript
+    /// names it.
+    fn tool(&self, id: &str, title: &str) -> String {
+        match id.split_once("__") {
+            Some((name, _)) if !name.is_empty() => {
+                super::events::call(id, name, Value::Null, None).tool
+            }
+            _ => title.to_owned(),
+        }
     }
 
     /// The conversation's mark, which lists it ([`super::store`]).
@@ -148,9 +161,10 @@ pub fn idle(store: &Store, held: &Held) -> Sampled {
     Sampled { sample }
 }
 
-/// `start`: the launch plan of a turn ([`shared::launch`]). Gemini has no fork, no
-/// hand-over and no thinking level an ACP client can pick; a model its last list (`listed`)
-/// does not have is refused before anything runs.
+/// `start`: the launch plan of a turn ([`shared::launch`]), kept past its words behind the
+/// door whose address setup wrote. Gemini has no fork, no hand-over and no thinking level an
+/// ACP client can pick; a model its last list (`listed`) does not have is refused before
+/// anything runs.
 pub fn start(root: &Path, store: &Store, listed: &[Model], start: Start) -> Result<Launch, Error> {
     if matches!(start.act, Act::Fork | Act::Hand) {
         return Err(Error::refused(
@@ -165,12 +179,23 @@ pub fn start(root: &Path, store: &Store, listed: &[Model], start: Start) -> Resu
         ));
     }
     shared::offered("Gemini CLI", listed, start.model.as_deref(), None)?;
+    let door_file = super::setup::door_file(root);
+    let door = shared::hook(&door_file).ok_or_else(|| {
+        Error::refused(
+            refusal::NO_DOOR,
+            format!(
+                "{} names no door: Steery's setup has not run for Gemini CLI",
+                door_file.display()
+            ),
+        )
+    })?;
     shared::launch(
         "Gemini CLI",
         super::binary().as_deref(),
         start,
         |id| store.files(id).map(|(_, cwd)| cwd),
         shared::hook(&super::setup::hook_file(root)),
+        Some(door),
         BTreeMap::new(),
     )
 }

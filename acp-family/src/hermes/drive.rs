@@ -439,6 +439,7 @@ pub fn start(
         start,
         |_| Ok(None),
         hook,
+        None,
         BTreeMap::new(),
     )
 }

@@ -1,7 +1,8 @@
-//! Steery's driver for Gemini CLI at drive: it reads Gemini's conversations from
+//! Steery's driver for Gemini CLI at drive and live: it reads Gemini's conversations from
 //! `<root>/tmp/<project>/chats/`, plans the entries that set Gemini up for Steery, reads
 //! its hooks' moments, lists the MCP servers it loads and the models it offers, and starts
-//! Gemini's turns through its own ACP server ([`drive`]).
+//! Gemini's turns through its own ACP server, each kept behind Steery's plugin door
+//! ([`drive`]).
 
 pub(crate) mod drive;
 mod events;
@@ -69,7 +70,7 @@ impl Driver {
 
     fn info(protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
-            levels: vec![wire::Level::Observe, wire::Level::Drive],
+            levels: wire::Level::ALL.to_vec(),
             minimum: Some(wire::Minimum {
                 release: MINIMUM.into(),
                 update: Some(format!("npm install -g {PACKAGE}@latest")),
@@ -110,8 +111,8 @@ impl Driver {
                     model: true,
                     thinking: false,
                 },
-                door: None,
-                checks_idle: false,
+                door: Some(harness::LiveDoor::Plugin),
+                checks_idle: true,
                 worktrees: false,
                 acts: vec![harness::Act::Continue, harness::Act::New],
                 touches: false,
@@ -165,7 +166,7 @@ impl Program for Driver {
                 let _: harness::Fold = steery_sdk::params(params)?;
                 Err(Error::refused(
                     refusal::SELECTION_UNSUPPORTED,
-                    "Gemini CLI has no plugin door that sends its records",
+                    "Gemini CLI's door sends no records: its chat file has them",
                 ))
             }
             method::SETUP_PLAN => {

@@ -440,7 +440,15 @@ pub fn start(
         );
     }
     let hook = shared::hook(&super::setup::hook_file(store.config()));
-    shared::launch("Kilo", kilo, start, |id| store.directory(id), hook, env)
+    shared::launch(
+        "Kilo",
+        kilo,
+        start,
+        |id| store.directory(id),
+        hook,
+        None,
+        env,
+    )
 }
 
 /// `receipt/mark`: the conversation's newest message; Kilo's message ids grow with time.

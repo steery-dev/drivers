@@ -2,8 +2,10 @@
 //! records: Steery's MCP server under `/mcpServers/steery` and one hook per event Steery
 //! reads ([`super::hooks::EVENTS`]) beside the person's own, both in the user
 //! `<root>/settings.json`; Steery's skill in `<root>/skills/steery/SKILL.md`; the hook
-//! command line that a turn Steery runs asks at a permission, in `<root>/steery/hook`; and
-//! the folders the runtime names in `<root>/trustedFolders.json`.
+//! command line that a turn Steery runs asks at a permission, in `<root>/steery/hook`; the
+//! address of the runtime's plugin door, which a turn Steery runs dials as the
+//! conversation's copy, in `<root>/steery/door`; and the folders the runtime names in
+//! `<root>/trustedFolders.json`.
 //!
 //! Gemini runs the hooks of `settings.json` only in a folder its person trusted
 //! (`hookRegistry.ts`, folder trust is on by default). Its `trusted_hooks.json` holds only
@@ -19,6 +21,11 @@ use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Se
 /// Steery's hook command line, which a turn runs at a permission Gemini asks for.
 pub(crate) fn hook_file(root: &Path) -> PathBuf {
     root.join("steery").join("hook")
+}
+
+/// The address of the runtime's plugin door, which a turn Steery runs dials.
+pub(crate) fn door_file(root: &Path) -> PathBuf {
+    root.join("steery").join("door")
 }
 
 /// The oldest Node.js that Gemini CLI's package runs on (its `engines.node`).
@@ -124,6 +131,13 @@ fn entries(root: &Path, setup: &Setup) -> Vec<Entry> {
             value: json!(setup.hook),
             carries: vec![Part::Hooks],
         },
+        Entry {
+            path: door_file(root),
+            format: Format::Text,
+            at: None,
+            value: json!(setup.door),
+            carries: vec![Part::Plugin],
+        },
     ];
     // One group per event with no `matcher`, which matches every tool and source, beside
     // whatever the person hooked there. Gemini hands the command to a shell and reads an
@@ -218,15 +232,13 @@ async fn node_lacks() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Gemini CLI 0.67.0 as npm installs it, on the machine that recorded the corpus.
-    const GEMINI: &str = "/tmp/gem/prefix/bin/gemini";
-
     #[tokio::test]
     async fn gemini_is_pointed_at_steery_in_its_own_spelling() {
-        if !Path::new(GEMINI).exists() {
-            eprintln!("skipped: no {GEMINI} here");
+        // Gemini CLI 0.67.0 as npm installs it.
+        let Some(gemini) = on_path("gemini") else {
+            eprintln!("skipped: no gemini on PATH");
             return;
-        }
+        };
         let root = std::env::temp_dir().join("steery-gemini-plan/.gemini");
         let setup = Setup {
             mcp_url: "http://127.0.0.1:7777/mcp".into(),
@@ -237,7 +249,7 @@ mod tests {
             timeout: 600,
             trusts: vec!["/home/daytona/work".into()],
         };
-        let planned = found(GEMINI.into(), &root, setup).await;
+        let planned = found(gemini, &root, setup).await;
         let found = planned.found.unwrap();
         assert_eq!(
             (found.release.as_str(), found.root.as_path()),
@@ -270,6 +282,16 @@ mod tests {
                 root.join("steery/hook"),
                 json!("/opt/steery/hook"),
                 vec![Part::Hooks]
+            )
+        );
+        // The door a turn of Steery's dials as the conversation's copy.
+        let door_file = entries.next().unwrap();
+        assert_eq!(
+            (door_file.path, door_file.value, door_file.carries),
+            (
+                root.join("steery/door"),
+                json!("http://127.0.0.1:7777/door"),
+                vec![Part::Plugin]
             )
         );
         // What setup writes is what the hooks read: one entry per declared hook.
