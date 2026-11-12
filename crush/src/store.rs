@@ -285,6 +285,29 @@ impl Store {
         })
     }
 
+    /// The store that keeps `id`, a lead's or a sub-agent's: the file a Crush that has the
+    /// session's project open holds.
+    pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
+        let (db, _) = self.find(id)?;
+        Ok(db.project.db())
+    }
+
+    /// The folder of the project that keeps `id`.
+    pub fn place(&self, id: &str) -> Result<PathBuf, Error> {
+        Ok(self.find(id)?.1.cwd)
+    }
+
+    /// The words of each of the person's messages in `id`, in order.
+    pub fn said(&self, id: &str) -> Result<Vec<String>, Error> {
+        let (db, row) = self.find(id)?;
+        Ok(db
+            .messages(&row.id)?
+            .iter()
+            .filter(|message| message.begins())
+            .map(Message::said)
+            .collect())
+    }
+
     /// `sessions/read`: the session's events after the cursor, or a sub-agent's.
     /// `servers` names the MCP servers Crush loads in the session's folder.
     pub fn read(

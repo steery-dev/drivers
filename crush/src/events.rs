@@ -46,7 +46,7 @@ impl Message {
     }
 
     /// The person's words in it, where it is the person's.
-    fn said(&self) -> String {
+    pub fn said(&self) -> String {
         parts(self)
             .filter(|(_, kind, data)| *kind == "text" && data["hidden"] != true)
             .filter_map(|(_, _, data)| data["text"].as_str())

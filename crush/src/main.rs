@@ -1,17 +1,23 @@
-//! Steery's `crush` driver, at observe. Crush keeps each project's sessions in that
-//! project's SQLite store, `<project>/.crush/crush.db`, and lists the projects in its data
-//! folder's `projects.json`. The driver lists and reads those sessions, plans the entries
-//! that set Crush up for Steery (its MCP entry, the skill), and lists the MCP servers Crush
-//! loads. It starts no turn and reaches no live session.
+//! Steery's `crush` driver, at drive. Crush keeps each project's sessions in that project's
+//! SQLite store, `<project>/.crush/crush.db`, and lists the projects in its data folder's
+//! `projects.json`. The driver lists and reads those sessions, plans the entries that set
+//! Crush up for Steery (its MCP entry, the skill, the hooks), reads and answers Crush's tool
+//! hooks ([`hooks`]), lists the MCP servers Crush loads, lists Crush's models, and starts,
+//! reads and stops Crush's turns through `crush run` ([`drive`], [`turn`]). It reaches no
+//! live session.
 
 mod calls;
+mod drive;
 mod events;
 mod home;
+mod hooks;
 mod mcp;
 mod setup;
 mod store;
+mod turn;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::OnceLock;
 
 use serde_json::Value;
@@ -22,9 +28,25 @@ use steery_sdk::{Error, Program, method, refusal, result};
 /// rule.
 const MARK: &str = "M12 2a10 10 0 1 0 8.66 15h-4.04A6 6 0 1 1 16.62 7h4.04A10 10 0 0 0 12 2Z";
 
-#[tokio::main]
-async fn main() -> std::io::Result<()> {
-    steery_sdk::serve(Crush::new).await
+fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("cannot start: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if args.next().as_deref() == Some(turn::MODE) {
+        return runtime.block_on(turn::run(args));
+    }
+    match runtime.block_on(steery_sdk::serve(Crush::new)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// How an agent in Crush learns its session's id, as Steery's skill says it. Crush puts no
@@ -118,8 +140,18 @@ impl Program for Crush {
                 ))
             }
             method::MCP_LIST => result(mcp::list(self.home()?, steery_sdk::params(params)?)?),
-            // `hook/read` and `hook/answer` (no hook is declared), and every method of drive
-            // and live, which the levels rule out.
+            method::MODELS => result(drive::models(self.home()?).await?),
+            method::START => result(drive::start(self.home()?, steery_sdk::params(params)?)?),
+            method::TURN_READ => result(drive::read(&steery_sdk::params(params)?)),
+            method::HELD => result(drive::held(self.home()?, steery_sdk::params(params)?)?),
+            method::IDLE => result(drive::idle(self.home()?, steery_sdk::params(params)?)?),
+            method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
+            method::RECEIPT_MARK => result(drive::mark(self.home()?, steery_sdk::params(params)?)?),
+            method::RECEIPT_FIND => result(drive::find(self.home()?, steery_sdk::params(params)?)?),
+            method::TERMINAL => result(drive::terminal(self.home()?, steery_sdk::params(params)?)?),
+            method::HOOK_READ => result(hooks::read(self.home()?, steery_sdk::params(params)?)?),
+            method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            // Every method of live, which the levels rule out.
             _ => Err(Error::Unknown),
         }
     }
@@ -128,7 +160,7 @@ impl Program for Crush {
 /// Crush as Steery reads it.
 fn info() -> wire::HarnessInfo {
     wire::HarnessInfo {
-        levels: vec![wire::Level::Observe],
+        levels: vec![wire::Level::Observe, wire::Level::Drive],
         minimum: Some(wire::Minimum {
             release: MINIMUM.into(),
             update: Some(UPDATE.into()),
@@ -152,21 +184,23 @@ fn info() -> wire::HarnessInfo {
             call_bound: None,
         },
         reader: None,
-        // Observe only: the driver continues, forks and starts nothing, and has no door.
+        // A turn is `crush run`: a new session, or a continue in the project that keeps it,
+        // which restores the model of the session's last answer (`restoreModelFromSession`)
+        // but not its reasoning effort. No door.
         facts: wire::HarnessFacts {
             touches: false,
             by_file: false,
-            resumes_in_place: false,
+            resumes_in_place: true,
             forks_beside: false,
             keeps: wire::Keeps {
-                model: false,
+                model: true,
                 thinking: false,
             },
             door: None,
             checks_idle: false,
             worktrees: false,
-            acts: Vec::new(),
+            acts: vec![harness::Act::Continue, harness::Act::New],
         },
-        hooks: Vec::new(),
+        hooks: hooks::table(),
     }
 }
