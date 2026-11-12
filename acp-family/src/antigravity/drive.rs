@@ -212,6 +212,7 @@ pub fn start(
         start,
         |id| place.store.folder(id),
         hook,
+        None,
         BTreeMap::from([("HOME".to_owned(), place.home.to_string_lossy().into_owned())]),
     )
 }

@@ -60,13 +60,15 @@ pub fn hook(file: &Path) -> Option<String> {
 /// `start`: the launch plan of a turn, which runs this driver's binary in its turn mode
 /// speaking to `<binary> acp`. The harness resumes a conversation in the folder it ran in
 /// (`directory`), so a continue whose folder is gone is refused. Without a `hook`, a
-/// permission the harness asks for is rejected.
+/// permission the harness asks for is rejected. With a `door`, Steery's plugin door, the turn
+/// is kept past its words (`Stdin::Held`) and takes every word through that door.
 pub fn launch(
     label: &str,
     binary: Option<&Path>,
     start: Start,
     directory: impl FnOnce(&str) -> Result<Option<PathBuf>, Error>,
     hook: Option<String>,
+    door: Option<String>,
     env: BTreeMap<String, String>,
 ) -> Result<Launch, Error> {
     let binary = binary
@@ -113,14 +115,16 @@ pub fn launch(
             format!("cannot find this driver's own path: {e}"),
         )
     })?;
+    let held = door.is_some();
     let asked = Asked {
         binary: binary.to_path_buf(),
         act: act.to_owned(),
         id,
         model: start.model,
         thinking: start.thinking,
-        inbox: Some(start.folder.join("inbox")),
+        inbox: (!held).then(|| start.folder.join("inbox")),
         hook,
+        door,
     };
     let mut argv = vec![program.to_string_lossy().into_owned(), "turn".to_owned()];
     argv.extend(asked.args());
@@ -128,8 +132,8 @@ pub fn launch(
         argv,
         env,
         cwd: start.cwd,
-        stdin: Stdin::Words,
-        inbox: true,
+        stdin: if held { Stdin::Held } else { Stdin::Words },
+        inbox: !held,
     })
 }
 

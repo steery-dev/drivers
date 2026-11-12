@@ -413,6 +413,7 @@ pub fn start(
         start,
         |id| store.directory(id),
         hook,
+        None,
         BTreeMap::new(),
     )
 }

@@ -22,12 +22,13 @@
 //! the words go in is the one line `<refusal word>: <the harness's line>` on standard error,
 //! and the turn fails.
 
+pub mod door;
 pub mod drive;
 pub mod hooks;
 
 use std::collections::{HashMap, HashSet};
 use std::os::unix::process::CommandExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -121,6 +122,11 @@ pub trait Host {
         )
     }
 
+    /// The tool of a running call, from its ACP `toolCallId` and `title`: by default its title.
+    fn tool(&self, _id: &str, title: &str) -> String {
+        title.to_owned()
+    }
+
     /// The harness opened `session` for the turn, before any words go in: a harness whose
     /// store does not tell a driven conversation from a headless one marks it here.
     fn opened(&self, _session: &str) -> std::io::Result<()> {
@@ -157,6 +163,13 @@ pub trait Host {
     ) -> Option<tokio::process::Command> {
         None
     }
+
+    /// When the context of `session` starts, in milliseconds since 1970, as a kept turn's
+    /// copy answers a compaction it does not run ([`door`]); none where the harness cannot
+    /// say, and the copy names when it opened the session.
+    fn began(&self, _session: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// What a turn is asked to do, as its command line says it.
@@ -171,6 +184,9 @@ pub struct Asked {
     pub inbox: Option<PathBuf>,
     /// Steery's hook command line, which answers the permissions the harness asks for.
     pub hook: Option<String>,
+    /// The address of Steery's plugin door: a turn kept past its words, whose every word
+    /// comes through that door ([`door`]).
+    pub door: Option<String>,
 }
 
 impl Asked {
@@ -192,9 +208,11 @@ impl Asked {
             args.push("--inbox".into());
             args.push(inbox.to_string_lossy().into_owned());
         }
-        if let Some(hook) = &self.hook {
-            args.push("--hook".into());
-            args.push(hook.clone());
+        for (flag, value) in [("--hook", &self.hook), ("--door", &self.door)] {
+            if let Some(value) = value {
+                args.push(flag.into());
+                args.push(value.clone());
+            }
         }
         args
     }
@@ -209,6 +227,7 @@ impl Asked {
                 "--thinking" => asked.thinking = Some(value("--thinking")?),
                 "--inbox" => asked.inbox = Some(PathBuf::from(value("--inbox")?)),
                 "--hook" => asked.hook = Some(value("--hook")?),
+                "--door" => asked.door = Some(value("--door")?),
                 _ if asked.act.is_empty() => asked.act = arg,
                 _ if asked.id.is_none() => asked.id = Some(arg),
                 other => return Err(format!("unexpected argument {other}")),
@@ -223,7 +242,7 @@ impl Asked {
         if asked.binary.as_os_str().is_empty() || !fits {
             return Err(
                 "usage: turn --binary <binary> <new | continue <id> | fork <id>> \
-                        [--model m] [--thinking t] [--inbox path] [--hook command]"
+                        [--model m] [--thinking t] [--inbox path] [--hook command] [--door url]"
                     .into(),
             );
         }
@@ -235,6 +254,7 @@ impl Asked {
 /// it failed.
 pub async fn main(host: impl Host, args: impl Iterator<Item = String>) -> std::io::Result<()> {
     let outcome = match Asked::parse(args) {
+        Ok(asked) if asked.door.is_some() => door::keep(&host, asked).await,
         Ok(asked) => run(&host, asked).await,
         Err(usage) => Err(format!("{}: {usage}", refusal::START_FAILED)),
     };
@@ -243,6 +263,70 @@ pub async fn main(host: impl Host, args: impl Iterator<Item = String>) -> std::i
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Open the conversation the turn acts on in the harness's ACP server, its model and
+/// thinking set: the session's id, and the harness's answer that opened it.
+async fn open(
+    host: &impl Host,
+    asked: &Asked,
+    acp: &mut Acp,
+    cwd: &Path,
+) -> Result<(String, Value), String> {
+    let failed = |e: std::io::Error| format!("{}: {e}", refusal::START_FAILED);
+    let label = host.harness().label();
+    acp.call(
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {}}),
+    )
+    .await?;
+    let cwd = cwd.to_string_lossy();
+    let (session, opened) = match (asked.act.as_str(), asked.id.as_deref()) {
+        ("continue", Some(id)) => {
+            let params = json!({"sessionId": id, "cwd": cwd, "mcpServers": []});
+            let opened = match host.opens() {
+                Opens::Resume => acp.call("session/resume", params).await?,
+                Opens::Load => {
+                    acp.replaying = true;
+                    let loaded = acp.call("session/load", params).await;
+                    acp.replaying = false;
+                    loaded?
+                }
+            };
+            (id.to_owned(), opened)
+        }
+        (act, id) => {
+            let (method, params) = match id {
+                Some(id) => (
+                    "session/fork",
+                    json!({"sessionId": id, "cwd": cwd, "mcpServers": []}),
+                ),
+                None => ("session/new", json!({"cwd": cwd, "mcpServers": []})),
+            };
+            let opened = acp.call(method, params).await?;
+            let session = opened
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?;
+            (session, opened)
+        }
+    };
+    host.opened(&session).map_err(failed)?;
+    for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
+        if let Some(value) = value {
+            if option == "model"
+                && let Some(command) = host.sets_model(&asked.binary, &session, value)
+            {
+                set_model(command, label).await?;
+                continue;
+            }
+            let (method, params) = host.pick(&session, option, value);
+            acp.call(method, params).await?;
+        }
+    }
+    Ok((session, opened))
 }
 
 /// Run one turn; the error is the line for standard error.
@@ -256,61 +340,9 @@ async fn run(host: &impl Host, asked: Asked) -> Result<(), String> {
     let cwd = std::env::current_dir().map_err(failed)?;
     let mut terms = signal(SignalKind::terminate()).map_err(failed)?;
     let mut interrupts = signal(SignalKind::interrupt()).map_err(failed)?;
-    let label = host.harness().label();
     let mut acp = Acp::open(host, &asked.binary).await.map_err(failed)?;
     let outcome = async {
-        acp.call(
-            "initialize",
-            json!({"protocolVersion": 1, "clientCapabilities": {}}),
-        )
-        .await?;
-        let cwd = cwd.to_string_lossy();
-        let session = match (asked.act.as_str(), asked.id.as_deref()) {
-            ("continue", Some(id)) => {
-                let params = json!({"sessionId": id, "cwd": cwd, "mcpServers": []});
-                match host.opens() {
-                    Opens::Resume => {
-                        acp.call("session/resume", params).await?;
-                    }
-                    Opens::Load => {
-                        acp.replaying = true;
-                        let loaded = acp.call("session/load", params).await;
-                        acp.replaying = false;
-                        loaded?;
-                    }
-                }
-                id.to_owned()
-            }
-            (act, id) => {
-                let (method, params) = match id {
-                    Some(id) => (
-                        "session/fork",
-                        json!({"sessionId": id, "cwd": cwd, "mcpServers": []}),
-                    ),
-                    None => ("session/new", json!({"cwd": cwd, "mcpServers": []})),
-                };
-                let opened = acp.call(method, params).await?;
-                opened
-                    .get("sessionId")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .map(str::to_owned)
-                    .ok_or_else(|| format!("{}: {label}'s {act} named no session", refusal::REFUSED))?
-            }
-        };
-        host.opened(&session).map_err(failed)?;
-        for (option, value) in [("model", &asked.model), (host.thinking(), &asked.thinking)] {
-            if let Some(value) = value {
-                if option == "model"
-                    && let Some(command) = host.sets_model(&asked.binary, &session, value)
-                {
-                    set_model(command, label).await?;
-                    continue;
-                }
-                let (method, params) = host.pick(&session, option, value);
-                acp.call(method, params).await?;
-            }
-        }
+        let (session, _) = open(host, &asked, &mut acp, &cwd).await?;
         // The prompts that wait for the harness's answer, with their words, by their ids.
         let mut prompts = HashMap::from([(acp.prompt(&session, &words).await?, words)]);
         // Bound once the session is named: words heard before that would have no turn to
@@ -933,6 +965,7 @@ mod tests {
             thinking: Some("high".into()),
             inbox: Some("/tmp/t/inbox".into()),
             hook: Some("'/opt/steery/bin/steery' hook kilo".into()),
+            door: Some("ws://127.0.0.1:7777/door".into()),
         };
         assert_eq!(Asked::parse(asked.args().into_iter()), Ok(asked));
         let new = |args: &[&str]| Asked::parse(args.iter().map(|arg| (*arg).to_owned()));
