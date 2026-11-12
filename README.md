@@ -30,7 +30,7 @@ short name, its tint and its mark.
 | `pi` | pi | [`pi-family`](pi-family/) | observe, drive, live (Steery's plugin door) |
 | `claude-code` | Claude Code | [`claude-code`](claude-code/) | observe, drive, live (Claude Code's inbox) |
 | `codex` | Codex | [`codex`](codex/) | observe, drive, live (Codex's own doors: `picks`) |
-| `grok` | Grok Build | [`acp-family`](acp-family/) | observe, drive |
+| `grok` | Grok Build | [`acp-family`](acp-family/) | observe, drive, live (Grok's leader: `picks`) |
 | `opencode` | OpenCode 2 | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
 | `hermes` | Hermes Agent | [`acp-family`](acp-family/) | observe, drive, live (Hermes's gateway: `picks`) |
 | `kilo` | Kilo | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
@@ -282,7 +282,7 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline` and `hermes` do this. omp, pi, Kilo
+  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok` and `antigravity` do this. omp, pi, Kilo
   and OpenCode have no door of their own, so their door is `plugin`. This repository keeps
   Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in `acp-family/plugin/kilo.ts`
   and OpenCode's in `acp-family/plugin/opencode.ts`, and `setup/plan` installs it. The plugin
@@ -991,6 +991,40 @@ server (`cline --acp`).
 ```sh
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-cline
+cargo test
+```
+
+## Grok Build: `acp-family/src/grok/`
+
+One binary, `steery-driver-grok`, from release 1.0.77. Grok keeps its conversations in
+`<GROK_HOME or ~/.grok>/sessions/<encoded folder>/<id>/updates.jsonl`. The driver starts
+Grok's turns headless (`grok -p … --output-format streaming-messages-json`).
+
+- **Live** (`held`, `say`, `pick`, `stop`, `session/changed`), door `picks`. Grok's door is
+  its leader: `grok agent leader` on the Unix socket `<root>/leader.sock` (`GROK_LEADER_SOCKET`
+  overrides it). Each frame is a 4-byte big-endian length and JSON; ACP rides in
+  `{"type": "acp"}` after a `register`.
+  - A TUI joins the leader only in leader mode: `[cli] use_leader = true`, or `--leader`.
+    Leader mode is off by default, and a sandbox profile turns it off. Such a window has no
+    door: `say` is refused `no-door`. `terminal` opens `grok --leader --resume <id>`.
+  - `held`: a conversation that `active_sessions.json` names and the leader keeps resident.
+    Its stop is `owner`, with the running prompt's id as the token. Else Drive's `held`.
+  - The driver follows a conversation with `session/resume`, which attaches it to the
+    leader's broadcasts with no replay.
+  - `say`: `session/prompt`; the leader queues a prompt that comes while a turn runs.
+    `steer` while a turn runs is `_x.ai/interject`, which goes in at the turn's next safe
+    point. `immediate` is refused `harness-busy` while a turn runs or words wait.
+  - `pick`: `session/set_model` with `_meta.reasoningEffort`. A thinking level Grok does not
+    list is refused `selection-unsupported`.
+  - `stop`: `session/cancel`, where the token still names the turn that runs. The proof is
+    the conversation going idle.
+  - `session/changed`: the leader's `session/update` broadcasts (`tool_call`,
+    `tool_call_update`, `turn_completed`) and `_x.ai/sessions/changed` roster rows for the
+    model and thinking.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-grok
 cargo test
 ```
 

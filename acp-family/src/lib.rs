@@ -25,7 +25,7 @@ pub use harness::Harness;
 /// the turn mode that its `start` plans: `<binary> turn ...`.
 pub async fn serve(harness: Harness) -> std::io::Result<()> {
     match harness {
-        Harness::Grok => steery_sdk::serve(|_notifier| grok::Driver::default()).await,
+        Harness::Grok => steery_sdk::serve(grok::Driver::new).await,
         Harness::Copilot => {
             let mut args = std::env::args().skip(1);
             match args.next() {

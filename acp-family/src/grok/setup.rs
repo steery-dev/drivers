@@ -147,8 +147,7 @@ pub(crate) fn gated(root: &Path) -> bool {
         .filter(|group| group.get("matcher").is_none())
         .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
         .any(|hook| {
-            hook["type"] == "command"
-                && hook["command"].as_str().is_some_and(super::hooks::guards)
+            hook["type"] == "command" && hook["command"].as_str().is_some_and(super::hooks::guards)
         })
 }
 
