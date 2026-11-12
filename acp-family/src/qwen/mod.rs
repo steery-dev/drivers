@@ -4,6 +4,7 @@
 
 mod events;
 mod hooks;
+mod mcp;
 mod store;
 
 use std::path::{Path, PathBuf};
@@ -172,6 +173,14 @@ impl Program for Driver {
             }
             method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
+            method::MCP_LIST => {
+                let place = self.place()?;
+                result(mcp::list(
+                    &place.home,
+                    &place.root,
+                    steery_sdk::params(params)?,
+                )?)
+            }
             _ => Err(Error::Unknown),
         }
     }

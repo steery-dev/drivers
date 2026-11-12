@@ -44,6 +44,10 @@ async fn start(home: &Path) -> Client {
         &[
             "-i".into(),
             format!("HOME={}", home.display()),
+            format!(
+                "QWEN_CODE_SYSTEM_SETTINGS_PATH={}",
+                home.join("system/settings.json").display()
+            ),
             env!("CARGO_BIN_EXE_steery-driver-qwen").into(),
         ],
         None,
@@ -223,6 +227,7 @@ async fn reads_the_chats_qwen_wrote() {
     assert!(fold.is_err());
 
     hooks(&client).await;
+    mcp(&client, &home).await;
 
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -334,4 +339,93 @@ async fn hooks(client: &Client) {
         let error = answer(event, refused).await.unwrap_err();
         assert!(error.contains("Qwen Code does not"), "{event}: {error}");
     }
+}
+
+/// The servers Qwen starts in a folder: the person's, the system's, the project's
+/// `.mcp.json` and settings where `mcpApprovals.json` approves them under the hash Qwen
+/// 0.27.2's `hashMcpServerConfig` gives (computed by its own code under Node), and an
+/// extension's `.mcp.json`; `mcp.excluded` takes a glob.
+async fn mcp(client: &Client, home: &Path) {
+    let put = |path: PathBuf, text: Value| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text.to_string()).unwrap();
+    };
+    let root = home.join(".qwen");
+    let cwd = home.join("work");
+    put(
+        root.join("settings.json"),
+        json!({"mcpServers": {
+            "person": {"url": "http://127.0.0.1:1/sse"},
+            "noisy-1": {"command": "noisy"},
+        }}),
+    );
+    put(
+        home.join("system/settings.json"),
+        json!({
+            "mcpServers": {"sys": {"httpUrl": "http://127.0.0.1:2/mcp"}},
+            "mcp": {"excluded": ["noisy-*"]},
+        }),
+    );
+    let approved = json!({"command": "node", "args": ["s.js", "é"],
+        "env": {"Z": "1", "A": "x\u{1}"}, "timeout": 30000.0, "trust": true, "type": "stdio"});
+    put(
+        cwd.join(".mcp.json"),
+        json!({"mcpServers": {
+            "approved": approved,
+            "waiting": {"command": "w"},
+            "stale": {"command": "changed"},
+        }}),
+    );
+    put(
+        cwd.join(".qwen/settings.json"),
+        json!({"mcpServers": {"workspace": {"httpUrl": "http://127.0.0.1:9/mcp",
+            "headers": {"b": "2", "a": "1"}, "description": "d"}}}),
+    );
+    let record = |hash: &str| json!({"hash": hash, "status": "approved"});
+    put(
+        root.join("mcpApprovals.json"),
+        json!({cwd.to_str().unwrap(): {
+            "approved": record("af6099a313a9c1f3b5287a67f315f58a098b999b329a6d633c613d00858f6f88"),
+            "workspace": record("4999c58c9aeccc26f2dfaea4d37a3fb2e002390a50a57b352a36f4b317aca83c"),
+            "stale": record("af6099a313a9c1f3b5287a67f315f58a098b999b329a6d633c613d00858f6f88"),
+        }}),
+    );
+    let extension = root.join("extensions/ext");
+    put(extension.join("qwen-extension.json"), json!({"name": "ext", "version": "1.0.0"}));
+    put(
+        extension.join(".mcp.json"),
+        json!({"mcpServers": {
+            "fromext": {"command": "e"},
+            "person": {"url": "http://127.0.0.1:3/ext"},
+        }}),
+    );
+
+    let listed = ask(client, method::MCP_LIST, json!({"cwd": cwd})).await.unwrap();
+    let servers: Vec<(&str, Option<&str>)> = listed["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["server"].as_str().unwrap(), s["url"].as_str()))
+        .collect();
+    assert_eq!(
+        servers,
+        [
+            ("approved", None),
+            ("fromext", None),
+            ("person", Some("http://127.0.0.1:1/sse")),
+            ("sys", Some("http://127.0.0.1:2/mcp")),
+            ("workspace", Some("http://127.0.0.1:9/mcp")),
+        ]
+    );
+    assert_eq!(listed["complete"], false);
+
+    // Asked of no folder: the person's own servers, and the system's.
+    let own = ask(client, method::MCP_LIST, json!({})).await.unwrap();
+    let names: Vec<&str> = own["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["server"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["fromext", "person", "sys"]);
 }
