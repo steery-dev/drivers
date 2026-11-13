@@ -107,8 +107,17 @@ pub fn need() -> Need {
 pub struct SignIns(Waiting);
 
 impl SignIns {
-    /// `needs/give`, for Grok in its home `root`.
+    /// `needs/give`, for Grok in its home `root`. A `done` forgets the last answer of the
+    /// probe: the next probe with no answer plans no need, not the sign-in just made.
     pub async fn give(&self, root: &Path, give: Give) -> Result<Given, Error> {
+        let given = self.step(root, give).await?;
+        if matches!(given, Given::Done { .. }) {
+            SIGNED.forget();
+        }
+        Ok(given)
+    }
+
+    async fn step(&self, root: &Path, give: Give) -> Result<Given, Error> {
         if give.need != NEED {
             return Err(gone(format!("Grok Build has no need {} here", give.need)));
         }

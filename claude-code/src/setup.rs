@@ -125,7 +125,7 @@ fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
 }
 
 /// The last answer of the sign-in probe in this process. A probe with no answer uses it.
-static SIGNED: Known = Known::new();
+pub(crate) static SIGNED: Known = Known::new();
 
 /// The needs of the plan, with the probe's answer `now`: the sign-in where the steady answer
 /// says Claude Code is not signed in; and, where the person `ask`ed to give it again, the
@@ -172,6 +172,18 @@ mod tests {
         let planned = [Some(false), None, None, Some(true), None]
             .map(|probe| asked(&known, probe, false).len());
         assert_eq!(planned, [1, 1, 1, 0, 0]);
+    }
+
+    /// After a sign-in is done, the probe with no answer plans no need: the answer kept
+    /// (not signed in) is forgotten, as with nothing known.
+    #[test]
+    fn after_a_done_the_next_probe_with_no_answer_plans_no_need() {
+        let known = Known::new();
+        assert_eq!(asked(&known, Some(false), false).len(), 1);
+        assert_eq!(asked(&known, None, false).len(), 1);
+        known.forget();
+        assert!(asked(&known, None, false).is_empty());
+        assert_eq!(asked(&known, Some(false), false).len(), 1);
     }
 
     #[test]

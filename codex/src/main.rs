@@ -227,7 +227,12 @@ impl Program for Codex {
                     let hook = self.hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
                     result(trust::give(&drive::binary()?, root, hook.as_deref(), give).await?)
                 } else {
-                    result(self.sign_ins.give(root, give).await?)
+                    let given = self.sign_ins.give(root, give).await?;
+                    // The sign-in is done: the next probe with no answer plans no need.
+                    if matches!(given, wire::harness::Given::Done { .. }) {
+                        setup::SIGNED.forget();
+                    }
+                    result(given)
                 }
             }
             _ => Err(Error::Unknown),

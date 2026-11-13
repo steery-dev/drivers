@@ -152,7 +152,9 @@ field for a reason. To show the reason to a person, the SDK needs a field for it
 When the probe gives no answer, `setup/plan` keeps the last answer that the probe gave in this
 driver process, and plans the `sign-in` need from it. With no answer known yet, it plans no
 need. So the card does not go and come back while the probe fails now and then. `models` still
-reports `signed_in` as the probe says.
+reports `signed_in` as the probe says. Every `needs/give` that returns `done`, by any way,
+forgets the kept answer: a probe with no answer right after a sign-in then plans no need, as
+with nothing known, and does not plan the sign-in again.
 
 When the harness is not signed in, `setup/plan` asks the `sign-in` need (protocol 5). It gives
 its ways best first:
@@ -178,7 +180,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 | `claude-code` | `claude-sign-in`, `api-key`, `gateway` (a company's own gateway) | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
 | `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
 | `copilot` | `copilot-sign-in`, `github-token` (`copilot login --with-token`) | GitHub's device page (`copilot login --device-code`), with its code in the step's label |
-| `omp` | one per provider below, `api-key`, `gateway` (a company's own gateway) | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
+| `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
 | `pi` | `api-key` | none |
 | `grok` | `grok-sign-in`, `api-key` (xAI, kept as `XAI_API_KEY`) | `grok login --device-auth`'s page (`accounts.x.ai/oauth2/device?user_code=…`), with its code in the step's label. A key counts where `grok models` with it, in an empty `GROK_HOME`, fetched xAI's models. |
 | `amp` | `amp`, `api-key` (Amp) | the link that `amp login` prints after "Open this URL in your browser to authorize:". |
@@ -203,8 +205,8 @@ The runtime then names the need in `setup/plan`'s `ask`. A driver plans it with 
 says a change, and the same ways. Claude Code, Codex, omp and pi do this. A driver that picked
 14 or older ignores `ask`. Where one way outranks another that an earlier `done` gave as
 variables, its `done` names those variables as `unset`. The runtime stops keeping them. Only
-Claude Code, omp and pi name `unset`; see their sections. Every other driver only builds
-against protocol 15 and speaks 14 at most.
+Claude Code names `unset`; see its section. Every other driver only builds against protocol 15
+and speaks 14 at most.
 
 ## Building
 
@@ -413,34 +415,23 @@ ways are:
    (see Signing in).
 2. In both: `api-key`. This is an Anthropic API key. The driver checks that it starts with
    `sk-ant-api`. The driver returns it as `ANTHROPIC_API_KEY`, which both harnesses read.
-3. In omp only: `gateway`, a company's own gateway that speaks the Anthropic Messages API. The
-   fields are `url` and `key` (secret).
-   - `url` is `https`, or `http` only on `localhost` or a loopback IP address. It has no user,
-     query or fragment, and it does not end in `/v1`, because omp adds `/v1/messages`. The
-     driver removes a `/` at its end.
-   - The driver returns `ANTHROPIC_BASE_URL` (the `url`) and `ANTHROPIC_API_KEY` (the `key`).
-     The runtime sets them on every omp process on every host. The key may have any form: the
-     driver does not check its start.
-   - The way has no header field. Tested with omp 18.12.3 and a local server that logged the
-     request: `POST /v1/messages` (`/prefix/v1/messages` for the url `…/prefix`), with the
-     key in both `Authorization: Bearer <key>` and `X-Api-Key: <key>`. omp ignores
-     `ANTHROPIC_AUTH_TOKEN`. With this way, omp lists Anthropic's models, so the plan no longer
-     asks `sign-in`.
-   - pi has no `gateway` way. pi 1.5.2 ignores `ANTHROPIC_BASE_URL` and sends its requests to
-     `api.anthropic.com`. It reads a gateway's address only from `providers.anthropic.baseUrl`
-     in `models.json` in its agent folder. The driver writes no such file.
+
+Neither harness has a `gateway` way. omp sends a stored Anthropic login (OAuth `sk-ant-oat`)
+in place of `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` then sends that plan token to the
+company's gateway. omp signs the login out when the gateway refuses it. omp has no command
+that says, without the secret, whether a login is stored. pi 1.5.2 ignores
+`ANTHROPIC_BASE_URL`: it reads a gateway's address only from `providers.anthropic.baseUrl` in
+`models.json`, which the driver does not write.
 
 The driver never offers omp's and pi's own Claude login. That login signs a third-party app in
 to a Claude plan, and Anthropic's terms forbid this. Because pi has no login command, pi has only
 the key.
 
-**Ask and unset** (protocol 15). Where `setup/plan`'s `ask` names `sign-in` and the harness is
-found, the plan has the need also where the harness lists a model. Its title says a change
+**Ask** (protocol 15). Where `setup/plan`'s `ask` names `sign-in` and the harness is found,
+the plan has the need also where the harness lists a model. Its title says a change
 (`Change how omp signs in to a model provider?`, `Change how pi gets its Anthropic API key?`).
-The ways are the same. A driver that picked 14 or older ignores `ask`, and names no `unset`.
-In omp, `api-key` unsets `ANTHROPIC_BASE_URL`, because a gateway kept before would send the
-key to its address. In pi, `api-key` unsets nothing. `gateway` and each provider's sign-in
-unset nothing.
+The ways are the same. A driver that picked 14 or older ignores `ask`. No way names `unset`:
+each gives `ANTHROPIC_API_KEY` or nothing.
 
 What each driver does:
 
@@ -590,7 +581,13 @@ The ways are:
    driver returns it as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
    `-p` (the reader). A `--bg` session uses it only after approval. Thus a turn that holds the
    key passes `--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, and writes
-   nothing.
+   nothing. Where `claude auth status --json`, asked without the key, says Claude Code is
+   signed in to a plan (a change), the driver runs `claude auth logout` first, so that turns
+   use the key. It checks the key first, so a wrong key signs nothing out. The command has a
+   bound of 5 s and is killed past it. If it fails, the driver refuses with one line, and the
+   person runs `claude auth logout` on the host. The `gateway` way does not sign out:
+   `ANTHROPIC_AUTH_TOKEN` outranks a plan, and a turn sends a `x-api-key` key through
+   `apiKeyHelper`.
 3. `gateway`: a company's own gateway that speaks the Anthropic Messages API, as Claude
    Desktop's gateway configuration (`inferenceGatewayBaseUrl`, `inferenceGatewayApiKey`,
    `inferenceGatewayAuthScheme`). The fields are `url`, `key` (secret) and `header` (optional).
@@ -611,9 +608,10 @@ again has no sign-in that waits. Thus a step at that time is `not-found`.
 
 **Ask and unset** (protocol 15). Where `setup/plan`'s `ask` names `sign-in` and Claude Code is
 found, the plan has the need also where Claude Code is signed in. Its title is `Change how
-Claude Code signs in?`. The ways are the same. A driver that picked 14 or older ignores `ask`,
-and names no `unset`. Each way's `done` unsets the variables of the ways that it outranks, so
-that the way just given is the one Claude Code uses:
+Claude Code signs in?`. The ways are the same, but the `about` of `api-key` ends with `Claude
+Code signs out of its plan on this host.` Only this need says it. A driver that picked 14 or
+older ignores `ask`, and names no `unset`. Each way's `done` unsets the variables of the ways
+that it outranks, so that the way just given is the one Claude Code uses:
 
 | Way | `unset` |
 |---|---|

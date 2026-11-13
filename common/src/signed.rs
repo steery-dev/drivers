@@ -24,6 +24,12 @@ impl Known {
         }
         *last
     }
+
+    /// Forget the answer kept, after a sign-in the person gave: it says "not signed in" no
+    /// more. The next probe with no answer then gives none, as with nothing known.
+    pub fn forget(&self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    }
 }
 
 impl Default for Known {
@@ -53,5 +59,15 @@ mod tests {
         let known = Known::new();
         assert_eq!(known.steady(None), None);
         assert!(!plans(&known, None));
+    }
+
+    #[test]
+    fn a_forgotten_answer_plans_no_need_until_the_probe_answers_again() {
+        let known = Known::new();
+        assert!(plans(&known, Some(false)));
+        known.forget();
+        assert!(!plans(&known, None));
+        assert_eq!(known.steady(None), None);
+        assert!(plans(&known, Some(false)));
     }
 }

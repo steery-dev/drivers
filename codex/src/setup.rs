@@ -180,7 +180,7 @@ pub async fn plan(home: &Path, setup: Setup, protocol: u32) -> Result<Planned, E
 }
 
 /// The last answer of the sign-in probe in this process. A probe with no answer uses it.
-static SIGNED: Known = Known::new();
+pub(crate) static SIGNED: Known = Known::new();
 
 /// Whether the plan names the sign-in need, with the probe's answer `now`: the steady answer
 /// says Codex is not logged in.

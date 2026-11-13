@@ -150,8 +150,17 @@ pub fn need() -> Need {
 pub struct SignIns;
 
 impl SignIns {
-    /// `needs/give`, for OpenClaw with the person's `home`.
+    /// `needs/give`, for OpenClaw with the person's `home`. A `done` forgets the last answer
+    /// of the probe: the next probe with no answer plans no need, not the sign-in just made.
     pub async fn give(&self, home: &Path, give: Give) -> Result<Given, Error> {
+        let given = self.step(home, give).await?;
+        if matches!(given, Given::Done { .. }) {
+            SIGNED.forget();
+        }
+        Ok(given)
+    }
+
+    async fn step(&self, home: &Path, give: Give) -> Result<Given, Error> {
         if give.need != NEED {
             return Err(gone(format!("OpenClaw has no need {} here", give.need)));
         }

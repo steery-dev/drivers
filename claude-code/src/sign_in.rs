@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use steery_driver_common::anthropic;
 use steery_driver_common::login::{self, Login, Waiting};
+use steery_driver_common::program::{Answer, ask, helper};
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -89,13 +90,86 @@ fn signed_in(unsets: bool) -> Given {
 }
 
 /// The sign-in a person asked to give again, where Claude Code is signed in already: the
-/// same ways, in a question about a change.
+/// same ways, in a question about a change. The key's way says that it signs the plan out.
 pub fn change() -> Need {
+    let mut need = need();
+    for way in &mut need.ways {
+        if way.id == anthropic::WAY {
+            way.about = way.about.take().map(|about| format!("{about}{SIGNS_OUT}"));
+        }
+    }
     Need {
         title: "Change how Claude Code signs in?".into(),
         line: "Claude Code is signed in on this host. Pick a new way to sign in.".into(),
-        ..need()
+        ..need
     }
+}
+
+/// What the key's way adds to its `about` in a change: where Claude Code is signed in to a
+/// plan, giving the key signs it out ([`logout`]).
+const SIGNS_OUT: &str = " Claude Code signs out of its plan on this host.";
+
+/// Whether giving the key signs Claude Code out of its plan, given what `claude auth status`
+/// says of it without the key: only where it says Claude Code is signed in. A probe with no
+/// answer claims nothing, so nothing is signed out.
+fn logs_out(signed: Option<bool>) -> bool {
+    signed == Some(true)
+}
+
+/// `claude auth logout`, within [`steery_driver_common::program::PROBE`]: it is killed past
+/// that. A refusal in one plain line where it did not end well.
+async fn logout() -> Result<(), Error> {
+    let Some(binary) = crate::binary() else {
+        return Err(refused(LOGOUT_FAILED));
+    };
+    let mut command = helper(&binary);
+    command.args(["auth", "logout"]);
+    logged_out(&ask(command).await).map_err(refused)
+}
+
+const LOGOUT_FAILED: &str = "Claude Code did not sign out of its plan, so turns would not use \
+     your key. Run `claude auth logout` on this host, then give the key again.";
+
+/// Whether `answer` of `claude auth logout` says it signed out: it exited 0. Why it did not
+/// goes to standard error, the program's log; the refusal is one plain line.
+fn logged_out(answer: &Result<Answer, String>) -> Result<(), String> {
+    match answer {
+        Ok(answer) if answer.code == Some(0) => Ok(()),
+        failed => {
+            match failed {
+                Ok(answer) => eprintln!(
+                    "claude auth logout: exit {}, it said: {}",
+                    answer
+                        .code
+                        .map_or("by signal".to_owned(), |code| code.to_string()),
+                    answer.said
+                ),
+                Err(why) => eprintln!("claude auth logout: {why}"),
+            }
+            Err(LOGOUT_FAILED.to_owned())
+        }
+    }
+}
+
+/// The key's way: the key is checked and given. Where `signed` (what `claude auth status`
+/// says without the key) says Claude Code is signed in to a plan, `logout` signs it out
+/// first, so turns use the key. The key is checked first: a wrong key signs nothing out. A
+/// logout that fails refuses the way.
+async fn key_given(
+    values: &std::collections::BTreeMap<String, String>,
+    unsets: bool,
+    signed: impl AsyncFnOnce() -> Option<bool>,
+    logout: impl AsyncFnOnce() -> Result<(), Error>,
+) -> Result<Given, Error> {
+    let unset: &[&str] = match unsets {
+        true => &[crate::gateway::BASE_URL, crate::gateway::AUTH_TOKEN],
+        false => &[],
+    };
+    let given = anthropic::give(values, "Claude Code uses your Anthropic API key", unset)?;
+    if logs_out(signed().await) {
+        logout().await?;
+    }
+    Ok(given)
 }
 
 /// The sign-in started here and waiting for its person.
@@ -104,23 +178,31 @@ pub struct SignIns(Waiting);
 
 impl SignIns {
     /// `needs/give`. `unsets` is whether the driver picked protocol 15 or newer, where a
-    /// `done` names the variables of another way that it outranks.
+    /// `done` names the variables of another way that it outranks. A `done` forgets the last
+    /// answer of the sign-in probe: the next probe with no answer plans no need, not the
+    /// sign-in just made.
     pub async fn give(&self, give: Give, unsets: bool) -> Result<Given, Error> {
+        let given = self.step(give, unsets).await?;
+        if matches!(given, Given::Done { .. }) {
+            crate::setup::SIGNED.forget();
+        }
+        Ok(given)
+    }
+
+    async fn step(&self, give: Give, unsets: bool) -> Result<Given, Error> {
         if give.need != NEED {
             return Err(gone(format!("Claude Code has no need {} here", give.need)));
         }
         match give.way.as_str() {
             anthropic::WAY => {
                 self.0.end();
-                let unset: &[&str] = match unsets {
-                    true => &[crate::gateway::BASE_URL, crate::gateway::AUTH_TOKEN],
-                    false => &[],
-                };
-                anthropic::give(
+                key_given(
                     &give.values,
-                    "Claude Code uses your Anthropic API key",
-                    unset,
+                    unsets,
+                    || crate::drive::signed_in(false),
+                    logout,
                 )
+                .await
             }
             crate::gateway::WAY => {
                 self.0.end();
@@ -280,12 +362,73 @@ mod tests {
         }
     }
 
-    /// What a way's `done` unsets, given at protocol `unsets`.
+    /// What a way's `done` unsets, given at protocol `unsets`. The key's way is given with a
+    /// Claude Code that is signed out, so no test signs a real one out.
     async fn unset(way: &str, values: &[(&str, &str)], unsets: bool) -> Vec<String> {
-        match SignIns::default().give(asked(way, values), unsets).await {
+        let give = asked(way, values);
+        let given = match way {
+            anthropic::WAY => {
+                let signed = async || Some(false);
+                let logout = async || panic!("no logout");
+                key_given(&give.values, unsets, signed, logout).await
+            }
+            _ => SignIns::default().step(give, unsets).await,
+        };
+        match given {
             Ok(Given::Done { unset, .. }) => unset,
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Give the key where Claude Code says `signed`, with a logout that `logout` ends:
+    /// whether the logout ran, and what the way gave.
+    async fn keyed(
+        values: &[(&str, &str)],
+        signed: Option<bool>,
+        logout: Result<(), &str>,
+    ) -> (bool, Result<Given, Error>) {
+        let ran = std::cell::Cell::new(false);
+        let given = key_given(
+            &asked(anthropic::WAY, values).values,
+            true,
+            async || signed,
+            async || {
+                ran.set(true);
+                logout.map_err(refused)
+            },
+        )
+        .await;
+        (ran.get(), given)
+    }
+
+    #[tokio::test]
+    async fn the_key_signs_a_plan_out_before_it_is_done() {
+        let (ran, given) = keyed(KEY, Some(true), Ok(())).await;
+        assert!(ran);
+        assert!(matches!(given, Ok(Given::Done { .. })));
+    }
+
+    #[tokio::test]
+    async fn the_key_signs_nothing_out_where_no_plan_is_signed_in_or_none_is_known() {
+        for signed in [Some(false), None] {
+            let (ran, given) = keyed(KEY, signed, Ok(())).await;
+            assert!(!ran);
+            assert!(matches!(given, Ok(Given::Done { .. })));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_logout_that_fails_refuses_the_key() {
+        let (ran, given) = keyed(KEY, Some(true), Err("it failed")).await;
+        assert!(ran);
+        assert!(format!("{:?}", given.unwrap_err()).contains("it failed"));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_key_signs_nothing_out() {
+        let (ran, given) = keyed(&[("key", "oops")], Some(true), Ok(())).await;
+        assert!(!ran);
+        assert!(given.is_err());
     }
 
     const KEY: &[(&str, &str)] = &[("key", "sk-ant-api03-abc")];
@@ -343,11 +486,69 @@ mod tests {
     fn a_change_keeps_the_ways_and_says_what_is_there() {
         let (lacking, change) = (need(), change());
         assert_eq!(change.id, lacking.id);
-        assert_eq!(change.ways, lacking.ways);
         assert_eq!(change.title, "Change how Claude Code signs in?");
         assert_eq!(
             change.line,
             "Claude Code is signed in on this host. Pick a new way to sign in."
         );
+        let ids = |need: &Need| {
+            need.ways
+                .iter()
+                .map(|way| way.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&change), ids(&lacking));
+    }
+
+    /// Only the change says that the key signs Claude Code out of its plan, and only on the
+    /// key's way.
+    #[test]
+    fn only_the_change_says_that_the_key_signs_the_plan_out() {
+        let about = |need: &Need, id: &str| {
+            need.ways
+                .iter()
+                .find(|way| way.id == id)
+                .and_then(|way| way.about.clone())
+                .unwrap_or_default()
+        };
+        let (lacking, change) = (need(), change());
+        assert!(!about(&lacking, anthropic::WAY).contains(SIGNS_OUT));
+        assert!(about(&change, anthropic::WAY).ends_with(SIGNS_OUT));
+        for (a, b) in lacking.ways.iter().zip(&change.ways) {
+            if a.id != anthropic::WAY {
+                assert_eq!(a, b);
+            }
+        }
+    }
+
+    #[test]
+    fn the_key_signs_out_of_a_plan_only_where_claude_code_says_it_is_signed_in() {
+        assert!(logs_out(Some(true)));
+        assert!(!logs_out(Some(false)));
+        assert!(!logs_out(None));
+    }
+
+    fn answer(code: Option<i32>, said: &str) -> Result<Answer, String> {
+        Ok(Answer {
+            code,
+            stdout: Vec::new(),
+            said: said.into(),
+        })
+    }
+
+    #[test]
+    fn a_logout_that_exits_0_is_done_and_any_other_is_refused_in_one_line() {
+        assert!(logged_out(&answer(Some(0), "")).is_ok());
+        for failed in [
+            answer(Some(1), "no session"),
+            answer(None, ""),
+            Err("did not answer within 5 s".to_owned()),
+        ] {
+            let line = logged_out(&failed).unwrap_err();
+            assert!(
+                !line.contains('\n') && line.contains("claude auth logout"),
+                "{line}"
+            );
+        }
     }
 }

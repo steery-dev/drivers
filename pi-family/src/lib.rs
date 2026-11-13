@@ -152,15 +152,17 @@ impl Program for Driver {
                 }
                 result(planned)
             }
-            method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => result(
-                self.sign_ins
-                    .give(
-                        harness,
-                        steery_sdk::params(params)?,
-                        self.place()?.protocol >= steery_sdk::ASK,
-                    )
-                    .await?,
-            ),
+            method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => {
+                let given = self
+                    .sign_ins
+                    .give(harness, steery_sdk::params(params)?)
+                    .await?;
+                // The sign-in is done: the next ask with no answer plans no need again.
+                if matches!(given, wire::harness::Given::Done { .. }) {
+                    self.listed_none.forget();
+                }
+                result(given)
+            }
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
