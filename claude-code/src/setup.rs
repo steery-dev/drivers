@@ -8,11 +8,13 @@ use std::path::Path;
 
 use serde_json::json;
 use steery_driver_common::program::{release_within, version};
+use steery_driver_common::signed::Known;
 use steery_sdk::Error;
-use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
+use steery_sdk::wire::harness::{Entry, Format, Found, Need, Part, Planned, Setup};
 
-/// The plan for this machine; with its needs where the runtime's protocol has them.
-pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Result<Planned, Error> {
+/// The plan for this machine; with its needs where the protocol picked has them, and the
+/// sign-in again where the person asked and the protocol picked is 15 or newer.
+pub async fn plan(home: &Path, root: &Path, setup: Setup, protocol: u32) -> Result<Planned, Error> {
     let Some(binary) = crate::binary() else {
         let (install, refused) = match crate::install() {
             Ok(install) => (Some(install), None),
@@ -32,8 +34,12 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Result
         });
     };
     let release = named(version(&binary).await.as_deref().and_then(release_within));
-    let needs = match needs && crate::drive::signed_in(true).await == Some(false) {
-        true => vec![crate::sign_in::need()],
+    let needs = match protocol >= steery_driver_common::program::NEEDS {
+        true => asked(
+            &SIGNED,
+            crate::drive::signed_in(true).await,
+            asking(protocol, &setup),
+        ),
         false => Vec::new(),
     };
     let mut notes = Vec::new();
@@ -118,9 +124,29 @@ fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
     entries
 }
 
+/// The last answer of the sign-in probe in this process. A probe with no answer uses it.
+static SIGNED: Known = Known::new();
+
+/// The needs of the plan, with the probe's answer `now`: the sign-in where the steady answer
+/// says Claude Code is not signed in; and, where the person `ask`ed to give it again, the
+/// sign-in as a change, though Claude Code is signed in (or its state is not known).
+fn asked(known: &Known, now: Option<bool>, ask: bool) -> Vec<Need> {
+    match (known.steady(now) == Some(false), ask) {
+        (true, _) => vec![crate::sign_in::need()],
+        (false, true) => vec![crate::sign_in::change()],
+        (false, false) => Vec::new(),
+    }
+}
+
 /// A release as `major.minor.patch`.
 fn named(release: Option<(u64, u64, u64)>) -> Option<String> {
     release.map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"))
+}
+
+/// Whether the person asked to give the sign-in again: the protocol picked is 15 or newer
+/// and `setup.ask` names it.
+fn asking(protocol: u32, setup: &Setup) -> bool {
+    steery_driver_common::program::asks(protocol, &setup.ask, crate::sign_in::NEED)
 }
 
 #[cfg(test)]
@@ -136,6 +162,56 @@ mod tests {
             release: "1.0.0".into(),
             timeout: 120,
             trusts: Vec::new(),
+            ask: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_probe_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(false), None, None, Some(true), None]
+            .map(|probe| asked(&known, probe, false).len());
+        assert_eq!(planned, [1, 1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn a_probe_that_never_answered_plans_no_need() {
+        assert!(asked(&Known::new(), None, false).is_empty());
+    }
+
+    /// A person who asked plans the sign-in again, with the title of a change; a person who
+    /// did not ask plans none while Claude Code is signed in.
+    #[test]
+    fn a_signed_in_claude_code_plans_the_sign_in_only_where_asked() {
+        let asking = |protocol, ask: &[&str]| {
+            let setup = Setup {
+                ask: ask.iter().map(|id| (*id).to_owned()).collect(),
+                ..setup()
+            };
+            asking(protocol, &setup)
+        };
+        let planned = |ask: bool| asked(&Known::new(), Some(true), ask);
+        let plan = planned(asking(15, &["sign-in"]));
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].id, "sign-in");
+        assert_eq!(plan[0].title, "Change how Claude Code signs in?");
+        assert_eq!(
+            plan[0].line,
+            "Claude Code is signed in on this host. Pick a new way to sign in."
+        );
+        assert!(planned(asking(15, &[])).is_empty());
+        assert!(planned(asking(15, &["other"])).is_empty());
+        // Protocol 14 ignores `ask`.
+        assert!(planned(asking(14, &["sign-in"])).is_empty());
+    }
+
+    /// Where Claude Code is not signed in, the need is the one that lacks, asked or not.
+    #[test]
+    fn a_claude_code_not_signed_in_plans_the_lacking_need_also_where_asked() {
+        for ask in [false, true] {
+            let plan = asked(&Known::new(), Some(false), ask);
+            assert_eq!(plan.len(), 1);
+            assert_eq!(plan[0].title, "Sign Claude Code in?");
         }
     }
 

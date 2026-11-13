@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use steery_driver_common::program::{ask, helper};
+use steery_driver_common::signed::Known;
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -72,18 +73,29 @@ pub(super) async fn status(binary: &Path, env: &[(&str, &str)]) -> Result<Status
     })
 }
 
-/// Whether OpenClaw is here and says a model in use lacks its sign-in.
+/// The last answer of `openclaw models status` in a plan, in this process. A probe with no
+/// answer uses it.
+static SIGNED: Known = Known::new();
+
+/// Whether OpenClaw is here and says a model in use lacks its sign-in. Where `models status`
+/// says nothing, the last answer it gave.
 pub async fn lacking(home: &Path) -> bool {
     let Some(binary) = super::setup::binary(home) else {
         return false;
     };
-    match status(&binary, &[]).await {
-        Ok(status) => status.signed_in() == Some(false),
+    let now = match status(&binary, &[]).await {
+        Ok(status) => status.signed_in(),
         Err(why) => {
             eprintln!("openclaw sign-in probe: {why}");
-            false
+            None
         }
-    }
+    };
+    lacks(&SIGNED, now)
+}
+
+/// Whether the steady answer says OpenClaw lacks a sign-in, with the probe's answer `now`.
+fn lacks(known: &Known, now: Option<bool>) -> bool {
+    known.steady(now) == Some(false)
 }
 
 /// The need, where OpenClaw is here and not signed in.
@@ -150,6 +162,7 @@ impl SignIns {
                 Ok(Given::Done {
                     line: "OpenClaw is signed in on this host".into(),
                     env: Default::default(),
+                    unset: Vec::new(),
                 })
             }
             API_KEY => {
@@ -161,6 +174,7 @@ impl SignIns {
                 Ok(Given::Done {
                     line: "OpenClaw uses your OpenRouter API key".into(),
                     env: [(KEY.to_owned(), key.to_owned())].into(),
+                    unset: Vec::new(),
                 })
             }
             way => Err(gone(format!("OpenClaw has no sign-in way {way}"))),
@@ -195,4 +209,17 @@ fn gone(line: impl Into<String>) -> Error {
 
 fn refused(line: impl Into<String>) -> Error {
     Error::refused(refusal::REFUSED, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(false), None, None, Some(true), None].map(|probe| lacks(&known, probe));
+        assert_eq!(planned, [true, true, true, false, false]);
+        assert!(!lacks(&Known::new(), None));
+    }
 }

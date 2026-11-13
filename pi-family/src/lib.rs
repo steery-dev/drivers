@@ -24,6 +24,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 use steery_driver_common::program::{NEEDS, WAITED};
+use steery_driver_common::signed::Known;
 use steery_sdk::wire;
 use steery_sdk::{Error, Program, method, refusal, result};
 
@@ -41,6 +42,8 @@ struct Driver {
     harness: Harness,
     place: OnceLock<Place>,
     catalog: models::Catalog,
+    /// The last answer of the ask whether the harness lists no model, for the plan's need.
+    listed_none: Known,
     sign_ins: sign_in::SignIns,
     changes: steery_sdk::listing::Changes,
 }
@@ -60,6 +63,7 @@ impl Driver {
             harness,
             place: OnceLock::new(),
             catalog: models::Catalog::default(),
+            listed_none: Known::new(),
             sign_ins: sign_in::SignIns::default(),
             changes: steery_sdk::listing::Changes::default(),
         }
@@ -81,7 +85,7 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_asking(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
@@ -121,14 +125,18 @@ impl Program for Driver {
         match method {
             method::SETUP_PLAN => {
                 let place = self.place()?;
-                let asked = steery_sdk::params(params)?;
+                let asked: wire::harness::Setup = steery_sdk::params(params)?;
+                // The person asked to give the sign-in again, at protocol 15 or newer.
+                let asking =
+                    steery_driver_common::program::asks(place.protocol, &asked.ask, sign_in::NEED);
                 // Whether the harness lists no model, asked beside the plan: only where the
                 // protocol has needs and the harness has a folder.
                 let lacking = async {
                     match (place.protocol >= NEEDS, self.store()) {
-                        (true, Ok(store)) => {
-                            self.catalog.none(harness, store.root()).await == Some(true)
-                        }
+                        (true, Ok(store)) => lacks(
+                            &self.listed_none,
+                            self.catalog.none(harness, store.root()).await,
+                        ),
                         _ => false,
                     }
                 };
@@ -137,18 +145,29 @@ impl Program for Driver {
                     lacking,
                 );
                 let mut planned = planned?;
-                if lacking && planned.found.is_some() {
-                    planned.needs.push(sign_in::need(harness));
+                if planned.found.is_some() {
+                    planned
+                        .needs
+                        .extend(sign_in::sign_in_need(harness, lacking, asking));
                 }
                 result(planned)
             }
-            method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => {
-                result(self.sign_ins.give(harness, steery_sdk::params(params)?).await?)
-            }
+            method::NEEDS_GIVE if self.place()?.protocol >= NEEDS => result(
+                self.sign_ins
+                    .give(
+                        harness,
+                        steery_sdk::params(params)?,
+                        self.place()?.protocol >= steery_sdk::ASK,
+                    )
+                    .await?,
+            ),
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
-                result(self.changes.answer(after.as_deref(), self.store()?.list(asked)))
+                result(
+                    self.changes
+                        .answer(after.as_deref(), self.store()?.list(asked)),
+                )
             }
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => {
@@ -208,5 +227,25 @@ impl Program for Driver {
             // itself; a reader's output is its answer whole.
             _ => Err(Error::Unknown),
         }
+    }
+}
+
+/// Whether the plan names the sign-in need, with the answer `now` of the ask whether the
+/// harness lists no model: the steady answer says it lists none. An ask with no answer uses
+/// the last answer it gave.
+fn lacks(known: &Known, now: Option<bool>) -> bool {
+    known.steady(now) == Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ask_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(true), None, None, Some(false), None].map(|ask| lacks(&known, ask));
+        assert_eq!(planned, [true, true, true, false, false]);
+        assert!(!lacks(&Known::new(), None));
     }
 }

@@ -8,22 +8,21 @@
 //! `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`) or as `ANTHROPIC_API_KEY` (sent
 //! as `x-api-key`). No other variable is given: Claude Code 2.1.73 sends an empty
 //! `ANTHROPIC_AUTH_TOKEN` as an empty `Authorization: Bearer`, so a variable given empty
-//! is not unset. Only a host not signed in asks for this way, so no key of an earlier way
-//! is kept beside it.
+//! is not unset. A key of another way may be kept beside it, as the gateway's address may
+//! be beside a key: `unset` (protocol 15) names the variable of the other header.
 
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 
-use steery_driver_common::anthropic;
+use steery_driver_common::{anthropic, gateway};
 use steery_sdk::wire::harness::{Field, Given, Way};
 use steery_sdk::{Error, refusal};
 
 /// The way's id in every plan.
-pub const WAY: &str = "gateway";
+pub const WAY: &str = gateway::WAY;
 /// The variable that names the gateway's address.
-const BASE_URL: &str = "ANTHROPIC_BASE_URL";
+pub const BASE_URL: &str = "ANTHROPIC_BASE_URL";
 /// The variable whose key Claude Code sends as `Authorization: Bearer`.
-const AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
+pub const AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
 
 /// The way's fields, by name.
 const ADDRESS: &str = "url";
@@ -77,18 +76,20 @@ pub fn way() -> Way {
     }
 }
 
-/// What `values` give by [`way`]: the address and the key as Claude Code's variables.
-pub fn give(values: &BTreeMap<String, String>) -> Result<Given, Error> {
+/// What `values` give by [`way`]: the address and the key as Claude Code's variables. With
+/// `unsets` (the driver picked protocol 15 or newer), the variable of the other header,
+/// which an earlier gateway may have given, is unset.
+pub fn give(values: &BTreeMap<String, String>, unsets: bool) -> Result<Given, Error> {
     let value = |name: &str| values.get(name).map_or("", |value| value.trim());
-    let address = address(value(ADDRESS)).map_err(refused)?;
+    let address = gateway::address(value(ADDRESS), "Claude Code").map_err(refused)?;
     let key = value(KEY);
     if key.is_empty() {
         return Err(refused("Type the key of your gateway"));
     }
     let header = header(value(HEADER)).map_err(refused)?;
-    let variable = match header {
-        Header::Bearer => AUTH_TOKEN,
-        Header::XApiKey => anthropic::VARIABLE,
+    let (variable, other) = match header {
+        Header::Bearer => (AUTH_TOKEN, anthropic::VARIABLE),
+        Header::XApiKey => (anthropic::VARIABLE, AUTH_TOKEN),
     };
     Ok(Given::Done {
         line: format!("Claude Code uses your company's gateway at {address}"),
@@ -96,62 +97,17 @@ pub fn give(values: &BTreeMap<String, String>) -> Result<Given, Error> {
             (BASE_URL.to_owned(), address),
             (variable.to_owned(), key.to_owned()),
         ]),
+        unset: if unsets {
+            vec![other.to_owned()]
+        } else {
+            Vec::new()
+        },
     })
 }
 
 /// Whether Claude Code here sends its turns to a gateway: `ANTHROPIC_BASE_URL` is set.
 pub fn used() -> bool {
     std::env::var_os(BASE_URL).is_some_and(|url| !url.is_empty())
-}
-
-/// `given` as the gateway's base address, without a `/` at its end. Claude Code adds
-/// `/v1/messages` to it. As Claude Desktop does, it is `https`, or `http` only on this
-/// computer (`localhost`, a loopback IP address).
-fn address(given: &str) -> Result<String, String> {
-    let given = given.trim_end_matches('/');
-    if given.is_empty() {
-        return Err("Type the address of your gateway".into());
-    }
-    let Some((scheme, rest)) = given.split_once("://") else {
-        return Err(format!(
-            "A gateway address starts with https://, not {given}"
-        ));
-    };
-    if rest.contains(|c: char| c.is_whitespace() || c == '?' || c == '#') {
-        return Err("A gateway address has no spaces, no ? and no #".into());
-    }
-    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    if authority.contains('@') {
-        return Err("Type the key in its own field, not in the address".into());
-    }
-    let host = match authority.strip_prefix('[') {
-        Some(inside) => inside.split(']').next().unwrap_or_default(),
-        None => authority.split(':').next().unwrap_or_default(),
-    };
-    if host.is_empty() {
-        return Err(format!("{given} names no host"));
-    }
-    match scheme.to_ascii_lowercase().as_str() {
-        "https" => {}
-        "http"
-            if host == "localhost" || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()) => {}
-        "http" => {
-            return Err(
-                "A gateway address starts with https://. Only localhost may use http://".into(),
-            );
-        }
-        _ => {
-            return Err(format!(
-                "A gateway address starts with https://, not {scheme}://"
-            ));
-        }
-    }
-    if path.to_ascii_lowercase().ends_with("/v1") {
-        return Err(
-            "Type the address without /v1 at its end. Claude Code adds /v1/messages to it.".into(),
-        );
-    }
-    Ok(given.to_owned())
 }
 
 /// The header that `given` names: empty or `bearer` (Claude Desktop's default), or
@@ -179,7 +135,7 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect();
-        match give(&values) {
+        match give(&values, true) {
             Ok(Given::Done { env, .. }) => Ok(env),
             Ok(Given::Next(way)) => Err(format!("a next step {}", way.id)),
             Err(error) => Err(error.to_string()),
@@ -206,6 +162,25 @@ mod tests {
     }
 
     #[test]
+    fn the_other_header_s_variable_is_unset_only_from_protocol_15() {
+        let values = |header: &str| -> BTreeMap<String, String> {
+            BTreeMap::from([
+                (ADDRESS.to_owned(), "https://gw.example.com".to_owned()),
+                (KEY.to_owned(), "k".to_owned()),
+                (HEADER.to_owned(), header.to_owned()),
+            ])
+        };
+        let unset = |header: &str, unsets: bool| match give(&values(header), unsets) {
+            Ok(Given::Done { unset, .. }) => unset,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(unset("", true), [anthropic::VARIABLE]);
+        assert_eq!(unset("x-api-key", true), [AUTH_TOKEN]);
+        assert!(unset("", false).is_empty());
+        assert!(unset("x-api-key", false).is_empty());
+    }
+
+    #[test]
     fn an_x_api_key_is_the_api_key_alone() {
         let env = given(&[
             (ADDRESS, "https://gw.example.com"),
@@ -218,27 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn http_only_on_this_computer() {
-        for ok in [
-            "http://localhost:4000",
-            "http://127.0.0.1:4000/x",
-            "http://[::1]:4000",
-        ] {
-            assert!(address(ok).is_ok(), "{ok}");
-        }
+    fn a_bad_address_is_refused() {
         for no in [
             "http://gw.example.com",
-            "http://localhost.example.com",
-            "http://127.example.com",
-            "ftp://gw.example.com",
-            "gw.example.com",
-            "https://",
-            "https://user:pw@gw.example.com",
             "https://gw.example.com/v1",
-            "https://gw.example.com/v1/",
-            "https://gw.example.com?x=1",
+            "https://user:pw@gw.example.com",
         ] {
-            assert!(address(no).is_err(), "{no}");
+            assert!(given(&[(ADDRESS, no), (KEY, "k")]).is_err(), "{no}");
         }
     }
 

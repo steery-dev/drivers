@@ -112,6 +112,7 @@ pub async fn give(
             hooks.untrusted.len()
         ),
         env: Default::default(),
+        unset: Vec::new(),
     })
 }
 

@@ -22,7 +22,7 @@ use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
 /// The need, by its id in every plan.
-const NEED: &str = "sign-in";
+pub const NEED: &str = "sign-in";
 /// Claude Code's own sign-in, and the step it asks next once started.
 const CLAUDE_SIGN_IN: &str = "claude-sign-in";
 const CLAUDE_SIGN_IN_RETURN: &str = "claude-sign-in-return";
@@ -68,33 +68,71 @@ pub fn need() -> Need {
     }
 }
 
+/// The `done` of the plan's own sign-in. With `unsets`, the variables of the key and the
+/// gateway are unset: Claude Code uses them before a plan's sign-in, so the sign-in just
+/// made is used only where none is kept.
+fn signed_in(unsets: bool) -> Given {
+    Given::Done {
+        line: "Claude Code is signed in on this host".into(),
+        env: Default::default(),
+        unset: match unsets {
+            true => [
+                anthropic::VARIABLE,
+                crate::gateway::AUTH_TOKEN,
+                crate::gateway::BASE_URL,
+            ]
+            .map(str::to_owned)
+            .into(),
+            false => Vec::new(),
+        },
+    }
+}
+
+/// The sign-in a person asked to give again, where Claude Code is signed in already: the
+/// same ways, in a question about a change.
+pub fn change() -> Need {
+    Need {
+        title: "Change how Claude Code signs in?".into(),
+        line: "Claude Code is signed in on this host. Pick a new way to sign in.".into(),
+        ..need()
+    }
+}
+
 /// The sign-in started here and waiting for its person.
 #[derive(Default, Clone)]
 pub struct SignIns(Waiting);
 
 impl SignIns {
-    /// `needs/give`.
-    pub async fn give(&self, give: Give) -> Result<Given, Error> {
+    /// `needs/give`. `unsets` is whether the driver picked protocol 15 or newer, where a
+    /// `done` names the variables of another way that it outranks.
+    pub async fn give(&self, give: Give, unsets: bool) -> Result<Given, Error> {
         if give.need != NEED {
             return Err(gone(format!("Claude Code has no need {} here", give.need)));
         }
         match give.way.as_str() {
             anthropic::WAY => {
                 self.0.end();
-                anthropic::give(&give.values, "Claude Code uses your Anthropic API key")
+                let unset: &[&str] = match unsets {
+                    true => &[crate::gateway::BASE_URL, crate::gateway::AUTH_TOKEN],
+                    false => &[],
+                };
+                anthropic::give(
+                    &give.values,
+                    "Claude Code uses your Anthropic API key",
+                    unset,
+                )
             }
             crate::gateway::WAY => {
                 self.0.end();
-                crate::gateway::give(&give.values)
+                crate::gateway::give(&give.values, unsets)
             }
             CLAUDE_SIGN_IN => self.start().await,
             CLAUDE_SIGN_IN_RETURN => {
                 let given = give.values.get(ADDRESS).map_or("", String::as_str);
-                self.0.give(CLAUDE_SIGN_IN_RETURN, given, "Claude Code").await?;
-                Ok(Given::Done {
-                    line: "Claude Code is signed in on this host".into(),
-                    env: Default::default(),
-                })
+                self.0
+                    .give(CLAUDE_SIGN_IN_RETURN, given, "Claude Code")
+                    .await?;
+                Ok(signed_in(unsets))
             }
             way => Err(gone(format!("Claude Code has no sign-in way {way}"))),
         }
@@ -109,7 +147,9 @@ impl SignIns {
         let browser = Browser::new()
             .map_err(|e| refused(format!("cannot make a $BROWSER for Claude Code: {e}")))?;
         let mut command = steery_driver_common::program::helper(&binary);
-        command.args(["auth", "login"]).env("BROWSER", browser.program());
+        command
+            .args(["auth", "login"])
+            .env("BROWSER", browser.program());
         let mut running = Login::start(command, CLAUDE_SIGN_IN_RETURN.into(), true)
             .map_err(|e| refused(format!("claude auth login did not start: {e}")))?;
         let began = Instant::now();
@@ -185,7 +225,9 @@ impl Browser {
         // Written whole, then moved, so it is never read half written.
         std::fs::write(
             browser.program(),
-            format!("#!/bin/sh\nprintf '%s' \"$1\" > {at}/given.tmp && mv {at}/given.tmp {at}/given\n"),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$1\" > {at}/given.tmp && mv {at}/given.tmp {at}/given\n"
+            ),
         )?;
         std::fs::set_permissions(browser.program(), std::fs::Permissions::from_mode(0o700))?;
         Ok(browser)
@@ -219,4 +261,93 @@ fn gone(line: impl Into<String>) -> Error {
 
 fn refused(line: impl Into<String>) -> Error {
     Error::refused(refusal::REFUSED, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    fn asked(way: &str, values: &[(&str, &str)]) -> Give {
+        Give {
+            need: NEED.into(),
+            way: way.into(),
+            values: values
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    /// What a way's `done` unsets, given at protocol `unsets`.
+    async fn unset(way: &str, values: &[(&str, &str)], unsets: bool) -> Vec<String> {
+        match SignIns::default().give(asked(way, values), unsets).await {
+            Ok(Given::Done { unset, .. }) => unset,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    const KEY: &[(&str, &str)] = &[("key", "sk-ant-api03-abc")];
+    const GATEWAY: &[(&str, &str)] = &[("url", "https://gw.example.com"), ("key", "k")];
+
+    #[tokio::test]
+    async fn an_api_key_unsets_the_gateway_from_protocol_15() {
+        assert_eq!(
+            unset(anthropic::WAY, KEY, true).await,
+            ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"]
+        );
+        assert!(unset(anthropic::WAY, KEY, false).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_gateway_unsets_the_variable_of_the_other_header_from_protocol_15() {
+        assert_eq!(
+            unset(crate::gateway::WAY, GATEWAY, true).await,
+            ["ANTHROPIC_API_KEY"]
+        );
+        let x_api_key = [GATEWAY, &[("header", "x-api-key")]].concat();
+        assert_eq!(
+            unset(crate::gateway::WAY, &x_api_key, true).await,
+            ["ANTHROPIC_AUTH_TOKEN"]
+        );
+        assert!(unset(crate::gateway::WAY, GATEWAY, false).await.is_empty());
+        assert!(
+            unset(crate::gateway::WAY, &x_api_key, false)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_plan_sign_in_unsets_the_key_and_the_gateway_from_protocol_15() {
+        let unset = |unsets| match signed_in(unsets) {
+            Given::Done { unset, env, .. } => {
+                assert!(env.is_empty());
+                unset
+            }
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            unset(true),
+            [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL"
+            ]
+        );
+        assert!(unset(false).is_empty());
+    }
+
+    #[test]
+    fn a_change_keeps_the_ways_and_says_what_is_there() {
+        let (lacking, change) = (need(), change());
+        assert_eq!(change.id, lacking.id);
+        assert_eq!(change.ways, lacking.ways);
+        assert_eq!(change.title, "Change how Claude Code signs in?");
+        assert_eq!(
+            change.line,
+            "Claude Code is signed in on this host. Pick a new way to sign in."
+        );
+    }
 }

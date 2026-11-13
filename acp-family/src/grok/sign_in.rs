@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use steery_driver_common::login::{self, Login, Waiting};
 use steery_driver_common::program::helper;
+use steery_driver_common::signed::Known;
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -36,18 +37,29 @@ const UNFETCHED: &str = "Failed to fetch models";
 /// How long a login has to print its page and code.
 const LINK_WITHIN: Duration = Duration::from_secs(15);
 
-/// Whether Grok in its home `root` is here and says it is not signed in.
+/// The last answer of `grok models` in a plan, in this process. A probe with no answer uses
+/// it.
+static SIGNED: Known = Known::new();
+
+/// Whether Grok in its home `root` is here and says it is not signed in. Where `grok models`
+/// says nothing, the last answer it gave.
 pub async fn lacking(root: &Path) -> bool {
     let Some(binary) = super::binary(root) else {
         return false;
     };
-    match models::printed(&binary, root, &[]).await {
-        Ok(printed) => printed.signed_in() == Some(false),
+    let now = match models::printed(&binary, root, &[]).await {
+        Ok(printed) => printed.signed_in(),
         Err(why) => {
             eprintln!("grok sign-in probe: {why}");
-            false
+            None
         }
-    }
+    };
+    lacks(&SIGNED, now)
+}
+
+/// Whether the steady answer says Grok is not signed in, with the probe's answer `now`.
+fn lacks(known: &Known, now: Option<bool>) -> bool {
+    known.steady(now) == Some(false)
 }
 
 /// The need, where Grok is here and not signed in.
@@ -106,6 +118,7 @@ impl SignIns {
                 Ok(Given::Done {
                     line: "Grok Build is signed in on this host".into(),
                     env: Default::default(),
+                    unset: Vec::new(),
                 })
             }
             GROK_SIGN_IN => self.device(root).await,
@@ -116,6 +129,7 @@ impl SignIns {
                 Ok(Given::Done {
                     line: "Grok Build uses your xAI API key".into(),
                     env: [(KEY.to_owned(), key.to_owned())].into(),
+                    unset: Vec::new(),
                 })
             }
             way => Err(gone(format!("Grok Build has no sign-in way {way}"))),
@@ -231,4 +245,17 @@ fn gone(line: impl Into<String>) -> Error {
 
 fn refused(line: impl Into<String>) -> Error {
     Error::refused(refusal::REFUSED, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(false), None, None, Some(true), None].map(|probe| lacks(&known, probe));
+        assert_eq!(planned, [true, true, true, false, false]);
+        assert!(!lacks(&Known::new(), None));
+    }
 }

@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use steery_driver_common::receipt::{self, End, marked};
 use steery_sdk::wire::harness::{
-    Act, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Marked, ReadAs, Reader,
-    ReaderFile, ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample, Sampled, Start,
-    Stdin, Stream, Terminal, TerminalCommand, TurnLine, TurnRead,
+    Act, Execution, Held, HeldBy, Holder, Launch, Look, Looked, Marked, ReadAs, Reader, ReaderFile,
+    ReaderPlan, ReaderTools, Receipt, ReceiptFind, ReceiptMark, Sample, Sampled, Start, Stdin,
+    Stream, Terminal, TerminalCommand, TurnLine, TurnRead,
 };
 use steery_sdk::{Error, refusal};
 
@@ -445,7 +445,9 @@ pub fn reader(harness: Harness, reader: Reader) -> Result<ReaderPlan, Error> {
 /// [`reader`]'s plan for the harness at `binary`.
 fn planned(harness: Harness, binary: &Path, reader: Reader) -> Result<ReaderPlan, Error> {
     if !reader.cwd.is_absolute() {
-        return Err(Error::invalid("the reader's folder is not an absolute path"));
+        return Err(Error::invalid(
+            "the reader's folder is not an absolute path",
+        ));
     }
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned(), "--print".into()];
     if let Some(model) = reader.model {

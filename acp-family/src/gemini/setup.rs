@@ -248,6 +248,7 @@ mod tests {
             release: "1.0.0".into(),
             timeout: 600,
             trusts: vec!["/home/daytona/work".into()],
+            ask: Vec::new(),
         };
         let planned = found(gemini, &root, setup).await;
         let found = planned.found.unwrap();

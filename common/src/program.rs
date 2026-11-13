@@ -45,7 +45,27 @@ pub const WAITED: u32 = 6;
 /// driver keeps it, answers needs only where it is [`NEEDS`] or newer, and says `waited`
 /// only where it is [`WAITED`] or newer.
 pub fn protocol(offered: &[u32]) -> Option<u32> {
-    PROTOCOLS.into_iter().find(|version| offered.contains(version))
+    PROTOCOLS
+        .into_iter()
+        .find(|version| offered.contains(version))
+}
+
+/// Like [`protocol`], for a driver that plans a need again where `setup/plan`'s `ask` names
+/// it and names `unset` in a `done` (`steery_sdk::ASK`, protocol 15): 15 where the runtime
+/// offered it, else what [`protocol`] gives. A driver that does not do so keeps
+/// [`protocol`], which stops at 14.
+pub fn protocol_asking(offered: &[u32]) -> Option<u32> {
+    match offered.contains(&steery_sdk::ASK) {
+        true => Some(steery_sdk::ASK),
+        false => protocol(offered),
+    }
+}
+
+/// Whether the person asked to give the need `id` again: the protocol `picked` is 15 or
+/// newer, and `ask` of `setup/plan` names the need. The runtime sends no `ask` to an older
+/// protocol; a driver ignores one it was given.
+pub fn asks(picked: u32, ask: &[String], id: &str) -> bool {
+    picked >= steery_sdk::ASK && ask.iter().any(|asked| asked == id)
 }
 
 /// The refusal of an `initialize` that offered none of [`PROTOCOLS`], as a person reads it.
@@ -79,7 +99,12 @@ pub fn lacks(names: &[&str]) -> Option<String> {
 /// driver runs, `used`, and the others, which it never does. The places are each folder on
 /// `PATH` and the installer's folder `installed`; one reached through a link to the same
 /// file is the same place. None where there is only `used`.
-pub fn others_note(label: &str, name: &str, installed: Option<&Path>, used: &Path) -> Option<String> {
+pub fn others_note(
+    label: &str,
+    name: &str,
+    installed: Option<&Path>,
+    used: &Path,
+) -> Option<String> {
     let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -101,7 +126,10 @@ pub fn others_note(label: &str, name: &str, installed: Option<&Path>, used: &Pat
     if others.is_empty() {
         return None;
     }
-    let others: Vec<String> = others.iter().map(|path| path.display().to_string()).collect();
+    let others: Vec<String> = others
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     Some(format!(
         "{label} is installed in more than one place here. Steery runs {}: the first on PATH, \
          else the one in its installer's folder. Steery never runs {}.",
@@ -210,6 +238,24 @@ mod tests {
         assert_eq!(release_within("1.2 then 3.4.5"), Some((3, 4, 5)));
         assert_eq!(release_within("1.2.3.4"), None);
         assert_eq!(release_within("none"), None);
+    }
+
+    /// Only a driver that asks to be asked picks 15; the others stop at 14.
+    #[test]
+    fn only_an_asking_driver_picks_15() {
+        assert_eq!(protocol(&[4, 14, 15]), Some(14));
+        assert_eq!(protocol_asking(&[4, 14, 15]), Some(15));
+        assert_eq!(protocol_asking(&[4, 14]), Some(14));
+        assert_eq!(protocol_asking(&[3]), None);
+    }
+
+    #[test]
+    fn an_ask_counts_only_from_protocol_15() {
+        let ask = ["sign-in".to_owned()];
+        assert!(asks(15, &ask, "sign-in"));
+        assert!(!asks(14, &ask, "sign-in"));
+        assert!(!asks(15, &ask, "other"));
+        assert!(!asks(15, &[], "sign-in"));
     }
 
     /// A probe that never answers is given up on within [`PROBE`] and killed then: a

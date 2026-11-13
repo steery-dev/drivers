@@ -21,7 +21,7 @@ use steery_sdk::{Error, refusal};
 use tokio::io::AsyncWriteExt as _;
 
 /// The need, by its id in every plan.
-const NEED: &str = "sign-in";
+pub const NEED: &str = "sign-in";
 /// Its ways, and the steps a started sign-in asks next.
 const CHATGPT: &str = "chatgpt";
 const CHATGPT_RETURN: &str = "chatgpt-return";
@@ -77,6 +77,17 @@ pub fn need() -> Need {
                 ends_at: None,
             },
         ],
+    }
+}
+
+/// The need that a person asked to give again, where Codex is logged in already: the same
+/// ways, in a question about a change. Each way keeps its sign-in in Codex's own home, so
+/// no `done` unsets a variable.
+pub fn change() -> Need {
+    Need {
+        title: "Change how Codex signs in?".into(),
+        line: "Codex is signed in on this host. Pick a new way to sign in.".into(),
+        ..need()
     }
 }
 
@@ -162,7 +173,11 @@ impl SignIns {
             .shows(LINK_WITHIN, |shown| {
                 let url = login::link(shown)?;
                 let rest = &shown[shown.find("one-time code")?..];
-                let mut lines = rest.lines().skip(1).map(str::trim).filter(|line| !line.is_empty());
+                let mut lines = rest
+                    .lines()
+                    .skip(1)
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty());
                 let code = lines.next()?;
                 lines.next()?;
                 Some((url, code.to_owned()))
@@ -215,15 +230,22 @@ async fn api_key(root: &Path, key: &str) -> Result<(), Error> {
     let mut child = command
         .spawn()
         .map_err(|e| refused(format!("codex login did not start: {e}")))?;
-    let mut stdin =
-        child.stdin.take().ok_or_else(|| refused("codex login did not take the input"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| refused("codex login did not take the input"))?;
     let ended = tokio::time::timeout(KEY_WITHIN, async {
         stdin.write_all(format!("{key}\n").as_bytes()).await?;
         drop(stdin);
         child.wait_with_output().await
     })
     .await
-    .map_err(|_| refused(format!("codex login did not end within {} s", KEY_WITHIN.as_secs())))?
+    .map_err(|_| {
+        refused(format!(
+            "codex login did not end within {} s",
+            KEY_WITHIN.as_secs()
+        ))
+    })?
     .map_err(|e| refused(format!("codex login: {e}")))?;
     if ended.status.success() {
         return Ok(());
@@ -233,14 +255,20 @@ async fn api_key(root: &Path, key: &str) -> Result<(), Error> {
         said.lines()
             .map(str::trim)
             .rfind(|line| !line.is_empty())
-            .map_or_else(|| format!("codex login ended with {}", ended.status), str::to_owned),
+            .map_or_else(
+                || format!("codex login ended with {}", ended.status),
+                str::to_owned,
+            ),
     ))
 }
 
 /// Why a started login gave no link: its own last line, where it printed one.
 fn unprinted(running: &Login) -> Error {
     refused(running.last_line().unwrap_or_else(|| {
-        format!("codex login printed no sign-in link within {} s", LINK_WITHIN.as_secs())
+        format!(
+            "codex login printed no sign-in link within {} s",
+            LINK_WITHIN.as_secs()
+        )
     }))
 }
 
@@ -248,6 +276,7 @@ fn done(line: &str) -> Given {
     Given::Done {
         line: line.into(),
         env: Default::default(),
+        unset: Vec::new(),
     }
 }
 
@@ -257,4 +286,25 @@ fn gone(line: impl Into<String>) -> Error {
 
 fn refused(line: impl Into<String>) -> Error {
     Error::refused(refusal::REFUSED, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every way keeps its sign-in in Codex's home, so no `done` gives or unsets a variable,
+    /// at any protocol.
+    #[test]
+    fn a_done_gives_and_unsets_no_variable() {
+        match done("Codex is signed in on this host") {
+            Given::Done { env, unset, .. } => assert!(env.is_empty() && unset.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_change_keeps_the_ways() {
+        assert_eq!(change().id, need().id);
+        assert_eq!(change().ways, need().ways);
+    }
 }

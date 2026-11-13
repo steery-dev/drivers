@@ -152,7 +152,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_asking(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
@@ -200,10 +200,10 @@ impl Program for ClaudeCode {
                     .as_ref()
                     .map_err(|why| Error::refused(refusal::REFUSED, why.clone()))?
                     .root();
-                result(setup::plan(&place.home, root, given(params)?, self.needs()?).await?)
+                result(setup::plan(&place.home, root, given(params)?, place.protocol).await?)
             }
             method::NEEDS_GIVE if self.needs()? => {
-                result(self.sign_ins.give(given(params)?).await?)
+                result(self.sign_ins.give(given(params)?, self.place()?.protocol >= steery_sdk::ASK).await?)
             }
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = given(params)?;

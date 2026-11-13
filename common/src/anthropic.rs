@@ -42,11 +42,15 @@ pub fn way(about: String) -> Way {
 }
 
 /// What `values` give by [`way`]: the key as [`VARIABLE`], where it reads as an Anthropic
-/// API key. `line` says what the harness now does.
-pub fn give(values: &BTreeMap<String, String>, line: &str) -> Result<Given, Error> {
+/// API key. `line` says what the harness now does; `unset` names the variables of another
+/// way that the key outranks (none for a driver that picked protocol 14 or older).
+pub fn give(values: &BTreeMap<String, String>, line: &str, unset: &[&str]) -> Result<Given, Error> {
     let key = values.get(KEY).map_or("", |key| key.trim());
     if key.is_empty() {
-        return Err(Error::refused(refusal::REFUSED, "Paste your Anthropic API key"));
+        return Err(Error::refused(
+            refusal::REFUSED,
+            "Paste your Anthropic API key",
+        ));
     }
     if !key.starts_with(STARTS) {
         return Err(Error::refused(
@@ -57,5 +61,6 @@ pub fn give(values: &BTreeMap<String, String>, line: &str) -> Result<Given, Erro
     Ok(Given::Done {
         line: line.into(),
         env: BTreeMap::from([(VARIABLE.to_owned(), key.to_owned())]),
+        unset: unset.iter().map(|name| (*name).to_owned()).collect(),
     })
 }

@@ -449,12 +449,16 @@ async fn node_lacks() -> Option<String> {
     if answer.code != Some(0) {
         return Some(format!(
             "`node --version` exited {}",
-            answer.code.map_or("by signal".to_owned(), |code| code.to_string())
+            answer
+                .code
+                .map_or("by signal".to_owned(), |code| code.to_string())
         ));
     }
     let said = String::from_utf8_lossy(&answer.stdout).trim().to_owned();
     match release_within(&said) {
-        None => Some(format!("`node --version` said `{said}`, which names no release")),
+        None => Some(format!(
+            "`node --version` said `{said}`, which names no release"
+        )),
         Some(release) if release < PI_NODE => Some(format!("`node` is {said}")),
         Some(_) => None,
     }

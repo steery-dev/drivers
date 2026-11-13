@@ -6,12 +6,15 @@
 //! in a transcript ([`receipt`]), an answer, such as
 //! a read that said nothing, given again while the files it stood on stand as they did
 //! ([`quiet`]), the MCP servers a harness's JSON configuration names ([`mcp`]), an
-//! Anthropic API key as a way to give a harness a sign-in ([`anthropic`]), and a harness's
+//! Anthropic API key as a way to give a harness a sign-in ([`anthropic`]), the check of a
+//! company gateway's address ([`gateway`]), a harness's
 //! own sign-in run on a terminal of the driver's, given back what its browser returned to
-//! ([`login`]).
+//! ([`login`]), and the last answer of a sign-in probe, kept for a plan while the probe
+//! gives none ([`signed`]).
 
 pub mod anthropic;
 pub mod follow;
+pub mod gateway;
 pub mod kernel;
 pub mod lines;
 pub mod login;
@@ -19,4 +22,5 @@ pub mod mcp;
 pub mod program;
 pub mod quiet;
 pub mod receipt;
+pub mod signed;
 pub mod tree;

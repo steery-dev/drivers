@@ -277,6 +277,7 @@ pub(crate) mod tests {
             release: "1.0.0".into(),
             timeout: 120,
             trusts: Vec::new(),
+            ask: Vec::new(),
         }
     }
 

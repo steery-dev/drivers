@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use steery_driver_common::login::{self, Login, Waiting};
 use steery_driver_common::program::helper;
+use steery_driver_common::signed::Known;
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 use tokio::io::AsyncWriteExt;
@@ -31,9 +32,19 @@ const CODE_WITHIN: Duration = Duration::from_secs(15);
 /// How long `copilot login --with-token` has to check and keep a token.
 const TOKEN_WITHIN: Duration = Duration::from_secs(30);
 
-/// Whether Copilot is signed in here; none where its server did not say.
-pub async fn signed_in(binary: &Path) -> Option<bool> {
-    server::signed_in(binary).await
+/// The last answer of Copilot's server in a plan, in this process. A probe with no answer
+/// uses it.
+static SIGNED: Known = Known::new();
+
+/// Whether the plan names the sign-in need: Copilot's server says it is not signed in, or
+/// says nothing and said so last.
+pub async fn lacking(binary: &Path) -> bool {
+    lacks(&SIGNED, server::signed_in(binary).await)
+}
+
+/// Whether the steady answer says Copilot is not signed in, with the probe's answer `now`.
+fn lacks(known: &Known, now: Option<bool>) -> bool {
+    known.steady(now) == Some(false)
 }
 
 /// The need, where Copilot is found here and not signed in.
@@ -195,6 +206,7 @@ fn signed() -> Given {
     Given::Done {
         line: "Copilot is signed in on this host".into(),
         env: Default::default(),
+        unset: Vec::new(),
     }
 }
 
@@ -204,4 +216,17 @@ fn gone(line: impl Into<String>) -> Error {
 
 fn refused(line: impl Into<String>) -> Error {
     Error::refused(refusal::REFUSED, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(false), None, None, Some(true), None].map(|probe| lacks(&known, probe));
+        assert_eq!(planned, [true, true, true, false, false]);
+        assert!(!lacks(&Known::new(), None));
+    }
 }
