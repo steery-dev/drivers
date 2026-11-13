@@ -58,7 +58,7 @@ name = "steery-driver-droid"
 path = "src/bin/droid.rs"
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v14.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v15.0.0" }
 steery-driver-common = { path = "../common" }
 # Kilo, Hermes, Cursor, OpenCode, Cline, Goose and OpenClaw keep their conversations in SQLite; bundled, so no system library is needed.
 rusqlite = { version = "0.32", features = ["bundled"] }

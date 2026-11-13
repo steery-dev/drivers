@@ -43,7 +43,7 @@ pub async fn plan(_home: &Path, root: &Path, setup: Setup, needs: bool) -> Resul
         });
     };
     let release = named(version(&binary).await.as_deref().and_then(release_within));
-    let needs = match needs && sign_in::signed_in(&binary).await == Some(false) {
+    let needs = match needs && sign_in::lacking(&binary).await {
         true => vec![sign_in::need()],
         false => Vec::new(),
     };

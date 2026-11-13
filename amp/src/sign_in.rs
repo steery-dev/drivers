@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use steery_driver_common::login::{self, Login, Waiting};
 use steery_driver_common::program::{ask, helper};
+use steery_driver_common::signed::Known;
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -42,12 +43,22 @@ const LINK_WITHIN: Duration = Duration::from_secs(15);
 /// How long Amp has to list one thread with a key given: inside `needs/give`'s 30 s.
 const KEY_WITHIN: Duration = Duration::from_secs(20);
 
-/// Whether Amp is signed out here: no `AMP_API_KEY`, and Amp says so ([`signed_in`]).
+/// The last answer of `amp threads list` in a plan, in this process. A probe with no answer
+/// uses it.
+static SIGNED: Known = Known::new();
+
+/// Whether Amp is signed out here: no `AMP_API_KEY`, and Amp says so ([`signed_in`]). Where
+/// Amp says nothing, the last answer it gave.
 pub async fn signed_out(binary: &std::path::Path) -> bool {
     if std::env::var_os(KEY).is_some_and(|key| !key.is_empty()) {
         return false;
     }
-    signed_in(binary).await == Some(false)
+    lacks(&SIGNED, signed_in(binary).await)
+}
+
+/// Whether the plan names the sign-in need, with the probe's answer `now`.
+fn lacks(known: &Known, now: Option<bool>) -> bool {
+    known.steady(now) == Some(false)
 }
 
 /// What Amp says of its account here: `amp threads list --json --limit 1` lists (true), or
@@ -109,8 +120,17 @@ pub fn need() -> Need {
 pub struct SignIns(Waiting);
 
 impl SignIns {
-    /// `needs/give`.
+    /// `needs/give`. A `done` forgets the last answer of the probe: the next probe with no
+    /// answer plans no need, not the sign-in just made.
     pub async fn give(&self, give: Give) -> Result<Given, Error> {
+        let given = self.step(give).await?;
+        if matches!(given, Given::Done { .. }) {
+            SIGNED.forget();
+        }
+        Ok(given)
+    }
+
+    async fn step(&self, give: Give) -> Result<Given, Error> {
         if give.need != NEED {
             return Err(gone(format!("Amp has no need {} here", give.need)));
         }
@@ -122,6 +142,7 @@ impl SignIns {
                 Ok(Given::Done {
                     line: "Amp is signed in on this host".into(),
                     env: Default::default(),
+                    unset: Vec::new(),
                 })
             }
             API_KEY => {
@@ -131,6 +152,7 @@ impl SignIns {
                 Ok(Given::Done {
                     line: "Amp uses your API key on this machine".into(),
                     env: [(KEY.to_owned(), key.to_owned())].into(),
+                    unset: Vec::new(),
                 })
             }
             way => Err(gone(format!("Amp has no sign-in way {way}"))),
@@ -224,4 +246,17 @@ fn gone(line: impl Into<String>) -> Error {
 
 fn refused(line: impl Into<String>) -> Error {
     Error::refused(refusal::REFUSED, line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(false), None, None, Some(true), None].map(|probe| lacks(&known, probe));
+        assert_eq!(planned, [true, true, true, false, false]);
+        assert!(!lacks(&Known::new(), None));
+    }
 }

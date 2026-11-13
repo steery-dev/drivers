@@ -29,8 +29,9 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use steery_driver_common::program::{release_within, version};
+use steery_driver_common::signed::Known;
 use steery_sdk::Error;
-use steery_sdk::wire::harness::{Entry, Format, Found, Part, Planned, Setup};
+use steery_sdk::wire::harness::{Entry, Format, Found, Need, Part, Planned, Setup};
 
 use crate::appserver::AppServer;
 use crate::hooks;
@@ -43,7 +44,8 @@ const RULE: &str = "prefix_rule(pattern=[\"steery\"], decision=\"allow\", justif
 
 /// The plan for this machine; where `needs` (protocol 5) and `codex login status` says Codex
 /// is not logged in, its sign-in ([`crate::sign_in::need`]).
-pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Error> {
+pub async fn plan(home: &Path, setup: Setup, protocol: u32) -> Result<Planned, Error> {
+    let needs = protocol >= steery_driver_common::program::NEEDS;
     let root = match crate::home::root(home) {
         Ok(root) => root,
         Err(why) => {
@@ -131,12 +133,13 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
         }]}),
         carries: vec![Part::Hooks],
     }));
-    let lacks = async { needs && crate::drive::signed_in(&binary, &root).await == Some(false) };
+    let lacks = async { needs && lacks(&SIGNED, crate::drive::signed_in(&binary, &root).await) };
     let (hooks, lacks) = tokio::join!(steery_hooks(&binary, &root, &setup.hook), lacks);
     let mut asked = Vec::new();
-    if lacks {
-        asked.push(crate::sign_in::need());
-    }
+    asked.extend(match needs {
+        true => sign_in_need(lacks, asking(protocol, &setup)),
+        false => None,
+    });
     match hooks {
         Ok(hooks) => {
             entries.extend(hooks.carried.into_iter().map(|(key, hash)| Entry {
@@ -174,6 +177,31 @@ pub async fn plan(home: &Path, setup: Setup, needs: bool) -> Result<Planned, Err
         install: None,
         needs: asked,
     })
+}
+
+/// The last answer of the sign-in probe in this process. A probe with no answer uses it.
+pub(crate) static SIGNED: Known = Known::new();
+
+/// Whether the plan names the sign-in need, with the probe's answer `now`: the steady answer
+/// says Codex is not logged in.
+fn lacks(known: &Known, now: Option<bool>) -> bool {
+    known.steady(now) == Some(false)
+}
+
+/// Whether the person asked to give the sign-in again: the protocol picked is 15 or newer
+/// and `setup.ask` names it.
+fn asking(protocol: u32, setup: &Setup) -> bool {
+    steery_driver_common::program::asks(protocol, &setup.ask, crate::sign_in::NEED)
+}
+
+/// The sign-in need of the plan: the one that lacks where `lacks`; else, where the person
+/// `ask`ed, the sign-in as a change, though Codex is logged in.
+fn sign_in_need(lacks: bool, ask: bool) -> Option<Need> {
+    match (lacks, ask) {
+        (true, _) => Some(crate::sign_in::need()),
+        (false, true) => Some(crate::sign_in::change()),
+        (false, false) => None,
+    }
 }
 
 /// The command one hook runs: the runtime's hook line with the event added, which cannot
@@ -365,6 +393,54 @@ mod tests {
 
     const FILE: &str = "/Users/a/.codex/hooks.json";
     const HOOK: &str = "/Users/a/.local/bin/steery hook codex";
+
+    #[test]
+    fn a_probe_with_no_answer_keeps_the_last_answer_for_the_need() {
+        let known = Known::new();
+        let planned = [Some(false), None, None, Some(true), None].map(|probe| lacks(&known, probe));
+        assert_eq!(planned, [true, true, true, false, false]);
+        assert!(!lacks(&Known::new(), None));
+    }
+
+    fn setup(ask: &[&str]) -> Setup {
+        Setup {
+            mcp_url: "http://127.0.0.1:7777/mcp".into(),
+            skill: String::new(),
+            hook: HOOK.into(),
+            door: "ws://127.0.0.1:7777/door".into(),
+            release: "1.0.0".into(),
+            timeout: 120,
+            trusts: Vec::new(),
+            ask: ask.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    /// A signed-in Codex plans the sign-in only where the person asked to give it again, at
+    /// protocol 15 or newer, and then as a change.
+    #[test]
+    fn a_signed_in_codex_plans_the_sign_in_only_where_asked() {
+        let planned = |protocol, ask: &[&str]| sign_in_need(false, asking(protocol, &setup(ask)));
+        let need = planned(15, &["sign-in"]).expect("asked");
+        assert_eq!(need.id, "sign-in");
+        assert_eq!(need.title, "Change how Codex signs in?");
+        assert_eq!(
+            need.line,
+            "Codex is signed in on this host. Pick a new way to sign in."
+        );
+        assert_eq!(need.ways, crate::sign_in::need().ways);
+        assert!(planned(15, &[]).is_none());
+        assert!(planned(15, &["other"]).is_none());
+        // Protocol 14 ignores `ask`.
+        assert!(planned(14, &["sign-in"]).is_none());
+    }
+
+    #[test]
+    fn a_codex_not_signed_in_plans_the_lacking_need_also_where_asked() {
+        for ask in [false, true] {
+            let need = sign_in_need(true, ask).expect("lacks");
+            assert_eq!(need.title, "Sign Codex in?");
+        }
+    }
 
     fn hook(key: &str, command: &str, hash: &str, status: &str) -> Listed {
         Listed {

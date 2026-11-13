@@ -149,6 +149,13 @@ writes the reason to standard error, which is the runtime's log of the driver. `
 field for a reason. To show the reason to a person, the SDK needs a field for it:
 `signed_in_why?: string` beside `signed_in`. This is a protocol change.
 
+When the probe gives no answer, `setup/plan` keeps the last answer that the probe gave in this
+driver process, and plans the `sign-in` need from it. With no answer known yet, it plans no
+need. So the card does not go and come back while the probe fails now and then. `models` still
+reports `signed_in` as the probe says. Every `needs/give` that returns `done`, by any way,
+forgets the kept answer: a probe with no answer right after a sign-in then plans no need, as
+with nothing known, and does not plan the sign-in again.
+
 When the harness is not signed in, `setup/plan` asks the `sign-in` need (protocol 5). It gives
 its ways best first:
 
@@ -170,7 +177,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 
 | Driver | Ways, in order | Next step's link |
 |---|---|---|
-| `claude-code` | `claude-sign-in`, `api-key` | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
+| `claude-code` | `claude-sign-in`, `api-key`, `gateway` (a company's own gateway) | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
 | `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
 | `copilot` | `copilot-sign-in`, `github-token` (`copilot login --with-token`) | GitHub's device page (`copilot login --device-code`), with its code in the step's label |
 | `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
@@ -192,6 +199,14 @@ Thus the driver keeps its own list of omp's OAuth providers (`pi-family/src/sign
   Enterprise question of `github-copilot` with Enter: github.com.
 - Left out: `anthropic` (its terms), `perplexity` and `snowflake` (each asks for an email or an
   account first).
+
+A person can ask to give `sign-in` again where the harness is signed in already (protocol 15).
+The runtime then names the need in `setup/plan`'s `ask`. A driver plans it with a title that
+says a change, and the same ways. Claude Code, Codex, omp and pi do this. A driver that picked
+14 or older ignores `ask`. Where one way outranks another that an earlier `done` gave as
+variables, its `done` names those variables as `unset`. The runtime stops keeping them. Only
+Claude Code names `unset`; see its section. Every other driver only builds against protocol 15
+and speaks 14 at most.
 
 ## Building
 
@@ -401,9 +416,22 @@ ways are:
 2. In both: `api-key`. This is an Anthropic API key. The driver checks that it starts with
    `sk-ant-api`. The driver returns it as `ANTHROPIC_API_KEY`, which both harnesses read.
 
+Neither harness has a `gateway` way. omp sends a stored Anthropic login (OAuth `sk-ant-oat`)
+in place of `ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` then sends that plan token to the
+company's gateway. omp signs the login out when the gateway refuses it. omp has no command
+that says, without the secret, whether a login is stored. pi 1.5.2 ignores
+`ANTHROPIC_BASE_URL`: it reads a gateway's address only from `providers.anthropic.baseUrl` in
+`models.json`, which the driver does not write.
+
 The driver never offers omp's and pi's own Claude login. That login signs a third-party app in
 to a Claude plan, and Anthropic's terms forbid this. Because pi has no login command, pi has only
 the key.
+
+**Ask** (protocol 15). Where `setup/plan`'s `ask` names `sign-in` and the harness is found,
+the plan has the need also where the harness lists a model. Its title says a change
+(`Change how omp signs in to a model provider?`, `Change how pi gets its Anthropic API key?`).
+The ways are the same. A driver that picked 14 or older ignores `ask`. No way names `unset`:
+each gives `ANTHROPIC_API_KEY` or nothing.
 
 What each driver does:
 
@@ -539,8 +567,9 @@ One crate, one binary: `steery-driver-claude-code`. It has no settings. Claude C
 everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
 
 **Needs** (protocol 5: a driver that picked version 4 plans no needs). When
-`claude auth status --json` says `"loggedIn": false`, the plan asks `sign-in` in two ways. An
-`ANTHROPIC_API_KEY` in Claude Code's environment counts as signed in. The ways are:
+`claude auth status --json` says `"loggedIn": false`, the plan asks `sign-in` in three ways. An
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in Claude Code's environment counts as signed in.
+The ways are:
 
 1. `claude-sign-in`, offered first. The driver runs the unmodified `claude auth login` on a
    terminal of its own, with `BROWSER` naming a script of the driver's. This script records the
@@ -552,10 +581,44 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
    driver returns it as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
    `-p` (the reader). A `--bg` session uses it only after approval. Thus a turn that holds the
    key passes `--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, and writes
-   nothing.
+   nothing. Where `claude auth status --json`, asked without the key, says Claude Code is
+   signed in to a plan (a change), the driver runs `claude auth logout` first, so that turns
+   use the key. It checks the key first, so a wrong key signs nothing out. The command has a
+   bound of 5 s and is killed past it. If it fails, the driver refuses with one line, and the
+   person runs `claude auth logout` on the host. The `gateway` way does not sign out:
+   `ANTHROPIC_AUTH_TOKEN` outranks a plan, and a turn sends a `x-api-key` key through
+   `apiKeyHelper`.
+3. `gateway`: a company's own gateway that speaks the Anthropic Messages API, as Claude
+   Desktop's gateway configuration (`inferenceGatewayBaseUrl`, `inferenceGatewayApiKey`,
+   `inferenceGatewayAuthScheme`). The fields are `url`, `key` (secret) and `header` (optional).
+   - `url` is `https`, or `http` only on `localhost` or a loopback IP address. It has no user,
+     query or fragment, and it does not end in `/v1`, because Claude Code adds `/v1/messages`.
+     The driver returns it as `ANTHROPIC_BASE_URL`.
+   - `header` empty or `bearer`: the driver returns the key as `ANTHROPIC_AUTH_TOKEN`, which
+     Claude Code sends as `Authorization: Bearer`. It outranks a plan's sign-in. An interactive
+     session used it with no approval (2.1.73).
+   - `header` `x-api-key`: the driver returns the key as `ANTHROPIC_API_KEY`, which Claude Code
+     sends as `x-api-key`. A turn reads it through `apiKeyHelper` also where Claude Code is
+     signed in to a plan. Else a `--bg` session would send the plan's token to the gateway.
+   - The driver returns no other variable. Claude Code sends an empty `ANTHROPIC_AUTH_TOKEN`
+     as an empty `Authorization: Bearer` header, so an empty variable does not unset one.
 
 Claude Code keeps the sign-in on this host. The driver keeps no token. A driver that started
 again has no sign-in that waits. Thus a step at that time is `not-found`.
+
+**Ask and unset** (protocol 15). Where `setup/plan`'s `ask` names `sign-in` and Claude Code is
+found, the plan has the need also where Claude Code is signed in. Its title is `Change how
+Claude Code signs in?`. The ways are the same, but the `about` of `api-key` ends with `Claude
+Code signs out of its plan on this host.` Only this need says it. A driver that picked 14 or
+older ignores `ask`, and names no `unset`. Each way's `done` unsets the variables of the ways
+that it outranks, so that the way just given is the one Claude Code uses:
+
+| Way | `unset` |
+|---|---|
+| `api-key` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` |
+| `gateway`, `bearer` | `ANTHROPIC_API_KEY` |
+| `gateway`, `x-api-key` | `ANTHROPIC_AUTH_TOKEN` |
+| `claude-sign-in-return` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads them
   from `projects/<folder>/<id>.jsonl` under the root. It also reads them from the `projects`
@@ -726,6 +789,10 @@ ways. The driver runs each way on a terminal of its own, in Codex's home.
    `device-code`, with no field.
 3. `api-key`: an OpenAI API key. `codex login --with-api-key` reads it on standard input, and
    Codex keeps it.
+
+**Ask** (protocol 15). Where the person asks to give `sign-in` again, though Codex is logged
+in, the plan has the need with the title `Change how Codex signs in?` and the same ways. Each
+way keeps its sign-in in Codex's own home, so no `done` gives a variable or names `unset`.
 
 When Codex's own `hooks/list` lists a Steery hook as `untrusted` or `modified`, the plan also
 asks `hooks` in one way, `trust`. Codex runs a hook only after its person trusted the hook's

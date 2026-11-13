@@ -319,10 +319,7 @@ impl Store {
                     .ok_or_else(|| {
                         Error::refused(
                             refusal::NOT_FOUND,
-                            format!(
-                                "{} has no sub-agent {agent} in {id}",
-                                self.harness.id(),
-                            ),
+                            format!("{} has no sub-agent {agent} in {id}", self.harness.id(),),
                         )
                     })?;
                 found.transcripts.into_iter().next().unwrap_or(lead.clone())
@@ -1620,17 +1617,27 @@ pub(crate) mod tests {
             0,
         );
         assert_eq!(door.consumed, 3);
-        assert_eq!(words(&door.events), ["ask", "b", "c"], "every branch, in append order");
+        assert_eq!(
+            words(&door.events),
+            ["ask", "b", "c"],
+            "every branch, in append order"
+        );
         assert_eq!(
             spent(&door.events),
             [("b".to_owned(), 5), ("c".to_owned(), 7)],
             "the door folds each response once, as the transcript's first read"
         );
         let read_on = read(Some(door.cursor.clone()));
-        assert!(read_on.events.is_empty() && !read_on.reset, "the fold read every entry the read would");
+        assert!(
+            read_on.events.is_empty() && !read_on.reset,
+            "the fold read every entry the read would"
+        );
         assert_eq!(read_on.after.as_deref(), Some("c"));
         let gone = read(Some("f.0.zz".into()));
-        assert!(gone.events.is_empty() && gone.cursor == "f.0.zz", "an entry not yet written waits");
+        assert!(
+            gone.events.is_empty() && gone.cursor == "f.0.zz",
+            "an entry not yet written waits"
+        );
         let mut appended = std::fs::OpenOptions::new()
             .append(true)
             .open(&file)
@@ -1845,7 +1852,10 @@ pub(crate) mod tests {
         };
         let folded = fold(probe);
         assert_eq!(folded.consumed, 2);
-        assert_eq!(folded.events, probed.events, "door and transcript say the same");
+        assert_eq!(
+            folded.events, probed.events,
+            "door and transcript say the same"
+        );
         let unlisted = fold("nobody-yet");
         assert!(
             unlisted.consumed == 0 && unlisted.events.is_empty(),

@@ -116,7 +116,11 @@ impl Jobs {
     /// second service; a name started again later is a new one.
     fn service_started(&self, name: &str, call: &str, at: u64) {
         let mut kept = self.lock();
-        if kept.services.iter().any(|s| s.name == name && s.call == call) {
+        if kept
+            .services
+            .iter()
+            .any(|s| s.name == name && s.call == call)
+        {
             return;
         }
         if kept.services.len() >= SERVICES {
@@ -502,9 +506,18 @@ impl State<'_> {
         let forked = self.forked;
         // The message's own `timestamp` is its key from its first live piece on (the
         // plugin's `live` frames): the entry id comes only once it is recorded.
-        let key = message.get("timestamp").and_then(Value::as_u64).map(|stamp| stamp.to_string());
+        let key = message
+            .get("timestamp")
+            .and_then(Value::as_u64)
+            .map(|stamp| stamp.to_string());
         if !thought.is_empty() {
-            self.said_of(at, format!("{id}:thought"), key.clone(), Voice::Thought, thought);
+            self.said_of(
+                at,
+                format!("{id}:thought"),
+                key.clone(),
+                Voice::Thought,
+                thought,
+            );
         }
         if !said.is_empty() {
             self.said_of(at, id.clone(), key, Voice::Agent, said);
@@ -791,7 +804,14 @@ impl State<'_> {
     }
 
     /// An assistant message's words of one voice, named for the message they are of.
-    fn said_of(&mut self, at: u64, id: String, message: Option<String>, voice: Voice, text: String) {
+    fn said_of(
+        &mut self,
+        at: u64,
+        id: String,
+        message: Option<String>,
+        voice: Voice,
+        text: String,
+    ) {
         self.out.push(Event::Words {
             at,
             id,
@@ -1496,7 +1516,8 @@ mod tests {
                 _ => None,
             })
         };
-        let named = |calls: &[&str]| Some(calls.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>());
+        let named =
+            |calls: &[&str]| Some(calls.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>());
         assert_eq!(
             waited(&on.events, "k3"),
             named(&["k1", "k2", "k0"]),
@@ -1532,9 +1553,19 @@ mod tests {
                 record("i", "h", 13, result("k6", "bash", service("web"))),
                 record("j", "i", 20, calls(&[("k7", "wait", none.clone())])),
                 gone,
-                record("m", "l", 22, result("k7", "wait", json!({"op": "wait", "jobs": []}))),
+                record(
+                    "m",
+                    "l",
+                    22,
+                    result("k7", "wait", json!({"op": "wait", "jobs": []})),
+                ),
                 record("n", "m", 30, calls(&[("k8", "wait", none.clone())])),
-                record("o", "n", 31, result("k8", "wait", json!({"op": "wait", "jobs": []}))),
+                record(
+                    "o",
+                    "n",
+                    31,
+                    result("k8", "wait", json!({"op": "wait", "jobs": []})),
+                ),
             ],
         );
         let end = read(&store, "f1", None, Some(&on.cursor));

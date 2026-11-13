@@ -347,9 +347,11 @@ async fn follow(
     command.args(turn.launching(bypass, kept.is_some())?);
     // The key is read through the helper only where Claude Code has no sign-in of its own:
     // a helper outranks a plan's sign-in, and a person signed in with their plan who also
-    // exports a key they never approved keeps their plan, as Claude Code itself would.
+    // exports a key they never approved keeps their plan, as Claude Code itself would. A
+    // company's gateway (`ANTHROPIC_BASE_URL`, [`crate::gateway`]) always takes its key
+    // through the helper: else a `--bg` session there sends its plan's sign-in to it.
     let keyed = std::env::var_os(anthropic::VARIABLE).is_some_and(|key| !key.is_empty())
-        && crate::drive::signed_in(false).await == Some(false);
+        && (crate::gateway::used() || crate::drive::signed_in(false).await == Some(false));
     if kept.is_none()
         && let Some(settings) = settings(heard.as_ref(), Some(&steery), keyed)?
     {

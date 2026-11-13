@@ -211,6 +211,7 @@ mod tests {
             release: "1.0.0".into(),
             timeout: 600,
             trusts: vec!["/home/daytona/work".into()],
+            ask: Vec::new(),
         };
         let planned = found(agy, &home, &root, setup).await;
         assert_eq!(planned.found.unwrap().release, "1.5.5");

@@ -282,7 +282,10 @@ fn price(model: &Value) -> Option<f64> {
 /// omp's fuzzy match picks. Entries naming nothing leave the catalog whole, as omp leaves
 /// its scope.
 fn omp_enabled(models: Vec<Model>, enabled: &[String]) -> Vec<Model> {
-    let selectors: Vec<String> = models.iter().map(|model| model.model.to_lowercase()).collect();
+    let selectors: Vec<String> = models
+        .iter()
+        .map(|model| model.model.to_lowercase())
+        .collect();
     let id = |selector: &str| -> usize { selector.find('/').map_or(0, |at| at + 1) };
     let mut kept = vec![false; models.len()];
     for entry in enabled.iter().map(|entry| entry.to_lowercase()) {
@@ -300,7 +303,9 @@ fn omp_enabled(models: Vec<Model>, enabled: &[String]) -> Vec<Model> {
             mark(&|selector, id| glob(&entry, selector) || glob(&entry, id));
             continue;
         }
-        let base = entry.rsplit_once(':').map_or(entry.as_str(), |(base, _)| base);
+        let base = entry
+            .rsplit_once(':')
+            .map_or(entry.as_str(), |(base, _)| base);
         if mark(&|selector, id| entry == selector || entry == id)
             || mark(&|selector, id| base == selector || base == id)
         {
