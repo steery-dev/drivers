@@ -581,11 +581,13 @@ The ways are:
    driver returns it as `ANTHROPIC_API_KEY`. Claude Code uses that variable unasked only in
    `-p` (the reader). A `--bg` session uses it only after approval. Thus a turn that holds the
    key passes `--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, and writes
-   nothing. Where `claude auth status --json`, asked without the key, says Claude Code is
-   signed in to a plan (a change), the driver runs `claude auth logout` first, so that turns
-   use the key. It checks the key first, so a wrong key signs nothing out. The command has a
-   bound of 5 s and is killed past it. If it fails, the driver refuses with one line, and the
-   person runs `claude auth logout` on the host. The `gateway` way does not sign out:
+   nothing. The `done` of this way also returns `CLAUDE_KEY_FROM_STEERY=1`. This marker says
+   that the person gave this key through Steery, so turns take the key through `apiKeyHelper`
+   also where Claude Code is signed in to a plan. The driver signs nothing out, and the plan
+   stays signed in. Without the marker, a turn takes the key through `apiKeyHelper` only
+   where Claude Code has no sign-in of its own, or where a gateway is used. The marker has no
+   `STEERY_` prefix, because a turn moves every `STEERY_` variable into the session's
+   settings, and the marker is for the driver alone. The `gateway` way does not use it:
    `ANTHROPIC_AUTH_TOKEN` outranks a plan, and a turn sends a `x-api-key` key through
    `apiKeyHelper`.
 3. `gateway`: a company's own gateway that speaks the Anthropic Messages API, as Claude
@@ -609,16 +611,17 @@ again has no sign-in that waits. Thus a step at that time is `not-found`.
 **Ask and unset** (protocol 15). Where `setup/plan`'s `ask` names `sign-in` and Claude Code is
 found, the plan has the need also where Claude Code is signed in. Its title is `Change how
 Claude Code signs in?`. The ways are the same, but the `about` of `api-key` ends with `Claude
-Code signs out of its plan on this host.` Only this need says it. A driver that picked 14 or
+Code uses the key in place of your plan on this host. The plan stays signed in.` Only this need
+says it. A driver that picked 14 or
 older ignores `ask`, and names no `unset`. Each way's `done` unsets the variables of the ways
 that it outranks, so that the way just given is the one Claude Code uses:
 
 | Way | `unset` |
 |---|---|
 | `api-key` | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` |
-| `gateway`, `bearer` | `ANTHROPIC_API_KEY` |
-| `gateway`, `x-api-key` | `ANTHROPIC_AUTH_TOKEN` |
-| `claude-sign-in-return` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL` |
+| `gateway`, `bearer` | `ANTHROPIC_API_KEY`, `CLAUDE_KEY_FROM_STEERY` |
+| `gateway`, `x-api-key` | `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_KEY_FROM_STEERY` |
+| `claude-sign-in-return` | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `CLAUDE_KEY_FROM_STEERY` |
 
 - **Conversations** (`sessions/list`, `sessions/locate`, `sessions/read`). The driver reads them
   from `projects/<folder>/<id>.jsonl` under the root. It also reads them from the `projects`
