@@ -40,7 +40,7 @@ short name, its tint and its mark.
 | `goose` | Goose | [`acp-family`](acp-family/) | observe, drive |
 | `amp` | Amp | [`amp`](amp/) | observe, drive, live (Steery's plugin door) |
 | `gemini` | Gemini CLI | [`acp-family`](acp-family/) | observe, drive, live (Steery's plugin door) |
-| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe, drive |
+| `qwen` | Qwen Code | [`acp-family`](acp-family/) | observe, drive, live (Qwen's own door, `qwen serve`: `picks`) |
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive |
 | `droid` | Droid | [`acp-family`](acp-family/) | observe, drive |
@@ -292,7 +292,7 @@ is the worked example. Copy it and keep its shape (the layout is below, under om
 
   A refusal is `Error::refused` with one of the protocol's words (`steery_sdk::refusal`).
 - **Live** (§4.3) is a door. A harness with its own door (`picks`, `keeps`) answers `say`,
-  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok` and `antigravity` do this. omp, pi, Kilo,
+  `pick` and `stop` in its driver. `claude-code`, `codex`, `copilot`, `cline`, `hermes`, `grok`, `antigravity` and `qwen` do this. omp, pi, Kilo,
   OpenCode, Amp and Gemini CLI have no door of their own, so their door is `plugin`. This
   repository keeps Steery's plugin for omp and pi in `pi-family/plugin/`, Kilo's in
   `acp-family/plugin/kilo.ts`, OpenCode's in `acp-family/plugin/opencode.ts` and Amp's in
@@ -1084,7 +1084,7 @@ cargo test
 
 ## Qwen Code: `acp-family/src/qwen/`
 
-One binary, `steery-driver-qwen`, at observe and drive, from release 0.27.2. Qwen keeps
+One binary, `steery-driver-qwen`, at observe, drive and live, from release 0.27.2. Qwen keeps
 everything under its root, `QWEN_HOME` or `~/.qwen`. Each conversation is one JSON-lines chat
 file, `projects/<folder>/chats/<id>.jsonl` (the folder is the conversation's `cwd` with each
 character that is not a letter or a digit as `-`), with `<id>.title.json` beside it.
@@ -1119,7 +1119,36 @@ character that is not a letter or a digit as `-`), with `<id>.title.json` beside
   - `reader`: `qwen -o text --chat-recording=false --approval-mode plan`, its tools held to
     `read_file`, `grep_search`, `glob` or none, and no MCP server.
   - `terminal`: `cd '<cwd>' && qwen -r <id>`, with `QWEN_HOME` where the root is not
-    `~/.qwen`.
+    `~/.qwen`. Where a daemon runs the conversation: `qwen attach --port <port> --session
+    <id> [--workspace '<cwd>']`, a second client of the same run.
+- **Live** (`held`, `say`, `pick`, `stop`, `terminal`, `session/changed`), door `picks`. Qwen's
+  door is its daemon, `qwen serve`: HTTP/1.1 with JSON on a loopback port. A daemon runs each
+  conversation that a client loads in it (its Web Shell, `qwen attach`, its API) and writes its
+  chat file. A `qwen` in a terminal or `qwen --acp` runs no daemon, so it has no door.
+  - The driver finds each daemon by its record, `daemon-<port>.json` in `$QWEN_RUNTIME_DIR/daemon`
+    or `<root>/daemon`. A daemon with `--require-auth` takes the token of
+    `daemon-<port>-<pid>.token` beside the record, else `QWEN_SERVER_TOKEN`.
+  - `held`: the daemon whose `GET /session/<id>/status` answers 200 holds it. The driver asks
+    every daemon at once and takes the first 200; a daemon that never answers costs at most
+    2 s. Its stop is `owner`, with the running prompt's id. Else Drive's `held`.
+  - `say`: `steer` while a turn runs is `POST /session/<id>/mid-turn-message`: the daemon
+    puts the words in at the turn's next step, else runs them as their own turn. `queue`, and
+    `steer` where nothing runs, is `POST /session/<id>/prompt`, which waits behind any prompt
+    that runs or waits. `immediate` is refused `harness-busy` while a turn runs or words
+    wait. No daemon: `no-door`.
+  - `pick`: `POST /session/<id>/model` with `qwen.session.modelPersistDefault: false`, so the
+    person's default stays. A model the daemon does not know is refused `model-missing`. A
+    thinking level is refused `selection-unsupported`.
+  - `stop`: `POST /session/<id>/cancel`, where the token still names the prompt that runs
+    (else `stopped: false`), or the named say went into it (else `other-turn`). The cancel
+    names no prompt: a turn that ends between the check and the cancel lets it reach the
+    next one. Words that wait stay, and the next of them starts.
+  - `session/changed`: the daemon's `GET /session/<id>/events`. `turn_complete` settles a
+    turn's says, `mid_turn_message_injected` adds steered says to the running turn,
+    `tool_call` and `tool_call_update` are calls, `usage_update` is `context_left`, and
+    `permission_request` is a `confirm` dialog until `permission_resolved`. The driver asks
+    `turns/current`, `pending-prompts` and `mid-turn-messages` for what runs and waits. It
+    stops following where no client has the conversation and nothing runs.
 
 Ran (Qwen Code 0.27.2, `/opt/homebrew/bin/qwen`, ollama `qwen3:1.7b`, a temporary
 `QWEN_HOME`): a `new` turn through `start` that ran `run_shell_command` past the hook and
@@ -1129,6 +1158,14 @@ the source's file left as it was; a `stop` by SIGINT (exit 130, interrupted);
 a missing hook binary blocking every call of a turn Steery started, and letting the calls
 run where `STEERY_STARTED` names another process; `start` refused where
 the settings hold no hook. The recorded turns are in `acp-family/tests/qwen/turns`.
+
+Ran live (`qwen serve` on a loopback port, the same temporary `QWEN_HOME`): `held` naming the
+daemon; a `say` that ran on ollama `qwen3:1.7b`, its 47 `session/changed` with calls and
+`context_left`, settled after 154 s; `pick` to `qwen3:0.6b`, and an unknown model refused
+`model-missing`; a second `say`, `held` naming its prompt, and `stop` cancelling it in 0.1 s;
+with a local OpenAI-compatible stand-in model, `steer` folded into a running turn, `queue`
+waiting behind it, `immediate` refused `harness-busy`, and `say` with no daemon refused
+`no-door`.
 
 ```sh
 cd acp-family && cargo build
