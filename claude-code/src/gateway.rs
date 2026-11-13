@@ -78,7 +78,8 @@ pub fn way() -> Way {
 
 /// What `values` give by [`way`]: the address and the key as Claude Code's variables. With
 /// `unsets` (the driver picked protocol 15 or newer), the variable of the other header,
-/// which an earlier gateway may have given, is unset.
+/// which an earlier gateway may have given, and the marker of a key given through Steery
+/// ([`crate::sign_in::KEY_MARKER`]) are unset.
 pub fn give(values: &BTreeMap<String, String>, unsets: bool) -> Result<Given, Error> {
     let value = |name: &str| values.get(name).map_or("", |value| value.trim());
     let address = gateway::address(value(ADDRESS), "Claude Code").map_err(refused)?;
@@ -98,7 +99,7 @@ pub fn give(values: &BTreeMap<String, String>, unsets: bool) -> Result<Given, Er
             (variable.to_owned(), key.to_owned()),
         ]),
         unset: if unsets {
-            vec![other.to_owned()]
+            vec![other.to_owned(), crate::sign_in::KEY_MARKER.to_owned()]
         } else {
             Vec::new()
         },
@@ -174,8 +175,14 @@ mod tests {
             Ok(Given::Done { unset, .. }) => unset,
             other => panic!("{other:?}"),
         };
-        assert_eq!(unset("", true), [anthropic::VARIABLE]);
-        assert_eq!(unset("x-api-key", true), [AUTH_TOKEN]);
+        assert_eq!(
+            unset("", true),
+            [anthropic::VARIABLE, crate::sign_in::KEY_MARKER]
+        );
+        assert_eq!(
+            unset("x-api-key", true),
+            [AUTH_TOKEN, crate::sign_in::KEY_MARKER]
+        );
         assert!(unset("", false).is_empty());
         assert!(unset("x-api-key", false).is_empty());
     }
