@@ -170,7 +170,7 @@ time. When the link returns to a loopback address, the link's `fills` names the 
 
 | Driver | Ways, in order | Next step's link |
 |---|---|---|
-| `claude-code` | `claude-sign-in`, `api-key` | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
+| `claude-code` | `claude-sign-in`, `api-key`, `gateway` (a company's own gateway) | the link that `claude auth login` gave the driver's `$BROWSER` (`localhost:<port>/callback`). Else its printed manual link. |
 | `codex` | `chatgpt`, `device`, `api-key` (OpenAI) | `codex login`'s link (`127.0.0.1:1455`). `--device-auth`'s page, with its code in the step's label. |
 | `copilot` | `copilot-sign-in`, `github-token` (`copilot login --with-token`) | GitHub's device page (`copilot login --device-code`), with its code in the step's label |
 | `omp` | one per provider below, `api-key` | the link that `omp login <provider>` prints. A code that it shows goes in the step's label. |
@@ -539,8 +539,9 @@ One crate, one binary: `steery-driver-claude-code`. It has no settings. Claude C
 everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
 
 **Needs** (protocol 5: a driver that picked version 4 plans no needs). When
-`claude auth status --json` says `"loggedIn": false`, the plan asks `sign-in` in two ways. An
-`ANTHROPIC_API_KEY` in Claude Code's environment counts as signed in. The ways are:
+`claude auth status --json` says `"loggedIn": false`, the plan asks `sign-in` in three ways. An
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` in Claude Code's environment counts as signed in.
+The ways are:
 
 1. `claude-sign-in`, offered first. The driver runs the unmodified `claude auth login` on a
    terminal of its own, with `BROWSER` naming a script of the driver's. This script records the
@@ -553,6 +554,20 @@ everything under its configuration root, `CLAUDE_CONFIG_DIR` or `~/.claude`.
    `-p` (the reader). A `--bg` session uses it only after approval. Thus a turn that holds the
    key passes `--settings '{"apiKeyHelper": "printf %s \"$ANTHROPIC_API_KEY\""}'`, and writes
    nothing.
+3. `gateway`: a company's own gateway that speaks the Anthropic Messages API, as Claude
+   Desktop's gateway configuration (`inferenceGatewayBaseUrl`, `inferenceGatewayApiKey`,
+   `inferenceGatewayAuthScheme`). The fields are `url`, `key` (secret) and `header` (optional).
+   - `url` is `https`, or `http` only on `localhost` or a loopback IP address. It has no user,
+     query or fragment, and it does not end in `/v1`, because Claude Code adds `/v1/messages`.
+     The driver returns it as `ANTHROPIC_BASE_URL`.
+   - `header` empty or `bearer`: the driver returns the key as `ANTHROPIC_AUTH_TOKEN`, which
+     Claude Code sends as `Authorization: Bearer`. It outranks a plan's sign-in. An interactive
+     session used it with no approval (2.1.73).
+   - `header` `x-api-key`: the driver returns the key as `ANTHROPIC_API_KEY`, which Claude Code
+     sends as `x-api-key`. A turn reads it through `apiKeyHelper` also where Claude Code is
+     signed in to a plan. Else a `--bg` session would send the plan's token to the gateway.
+   - The driver returns no other variable. Claude Code sends an empty `ANTHROPIC_AUTH_TOKEN`
+     as an empty `Authorization: Bearer` header, so an empty variable does not unset one.
 
 Claude Code keeps the sign-in on this host. The driver keeps no token. A driver that started
 again has no sign-in that waits. Thus a step at that time is `not-found`.

@@ -13,6 +13,7 @@ mod calls;
 mod context;
 mod drive;
 mod events;
+mod gateway;
 mod hooks;
 mod live;
 mod mcp;

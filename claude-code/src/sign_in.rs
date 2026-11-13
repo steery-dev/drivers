@@ -1,9 +1,10 @@
 //! The one need Claude Code has (PROTOCOL.md §4.1, Needs): a sign-in, where it is found and
 //! `claude auth status` says it is not signed in. Its person gives it through Claude Code's
 //! own `claude auth login`, run unmodified on a terminal of the driver's
-//! ([`steery_driver_common::login`]), or with an Anthropic API key, which the runtime keeps
-//! and sets as `ANTHROPIC_API_KEY` on every host. Claude Code keeps what its sign-in gives;
-//! the driver reads no token and keeps none.
+//! ([`steery_driver_common::login`]), with an Anthropic API key, which the runtime keeps
+//! and sets as `ANTHROPIC_API_KEY` on every host, or with a company's own gateway
+//! ([`crate::gateway`]). Claude Code keeps what its sign-in gives; the driver reads no token
+//! and keeps none.
 //!
 //! `claude auth login` opens its loopback link (`redirect_uri=http://localhost:<port>/callback`)
 //! through `$BROWSER` and prints a manual one whose page shows a code
@@ -62,6 +63,7 @@ pub fn need() -> Need {
                  always uses the key in non-interactive runs, also when it is signed in to a plan."
                     .into(),
             ),
+            crate::gateway::way(),
         ],
     }
 }
@@ -80,6 +82,10 @@ impl SignIns {
             anthropic::WAY => {
                 self.0.end();
                 anthropic::give(&give.values, "Claude Code uses your Anthropic API key")
+            }
+            crate::gateway::WAY => {
+                self.0.end();
+                crate::gateway::give(&give.values)
             }
             CLAUDE_SIGN_IN => self.start().await,
             CLAUDE_SIGN_IN_RETURN => {
