@@ -29,6 +29,8 @@ pub enum Harness {
     OpenClaw,
     /// Factory's Droid, whose executable is `droid`.
     Droid,
+    /// Amazon's Kiro CLI, whose executable is `kiro-cli`.
+    Kiro,
 }
 
 impl Harness {
@@ -48,6 +50,7 @@ impl Harness {
             Self::Qwen => "qwen",
             Self::OpenClaw => "openclaw",
             Self::Droid => "droid",
+            Self::Kiro => "kiro",
         }
     }
 
@@ -67,6 +70,7 @@ impl Harness {
             Self::Qwen => "Qwen Code",
             Self::OpenClaw => "OpenClaw",
             Self::Droid => "Droid",
+            Self::Kiro => "Kiro",
         }
     }
 
@@ -86,6 +90,7 @@ impl Harness {
             Self::Qwen => "Qw",
             Self::OpenClaw => "Ow",
             Self::Droid => "Dr",
+            Self::Kiro => "Ki",
         }
     }
 
@@ -105,6 +110,7 @@ impl Harness {
             Self::Qwen => "#615ced",
             Self::OpenClaw => "#e8453c",
             Self::Droid => "#ee6018",
+            Self::Kiro => "#9046ff",
         }
     }
 

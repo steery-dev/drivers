@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "1.0.0",
+  "dataModelVersion": 1,
+  "id": "sess_aebe1256-7a1a-457d-97f6-47d7aa1d87d2",
+  "title": "kiro-smoke-ok",
+  "agentMode": "vibe",
+  "workspacePaths": [
+    "/private/tmp/kiro-smoke"
+  ],
+  "rootPaths": [
+    "/private/tmp/kiro-smoke"
+  ],
+  "createdAt": "2026-11-14T10:47:53.291Z",
+  "lastModifiedAt": "2026-11-14T10:47:55.335Z",
+  "parentSessionId": "sess_a456cf0f-d938-41c3-b4c7-848779197679",
+  "forkedAtMessageId": "4ff5ec04-b829-4cb8-a5ac-2a6721bb13ae-turn-end",
+  "modelId": "claude-haiku-4.5",
+  "autopilot": true,
+  "workflowLaunch": "when-asked",
+  "contextSnapshotModelDisplay": {
+    "modelId": "claude-haiku-4.5",
+    "display": "claude-haiku-4.5"
+  },
+  "disableAutoCompaction": false,
+  "memoryConfig": {
+    "mode": "disabled",
+    "reflection": false
+  },
+  "memoryConfigSource": "legacy",
+  "status": "idle",
+  "rootConversationId": "sess_a456cf0f-d938-41c3-b4c7-848779197679"
+}

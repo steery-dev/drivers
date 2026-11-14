@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0.0",
+  "dataModelVersion": 1,
+  "id": "sess_a456cf0f-d938-41c3-b4c7-848779197679",
+  "title": "kiro-smoke-ok",
+  "agentMode": "vibe",
+  "workspacePaths": [
+    "/private/tmp/kiro-smoke"
+  ],
+  "rootPaths": [
+    "/private/tmp/kiro-smoke"
+  ],
+  "createdAt": "2026-11-14T10:47:27.658Z",
+  "lastModifiedAt": "2026-11-14T10:49:08.902Z",
+  "modelId": "claude-haiku-4.5",
+  "autopilot": true,
+  "workflowLaunch": "when-asked",
+  "contextSnapshotModelDisplay": {
+    "modelId": "claude-haiku-4.5",
+    "display": "claude-haiku-4.5"
+  },
+  "semanticReviewEnabled": true,
+  "disableAutoCompaction": false,
+  "ftaEnabled": false,
+  "workflowsEnabled": false,
+  "specPlanEnabled": false,
+  "specWorkflow": "quick",
+  "specSkipClarificationEnabled": true,
+  "memoryConfig": {
+    "mode": "disabled",
+    "reflection": false
+  },
+  "memoryConfigSource": "legacy",
+  "status": "idle",
+  "_meta": {
+    "kiro": {}
+  }
+}

@@ -44,6 +44,7 @@ short name, its tint and its mark.
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive, live (OpenClaw's gateway: `picks`) |
 | `droid` | Droid | [`acp-family`](acp-family/) | observe, drive |
+| `kiro` | Kiro CLI | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
 | `warp` | Warp | [`warp`](warp/) | observe |
 
@@ -93,6 +94,7 @@ agrees (PROTOCOL.md §4.1).
 | `antigravity` | `~/.local/bin` (it adds the folder to the shell's profile) | `bash -c "curl -fsSL https://antigravity.google/cli/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `openclaw` | npm's global folder, else `~/.npm-global/bin` (the installer's user prefix), else `~/.local/bin` (its git install's wrapper) | `bash -c "curl -fsSL https://openclaw.ai/install.sh \| bash -s -- --no-onboard --no-prompt"`, offered where bash and curl are on `PATH` |
 | `droid` | `~/.local/bin` | `sh -c "curl -fsSL https://app.factory.ai/cli \| sh"`, offered where curl and sh are on `PATH` |
+| `kiro` | `~/.local/bin` | `bash -c "curl -fsSL https://cli.kiro.dev/install \| bash"`, offered where curl and bash are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 | `warp` | `Contents/Resources/bin` of `Warp.app` (`oz`) or `WarpPreview.app` (`oz-preview`), in `/Applications` or `~/Applications` | `brew install --cask warp` on a Mac where `brew` is on `PATH`. Else refused: Warp installs from warp.dev/download. |
 
@@ -135,6 +137,7 @@ signed in, as the harness itself says.
 | `antigravity` | ``run `agy` in a terminal and sign in with Google, or set `GEMINI_API_KEY` `` | `agy models`. Exit 0 with a list: signed in. `Please sign in` or `environment variable is not set` on standard error: not signed in. A Google sign-in lives in the system keyring, so the command is what tells. |
 | `openclaw` | ``run `openclaw onboard` in a terminal`` | `openclaw models status --json --check`. Exit 0 or 2 (a sign-in expires soon): signed in. Exit 1 (`auth.missingProvidersInUse` names the providers): not signed in. |
 | `droid` | ``run `droid` in a terminal and sign in, or set `FACTORY_API_KEY`; a custom model of your own runs without a Factory account`` | not told: a custom model in Droid's settings runs turns with no account, so the plan asks for no sign-in and only notes it |
+| `kiro` | ``run `kiro-cli login` in a terminal`` | `models` runs `kiro-cli whoami --format json`. Exit 0 names the account: signed in. Exit 1 (`{"account":null}`): not signed in. |
 | `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
 | `warp` | ``open Warp and sign in to a Warp account`` | not told: observe has no `models` |
 
@@ -350,6 +353,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `antigravity` | `~/.gemini/config/mcp_config.json` `mcpServers`, then each plugin's `mcp_config.json` in `~/.gemini/config/plugins/<plugin>/`, named `<plugin>_<server>`. `disabled: true` off; a plugin off where `config.json` has `plugins.<plugin>.enabled: false`. | `.agents/mcp_config.json` and `.agents/plugins/<plugin>/mcp_config.json` in the folder. The person's server wins a name both give. | never: `--add-dir` widens the workspace, a plugin installed while Antigravity runs |
 | `openclaw` | `mcp.servers` of `<state>/openclaw.json` (comments and trailing commas read). `enabled: false` off. A server with a `command` runs it, so it keeps no URL. | the same file: OpenClaw reads none per folder | never: enabled plugins bring servers |
 | `droid` | `~/.factory/mcp.json` `mcpServers`. `disabled: true` off. | `.factory/mcp.json` in the folder and in each folder above it, the nearest ranked first. Droid loads one definition of a name given at several levels; its documentation does not say which. | never: servers its organization manages win and are not readable |
+| `kiro` | `~/.kiro/settings/mcp.json` `mcpServers`. `disabled: true` off. | `.kiro/settings/mcp.json` in the folder, over the person's file where a name is in both | never: powers and agents bring servers |
 | `crush` | `/etc/crush/crush.json`, then `<CRUSH_GLOBAL_CONFIG or XDG_CONFIG_HOME/crush or ~/.config/crush>/crush.json`, then the `crush.json` of Crush's data folder. `mcp.<name>`, a later file's fields over an earlier's. `disabled: true` off. | each folder's `crush.json`, `.crush.json`, from the project's git root down to it, then `.crush/crush.json`. The store's `mcp_disabled_servers` and `mcp_enabled_servers` over every file. | not where a `crushrc` that Crush reads exists: it is a shell script |
 | `warp` | each channel's `~/.warp/.mcp.json`, `~/.warp-preview/.mcp.json`: the first key Warp reads (`mcp.servers`, `servers`, `mcpServers`, `mcp_servers`). Servers installed in Warp that it restores running (`mcp_server_installations.restore_running`). | none: a project's files never start on their own | never: team servers come from Warp's servers, and other agents' files start where a Warp setting says so |
 
@@ -1341,7 +1345,9 @@ driver opens read-only.
   `openclaw acp`) runs its turns there. The port is `OPENCLAW_GATEWAY_PORT`, else
   `gateway.port`, else 18789.
   - The driver joins as an operator (`gateway-client`, mode `backend`, scopes
-    `operator.read` and `operator.write`) with the gateway's own secret from
+    `operator.read`, `operator.write` and `operator.approvals`: a run takes its sender's
+    scopes, and an `exec` that asks fails at registration without the last) with the
+    gateway's own secret from
     `openclaw.json`: `gateway.auth.token`, or `gateway.auth.password` in mode `password`,
     else `OPENCLAW_GATEWAY_TOKEN` or `OPENCLAW_GATEWAY_PASSWORD`. It answers
     `connect.challenge`, then `sessions.subscribe`.
@@ -1355,13 +1361,16 @@ driver opens read-only.
   - `pick`: `sessions.patch` of `model` (`<provider>/<model>`, as `models` split it) and
     `thinkingLevel`, read back from `resolved`. A model the last `models` lacks is
     `model-missing`. A patch that raced a change of the session
-    (`SESSION_MUTATION_AUTHORIZATION_CHANGED`) is sent once more.
+    (`SESSION_MUTATION_AUTHORIZATION_CHANGED`, or `UNAVAILABLE` while a reset rewrites its
+    storage) is sent again after 50 ms, at most 3 times in all.
   - `stop`: `chat.abort` of the run `held` named, checked against `say`; proof is the run's
     lifecycle `end` with `aborted: true`.
   - `session/changed`: from the session's `agent` events (lifecycle, tool, approval,
     compaction) and `sessions.changed` rows: the turn and its says, calls and ended calls,
-    an exec approval as a `confirm` dialog, `compacting`, `pending`, model, thinking and
-    `context_left`. A closed connection sends an empty state.
+    `compacting`, `pending`, model, thinking and `context_left`. An exec approval is a
+    `confirm` dialog, `Allow <command>?`: lifecycle `waiting-approval` until
+    `approval-resolved`, where the run waits for an approval client; the `approval` stream
+    where it asks after its run. A closed connection sends an empty state.
 
 Ran (OpenClaw 2026.11.3, `/opt/homebrew/bin/openclaw`, ollama `qwen3:1.7b`): five real
 conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd record, one
@@ -1392,11 +1401,19 @@ then `stopped: true`, settled `failed` with `aborted (rpc)`; `session/changed` n
 `exec` call, its end and `context_left`. A `pick` right after an abort was refused
 `SESSION_MUTATION_AUTHORIZATION_CHANGED` once, before the retry was built.
 
+The rest of Live ran on the same gateway, through a recording proxy:
+- Exec approval (`security: allowlist`, `ask: on-miss`, an approval client connected with
+  `operator.admin`, as the Control UI does): `touch` waited; `confirm` dialog
+  `Allow touch /tmp/ocproof/approved.txt?` within 0.2 s; it cleared when
+  `openclaw approvals resolve` allowed once; the file was made.
+- Raced `pick`: 240 `thinking` picks during runs while another client sent 51
+  `sessions.reset`. One try only: 11 `AUTHORIZATION_CHANGED` retried and passed, 13
+  `UNAVAILABLE` refused. With 3 tries: 134 of 134 picks passed, 32 refusals retried.
+
 Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
 idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the
 installer on a host without OpenClaw; `~/.npm-global/bin` and `~/.local/bin` as install
-folders (read from `install.sh`, not seen installed); the raced `pick` retry itself (the race
-did not come again); an exec approval as a live `dialog`; `retry` and `jobs` (no gateway
+folders (read from `install.sh`, not seen installed); `retry` and `jobs` (no gateway
 event for them seen); a gateway on a non-loopback bind or with a password.
 
 ```sh
@@ -1512,6 +1529,58 @@ loads, the installer on a host without Droid, and any turn on a Factory model (n
 ```sh
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-droid
+```
+
+## Kiro CLI: `acp-family/src/kiro/`
+
+One binary, `steery-driver-kiro`, at observe and drive, from release 3.3.0 of Amazon's
+`kiro-cli`. Kiro keeps everything in `~/.kiro`. Each conversation is a folder
+`sessions/<bucket>/<sess_id>/`: `session.json` (title, folder, model, a fork's parent) and
+`messages.jsonl`, one record per line; a sub-agent's records are in
+`sub-executions/<id>.jsonl`.
+
+- **Conversations.** A turn runs from a `turn_start` record to its `turn_end`; a
+  `turn_start` with no `turn_end` reads as interrupted. A fork copies its source's history and
+  reads as its own conversation, its `parent` named. A folder with no `messages.jsonl` (Kiro
+  opened it and no prompt reached it) is not listed.
+- **Setup.** Entries the runtime writes:
+  - Steery's MCP server at `/mcpServers/steery` of `~/.kiro/settings/mcp.json`.
+  - Steery's hooks in a file of their own, `~/.kiro/hooks/steery.json`, beside the person's.
+  - The command a turn's permission hook runs, in `~/.kiro/steery/hook`.
+  - Steery's skill in `~/.kiro/skills/steery/SKILL.md`.
+  - No `kiro-cli`: Kiro's installer, `curl -fsSL https://cli.kiro.dev/install | bash`. Older
+    than 3.3.0: refused, with `kiro-cli update`.
+- **Hooks.** `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd`, in the
+  person's own `kiro-cli chat`. Each document comes on standard input in Claude Code's shape
+  (`session_id`, `hook_event_name`, `cwd`, …) with no transcript and no call id: the store
+  names the call. `Stop` reads `{"decision":"block","reason":…}`. Kiro takes a decision
+  before a call only from an exit code, so Steery gates no call through `PreToolUse`.
+- **Knowing.** `KIRO_SESSION_ID` in the agent's shell names the conversation.
+- **Models.** `models` opens a session of `kiro-cli acp` and reads its `model` config option
+  (each model's `effortLevel` gives its levels), after `whoami` says someone is signed in.
+  Kiro sets any model it is told, an unknown one too, so `start` refuses a model or level the
+  list lacks (`model-missing`, `selection-unsupported`).
+- **Drive.** A turn is this driver's own turn mode against `kiro-cli acp` (the shared ACP
+  turn): `session/new`, `session/load` to continue, `session/fork` to fork, the model through
+  `session/set_config_option`. Kiro asks the client before a shell command
+  (`session/request_permission`, the tool in `_meta.kiro.toolId`); the turn answers through
+  Steery's hook, and without that hook the ask is rejected. An ACP turn loads no hook files.
+  `held` reads `~/.kiro/session-leases/<id>.lease` and names its process while it lives.
+  No worktree. `stop` is the runtime's signals (SIGTERM ends the turn `cancelled`);
+  `terminal` is `cd '<cwd>' && kiro-cli chat --resume-id '<id>'`.
+
+Ran (Kiro CLI 3.3.0, `~/.local/bin/kiro-cli`, `claude-haiku-4.5`): ACP turns in
+`/tmp/kiro-smoke` started, continued, forked, stopped mid-`sleep 60`, and denied a `touch`
+through a permission hook; `kiro-cli chat` runs in `/tmp/kiro-w2` with a shell call, file
+reads and a sub-agent, read from `~/.kiro` and through a logging hook for each event above.
+`fixtures/kiro` holds those files.
+
+Not verified: compaction (`PreCompact`, `PostCompact`), `PreTaskExec`, the skill and MCP
+entries loaded by a fresh `kiro-cli chat`, and the installer on a host without Kiro.
+
+```sh
+cd acp-family && cargo build
+PATH="$HOME/.local/bin:$PATH" steery programs test target/debug/steery-driver-kiro
 ```
 
 ## Amp: `amp/`
