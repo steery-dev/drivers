@@ -1,0 +1,6 @@
+id: "task-old"
+description: "Explain the old code"
+messages { id: "o1" request_id: "ro1" timestamp { seconds: 1794649000 nanos: 250000000 } user_query { query: "Explain the old code." context { directory { pwd: "/old" } } } }
+messages { id: "o2" request_id: "ro1" timestamp { seconds: 1794649001 nanos: 250000000 } agent_output { text: "It parses." } }
+messages { id: "o3" request_id: "ro2" timestamp { seconds: 1794649100 nanos: 250000000 } user_query { query: "Thanks." } }
+messages { id: "o4" request_id: "ro2" timestamp { seconds: 1794649101 nanos: 250000000 } agent_output { text: "Welcome." } }

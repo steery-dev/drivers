@@ -1,0 +1,4 @@
+id: "task-failed"
+description: "Fix the build"
+messages { id: "f1" request_id: "rf1" timestamp { seconds: 1794650060 nanos: 250000000 } user_query { query: "Fix the build." context { directory { pwd: "/tui" } } } }
+messages { id: "f2" request_id: "rf1" timestamp { seconds: 1794650061 nanos: 250000000 } request_metadata { outcome: OUTCOME_ERRORED } }

@@ -1,0 +1,5 @@
+id: "task-child"
+description: "Review the diff"
+messages { id: "c1" request_id: "rc1" timestamp { seconds: 1794650040 nanos: 250000000 } user_query { query: "Review the diff." } }
+messages { id: "c2" request_id: "rc1" timestamp { seconds: 1794650041 nanos: 250000000 } agent_output { text: "Looks fine." } }
+messages { id: "c3" request_id: "rc1" timestamp { seconds: 1794650042 nanos: 250000000 } request_metadata { outcome: OUTCOME_COMPLETED } }

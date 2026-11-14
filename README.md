@@ -47,6 +47,7 @@ short name, its tint and its mark.
 | `kiro` | Kiro CLI | [`acp-family`](acp-family/) | observe, drive |
 | `openhands` | OpenHands | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
+| `warp` | Warp | [`warp`](warp/) | observe |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -97,6 +98,7 @@ agrees (PROTOCOL.md §4.1).
 | `kiro` | `~/.local/bin` | `bash -c "curl -fsSL https://cli.kiro.dev/install \| bash"`, offered where curl and bash are on `PATH` |
 | `openhands` | `/usr/local/bin` where writable, else `~/.local/bin` | `bash -c "curl -fsSL https://install.openhands.dev/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
+| `warp` | `Contents/Resources/bin` of `Warp.app` (`oz`) or `WarpPreview.app` (`oz-preview`), in `/Applications` or `~/Applications` | `brew install --cask warp` on a Mac where `brew` is on `PATH`. Else refused: Warp installs from warp.dev/download. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
 line. `steery setup --harness <id>` shows this line. Two examples:
@@ -140,6 +142,7 @@ signed in, as the harness itself says.
 | `kiro` | ``run `kiro-cli login` in a terminal`` | `models` runs `kiro-cli whoami --format json`. Exit 0 names the account: signed in. Exit 1 (`{"account":null}`): not signed in. |
 | `openhands` | ``run `openhands` in a terminal and set up its model`` | `agent_settings.json` names a model: signed in. None: not signed in, and `start` refuses. OpenHands runs local models with no account. |
 | `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
+| `warp` | ``open Warp and sign in to a Warp account`` | not told: observe has no `models` |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -356,6 +359,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `kiro` | `~/.kiro/settings/mcp.json` `mcpServers`. `disabled: true` off. | `.kiro/settings/mcp.json` in the folder, over the person's file where a name is in both | never: powers and agents bring servers |
 | `openhands` | `<root>/mcp.json` `mcpServers`. `enabled: false` off. | the same file: OpenHands reads none per folder | always |
 | `crush` | `/etc/crush/crush.json`, then `<CRUSH_GLOBAL_CONFIG or XDG_CONFIG_HOME/crush or ~/.config/crush>/crush.json`, then the `crush.json` of Crush's data folder. `mcp.<name>`, a later file's fields over an earlier's. `disabled: true` off. | each folder's `crush.json`, `.crush.json`, from the project's git root down to it, then `.crush/crush.json`. The store's `mcp_disabled_servers` and `mcp_enabled_servers` over every file. | not where a `crushrc` that Crush reads exists: it is a shell script |
+| `warp` | each channel's `~/.warp/.mcp.json`, `~/.warp-preview/.mcp.json`: the first key Warp reads (`mcp.servers`, `servers`, `mcpServers`, `mcp_servers`). Servers installed in Warp that it restores running (`mcp_server_installations.restore_running`). | none: a project's files never start on their own | never: team servers come from Warp's servers, and other agents' files start where a Warp setting says so |
 
 ## Adding a driver
 
@@ -1816,6 +1820,48 @@ Build and check it, with Crush on `PATH`:
 ```sh
 cd crush && cargo build
 steery programs test target/debug/steery-driver-crush
+cargo test
+```
+
+## Warp: `warp/`
+
+One binary, `steery-driver-warp`, with no settings, at observe. Warp keeps its agent's
+conversations in each channel's `warp.sqlite`: Stable's and Preview's, each the app's and the
+terminal front end's `tui/warp.sqlite` beside it. On macOS they sit in Warp's app group
+container (`~/Library/Group Containers/2BBY89MBSN.dev.warp/Library/Application Support/<bundle id>`),
+else in Application Support; on Linux in `$XDG_STATE_HOME/warp-terminal`. The driver opens each
+store read only.
+
+- **Sessions** (`sessions/list`, `sessions/read`, `sessions/locate`).
+  - A row of `agent_conversations` is a conversation: `summary` a JSON of its title and
+    first folder, `conversation_data` a JSON naming the conversation that started it.
+  - Its tasks are rows of `agent_tasks`, each a Protocol Buffers `warp.multi_agent.v1.Task`.
+    The driver reads the wire by Warp's field numbers (`apis/multi_agent/v1/task.proto`),
+    without a schema.
+  - The conversation's own agent works in its root tasks. A task with a parent, and a
+    conversation that another started, are listed as sub-agents under their lead.
+  - A conversation with `is_unlisted_auto_code_diff` is Warp's own and is never listed.
+  - A turn begins at a person's query. Each request ends with Warp's `request_metadata`:
+    tokens by model, and `OUTCOME_COMPLETED` finished, `OUTCOME_CANCELED` interrupted,
+    `OUTCOME_ERRORED` failed.
+  - A request without that record still streams: its words hold the cursor back.
+  - `sessions/read` reads 200 messages at a time.
+- **Setup** (`setup/plan`). The MCP entry goes in `~/.warp/.mcp.json`, under the first key Warp
+  reads there (`mcp.servers`, `servers`, `mcpServers`, `mcp_servers`), else `mcpServers`. The
+  skill goes in `~/.warp/skills`. Warp sends no `_meta` with an MCP call, so the entry sends
+  no `Steery-*` header.
+- **MCP servers** (`mcp/list`): see MCP servers.
+- No drive and no live. `oz agent run` runs Warp's agent headless but needs a Warp sign-in.
+  The Warp CLI is a TUI only. Warp has no hooks.
+
+Warp puts no conversation id in a shell command's environment or an MCP call. The skill tells
+the agent to read the newest `conversation_id` of `agent_conversations` and check its title.
+
+Build and check it, with Warp installed:
+
+```sh
+cd warp && cargo build
+steery programs test target/debug/steery-driver-warp
 cargo test
 ```
 
