@@ -191,7 +191,7 @@ fn same(args: &Value, input: &Value) -> bool {
 }
 
 /// A permission a turn asks for, or the turn's end. Kiro names the tool that asks in the
-/// request's `_meta.kiro.toolName` and the shell command in `_meta.kiro.command`.
+/// request's `_meta.kiro.toolId` and the shell command in `_meta.kiro.command`.
 pub fn turn(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
     let document = turn_hooks::parse(&read.document)?;
     let Some(external_id) = turn_hooks::text(&document, "/sessionId") else {
@@ -202,7 +202,7 @@ pub fn turn(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
         return Ok(turn_hooks::ended(&document, cwd));
     }
     let (id, kind, input) = turn_hooks::requested(&document);
-    let tool = turn_hooks::text(&document, "/_meta/kiro/toolName").map_or(kind, str::to_owned);
+    let tool = turn_hooks::text(&document, "/_meta/kiro/toolId").map_or(kind, str::to_owned);
     let input = match (input, turn_hooks::text(&document, "/_meta/kiro/command")) {
         (Value::Null, Some(command)) => json!({ "command": command }),
         (input, _) => input,
