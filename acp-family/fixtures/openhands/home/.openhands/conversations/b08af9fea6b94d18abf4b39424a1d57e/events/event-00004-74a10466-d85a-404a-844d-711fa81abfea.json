@@ -1,0 +1,1 @@
+{"id":"74a10466-d85a-404a-844d-711fa81abfea","timestamp":"2026-11-14T10:20:57.609367","source":"environment","code":"NotFoundError","detail":"litellm.NotFoundError: Ollama_chatException - {\"error\":\"model 'nope:1b' not found\"}","kind":"ConversationErrorEvent"}

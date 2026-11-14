@@ -1,0 +1,130 @@
+{
+  "id": "9cbb3f15-f649-4167-93f6-6ba5463ac8de",
+  "agent": {
+    "llm": {
+      "model": "ollama_chat/qwen3:1.7b",
+      "api_key": "**********",
+      "base_url": "http://127.0.0.1:11434",
+      "openrouter_site_url": "https://docs.all-hands.dev/",
+      "openrouter_app_name": "OpenHands",
+      "num_retries": 5,
+      "retry_multiplier": 8.0,
+      "retry_min_wait": 8,
+      "retry_max_wait": 64,
+      "timeout": 300,
+      "max_message_chars": 30000,
+      "stream": false,
+      "drop_params": true,
+      "modify_params": true,
+      "disable_stop_word": false,
+      "caching_prompt": true,
+      "log_completions": false,
+      "log_completions_folder": "logs/completions",
+      "native_tool_calling": true,
+      "reasoning_effort": "high",
+      "enable_encrypted_reasoning": true,
+      "prompt_cache_retention": "24h",
+      "extended_thinking_budget": 200000,
+      "usage_id": "agent",
+      "litellm_extra_body": {}
+    },
+    "tools": [
+      {
+        "name": "terminal",
+        "params": {}
+      },
+      {
+        "name": "file_editor",
+        "params": {}
+      },
+      {
+        "name": "task_tracker",
+        "params": {}
+      },
+      {
+        "name": "task_tool_set",
+        "params": {}
+      }
+    ],
+    "include_default_tools": [
+      "FinishTool",
+      "ThinkTool"
+    ],
+    "system_prompt_filename": "system_prompt.j2",
+    "security_policy_filename": "security_policy.j2",
+    "system_prompt_kwargs": {
+      "llm_security_analyzer": true
+    },
+    "condenser": {
+      "llm": {
+        "model": "ollama_chat/qwen3:1.7b",
+        "api_key": "**********",
+        "base_url": "http://127.0.0.1:11434",
+        "openrouter_site_url": "https://docs.all-hands.dev/",
+        "openrouter_app_name": "OpenHands",
+        "num_retries": 5,
+        "retry_multiplier": 8.0,
+        "retry_min_wait": 8,
+        "retry_max_wait": 64,
+        "timeout": 300,
+        "max_message_chars": 30000,
+        "stream": false,
+        "drop_params": true,
+        "modify_params": true,
+        "disable_stop_word": false,
+        "caching_prompt": true,
+        "log_completions": false,
+        "log_completions_folder": "logs/completions",
+        "native_tool_calling": true,
+        "reasoning_effort": "high",
+        "enable_encrypted_reasoning": true,
+        "prompt_cache_retention": "24h",
+        "extended_thinking_budget": 200000,
+        "usage_id": "condenser",
+        "litellm_extra_body": {}
+      },
+      "max_size": 240,
+      "keep_first": 2,
+      "minimum_progress": 0.1,
+      "hard_context_reset_max_retries": 5,
+      "hard_context_reset_context_scaling": 0.8,
+      "kind": "LLMSummarizingCondenser"
+    },
+    "tool_concurrency_limit": 1,
+    "kind": "Agent"
+  },
+  "workspace": {
+    "working_dir": "/tmp/oh-home/proj",
+    "kind": "LocalWorkspace"
+  },
+  "persistence_dir": "/tmp/oh-home/.openhands/conversations/9cbb3f15f649416793f66ba5463ac8de",
+  "max_iterations": 500,
+  "stuck_detection": true,
+  "execution_status": "idle",
+  "confirmation_policy": {
+    "kind": "AlwaysConfirm"
+  },
+  "security_analyzer": {
+    "kind": "LLMSecurityAnalyzer"
+  },
+  "activated_knowledge_skills": [],
+  "invoked_skills": [],
+  "blocked_actions": {},
+  "blocked_messages": {},
+  "stats": {
+    "usage_to_metrics": {}
+  },
+  "secret_registry": {
+    "secret_sources": {}
+  },
+  "tags": {},
+  "agent_state": {},
+  "hook_config": {
+    "pre_tool_use": [],
+    "post_tool_use": [],
+    "user_prompt_submit": [],
+    "session_start": [],
+    "session_end": [],
+    "stop": []
+  }
+}

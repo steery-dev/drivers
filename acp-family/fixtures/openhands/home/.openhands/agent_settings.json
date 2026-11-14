@@ -1,0 +1,7 @@
+{
+  "llm": {
+    "model": "ollama_chat/qwen3:4b",
+    "base_url": "http://127.0.0.1:11434"
+  },
+  "kind": "Agent"
+}

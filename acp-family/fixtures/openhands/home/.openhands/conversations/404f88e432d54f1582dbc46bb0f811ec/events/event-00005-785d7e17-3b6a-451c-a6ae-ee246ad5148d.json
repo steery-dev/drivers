@@ -1,0 +1,1 @@
+{"id":"785d7e17-3b6a-451c-a6ae-ee246ad5148d","timestamp":"2026-11-14T10:05:31.654903","source":"agent","tool_name":"terminal","tool_call_id":"call_enx2wvwt","error":"Error validating tool 'terminal': Failed to provide security_risk field in tool 'terminal'. Parameters provided: ['command']","kind":"AgentErrorEvent"}
