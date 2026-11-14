@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "dataModelVersion": 1,
+  "id": "sess_661c6ccf-c4e1-404c-91e6-9e2b82039ad2",
+  "title": "Run Shell Command And Read File",
+  "agentMode": "vibe",
+  "workspacePaths": [
+    "/private/tmp/kiro-w2"
+  ],
+  "rootPaths": [
+    "/private/tmp/kiro-w2"
+  ],
+  "createdAt": "2026-11-14T08:52:17.240Z",
+  "lastModifiedAt": "2026-11-14T08:52:24.425Z",
+  "modelId": "auto",
+  "workflowLaunch": "when-asked",
+  "contextSnapshotModelDisplay": {
+    "modelId": "auto",
+    "display": "Auto (model selected dynamically on the server)"
+  },
+  "semanticReviewEnabled": true,
+  "disableAutoCompaction": false,
+  "ftaEnabled": false,
+  "workflowsEnabled": false,
+  "specPlanEnabled": false,
+  "specWorkflow": "quick",
+  "specSkipClarificationEnabled": true,
+  "memoryConfig": {
+    "mode": "disabled",
+    "reflection": false
+  },
+  "memoryConfigSource": "explicit",
+  "status": "idle",
+  "_meta": {
+    "kiro": {
+      "settings": {
+        "memory": {
+          "mode": "disabled",
+          "reflection": false
+        },
+        "workflows": {
+          "enabled": false
+        },
+        "goal": {
+          "enabled": false
+        }
+      },
+      "nonInteractive": true
+    }
+  }
+}

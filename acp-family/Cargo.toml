@@ -58,6 +58,10 @@ name = "steery-driver-droid"
 path = "src/bin/droid.rs"
 
 [[bin]]
+name = "steery-driver-kiro"
+path = "src/bin/kiro.rs"
+
+[[bin]]
 name = "steery-driver-openhands"
 path = "src/bin/openhands.rs"
 
