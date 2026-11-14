@@ -57,6 +57,10 @@ path = "src/bin/openclaw.rs"
 name = "steery-driver-droid"
 path = "src/bin/droid.rs"
 
+[[bin]]
+name = "steery-driver-kiro"
+path = "src/bin/kiro.rs"
+
 [dependencies]
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v15.0.0" }
 steery-driver-common = { path = "../common" }
