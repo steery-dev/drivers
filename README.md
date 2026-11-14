@@ -48,6 +48,7 @@ short name, its tint and its mark.
 | `openhands` | OpenHands | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
 | `warp` | Warp | [`warp`](warp/) | observe |
+| `aider` | Aider | [`aider`](aider/) | observe, drive |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
 alone. The drivers share the [`common`](common/) crate, `steery-driver-common`. Each driver
@@ -98,6 +99,7 @@ agrees (PROTOCOL.md §4.1).
 | `kiro` | `~/.local/bin` | `bash -c "curl -fsSL https://cli.kiro.dev/install \| bash"`, offered where curl and bash are on `PATH` |
 | `openhands` | `/usr/local/bin` where writable, else `~/.local/bin` | `bash -c "curl -fsSL https://install.openhands.dev/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
+| `aider` | uv's tool folder, else pipx's (both `~/.local/bin`) | `uv tool install --python python3.12 aider-chat@latest` where `uv` is on `PATH`, else `pipx install aider-chat` where pipx is. Else refused. |
 | `warp` | `Contents/Resources/bin` of `Warp.app` (`oz`) or `WarpPreview.app` (`oz-preview`), in `/Applications` or `~/Applications` | `brew install --cask warp` on a Mac where `brew` is on `PATH`. Else refused: Warp installs from warp.dev/download. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -143,6 +145,7 @@ signed in, as the harness itself says.
 | `openhands` | ``run `openhands` in a terminal and set up its model`` | `agent_settings.json` names a model: signed in. None: not signed in, and `start` refuses. OpenHands runs local models with no account. |
 | `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
 | `warp` | ``open Warp and sign in to a Warp account`` | not told: observe has no `models` |
+| `aider` | none: Aider takes a model's key from its environment or a `.env` | not told: an Ollama model needs no key |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -1862,6 +1865,46 @@ Build and check it, with Warp installed:
 ```sh
 cd warp && cargo build
 steery programs test target/debug/steery-driver-warp
+cargo test
+```
+
+## Aider: `aider/`
+
+One binary, `steery-driver-aider`, with no settings, at drive. Aider keeps each
+conversation as a Markdown chat history file that it appends to:
+`.aider.chat.history.md` in the git root, or the file `--chat-history-file` names. The
+id of a conversation is the SHA-256 of its file's path.
+
+- **Sessions** (`sessions/list`, `sessions/read`, `sessions/locate`).
+  - The driver walks home 6 folders deep for the files, and reads the files the runtime
+    names. The walk skips `Library`, `Applications`, `Movies`, `Music`, `Pictures`, and
+    build output (`node_modules`, `target`, `dist`, `build`, `vendor`, `venv`, `Pods`).
+  - A file whose every run took its words from `--message` or `--message-file` is excluded.
+  - `# aider chat started at` opens a run. Its `> Model:` or `> Main model:` line is a
+    `model` event.
+  - `#### ` lines are the person's words and begin a turn. The model's answer is the
+    agent's words; its `<thinking-content-…>` block is a thought. Other `> ` lines are
+    thoughts. `> Tokens:` is a `tokens` event.
+  - A turn ends at the next words or run: `failed` after a litellm error, `interrupted`
+    after `^C`. Aider writes no end, so the last turn stays open; `idle` says how it ended.
+  - The cursor is a byte offset and a hash of the 256 bytes before it.
+- **Setup** (`setup/plan`). No entries: Aider reads no MCP server, skill or hooks.
+  `mcp/list` is refused.
+- **Drive** (`start`, `turn/read`).
+  - `start` runs `steery-driver-aider turn <aider> --yes-always … --model <model>
+    --chat-history-file <file> --message-file /dev/stdin`, the words on standard input.
+  - A new conversation takes the git root's `.aider.chat.history.md`, else
+    `.aider.chat.history.<ms>.md` beside it. A continue adds `--restore-chat-history`, only
+    in the file's folder. A start with no model and none in the file refuses `model-missing`.
+  - `models` lists `ollama list` as `ollama_chat/<name>`; other litellm models are unlisted.
+  - `stop` has no graceful step: the turn mode forwards a signal to Aider as `SIGINT`.
+- No live: Aider has no hooks, MCP, ACP or server.
+
+Build and check it, with Aider installed:
+
+```sh
+cd aider && cargo build
+steery programs test target/debug/steery-driver-aider
 cargo test
 ```
 
