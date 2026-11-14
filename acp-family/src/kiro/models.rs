@@ -25,9 +25,6 @@ const LISTED_WITHIN: Duration = Duration::from_secs(30);
 /// The config option of a session that picks its model.
 const MODEL: &str = "model";
 
-/// How many sessions `models` opens at most before it says Kiro lists none.
-const ATTEMPTS: u32 = 5;
-
 /// `models` for the person at `home`, with Kiro's folder `root`: none, signed out, where
 /// `kiro-cli whoami` names no account.
 pub async fn list(home: &Path, root: &Path) -> Result<Models, Error> {
@@ -90,10 +87,12 @@ async fn signed_in(binary: &Path, home: &Path) -> bool {
 }
 
 /// Start `kiro-cli acp` in a folder of its own, initialize it, ask for a new session and
-/// delete it again; Kiro's answer to the new session. Kiro fetches its models in the
-/// background as it starts, and a session opened before they came offers no `model` option
-/// (seen on a first run), so a session that lists none is asked for again, at most
-/// [`ATTEMPTS`] times, a second apart.
+/// delete it again; Kiro's answer to the new session.
+///
+/// Kiro fetches its models in the background. A session opened before they came answers
+/// with no `model` option (seen once on a first run), and Kiro sends the options with it in
+/// a `config_option_update` once its fetch ends (Kiro 3.3.0's models registry,
+/// `pushToSession`), so this waits for that update.
 async fn open(binary: &Path, home: &Path) -> Result<Value, Error> {
     let cwd = std::env::temp_dir().join(format!("steery-kiro-models-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).map_err(failed)?;
@@ -115,83 +114,101 @@ async fn open(binary: &Path, home: &Path) -> Result<Value, Error> {
         .stdout
         .take()
         .ok_or_else(|| failed(std::io::ErrorKind::BrokenPipe.into()))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let mut id = 1;
-    let mut answer = ask(
-        &mut stdin,
-        &mut lines,
-        id,
-        "initialize",
-        json!({"protocolVersion": 1, "clientCapabilities": {}}),
-    )
-    .await?;
-    for attempt in 1..=ATTEMPTS {
-        if answer.get("error").is_some() {
-            break;
-        }
-        id += 1;
-        answer = ask(
-            &mut stdin,
-            &mut lines,
-            id,
-            "session/new",
-            json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
+    let mut acp = Acp {
+        stdin: &mut stdin,
+        lines: BufReader::new(stdout).lines(),
+        updated: None,
+    };
+    let mut answer = acp
+        .ask(
+            1,
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {}}),
         )
         .await?;
-        if let Some(session) = answer.pointer("/result/sessionId").cloned() {
-            id += 1;
-            let deleted = ask(
-                &mut stdin,
-                &mut lines,
-                id,
-                "session/delete",
-                json!({"sessionId": session}),
+    if answer.get("error").is_none() {
+        answer = acp
+            .ask(
+                2,
+                "session/new",
+                json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
             )
             .await?;
-            if let Some(error) = deleted.get("error") {
-                return Err(Error::refused(
-                    refusal::REFUSED,
-                    format!("`{EXECUTABLE} acp` kept the session it listed models in: {error}"),
-                ));
-            }
+    }
+    if let Some(session) = answer.pointer("/result/sessionId").cloned() {
+        if listed(&answer["result"]).is_empty() {
+            answer["result"]["configOptions"] = acp.updated().await?;
         }
-        if answer.get("error").is_some() || !listed(&answer["result"]).is_empty() {
-            break;
-        }
-        if attempt < ATTEMPTS {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        let deleted = acp
+            .ask(3, "session/delete", json!({"sessionId": session}))
+            .await?;
+        if let Some(error) = deleted.get("error") {
+            return Err(Error::refused(
+                refusal::REFUSED,
+                format!("`{EXECUTABLE} acp` kept the session it listed models in: {error}"),
+            ));
         }
     }
+    drop(acp);
     drop(stdin);
     let _ = child.kill().await;
     let _ = std::fs::remove_dir_all(&cwd);
     Ok(answer)
 }
 
-/// Send one request and read lines until its answer.
-async fn ask(
-    stdin: &mut ChildStdin,
-    lines: &mut Lines<BufReader<ChildStdout>>,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Result<Value, Error> {
-    let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-    stdin
-        .write_all(format!("{request}\n").as_bytes())
-        .await
-        .map_err(failed)?;
-    loop {
-        let Some(line) = lines.next_line().await.map_err(failed)? else {
-            return Err(Error::refused(
-                refusal::REFUSED,
-                format!("`{EXECUTABLE} acp` closed before it answered"),
-            ));
-        };
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if message.get("method").is_none() && message["id"] == id {
+/// `kiro-cli acp` as this list speaks to it, and the config options of the newest
+/// `config_option_update` that offered a `model` option.
+struct Acp<'a> {
+    stdin: &'a mut ChildStdin,
+    lines: Lines<BufReader<ChildStdout>>,
+    updated: Option<Value>,
+}
+
+impl Acp<'_> {
+    /// Send one request and read lines until its answer.
+    async fn ask(&mut self, id: u64, method: &str, params: Value) -> Result<Value, Error> {
+        let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        self.stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .map_err(failed)?;
+        loop {
+            let message = self.next().await?;
+            if message.get("method").is_none() && message["id"] == id {
+                return Ok(message);
+            }
+        }
+    }
+
+    /// The config options of the first `config_option_update` that offers a model.
+    async fn updated(&mut self) -> Result<Value, Error> {
+        loop {
+            if let Some(options) = self.updated.take() {
+                return Ok(options);
+            }
+            self.next().await?;
+        }
+    }
+
+    /// The next message, keeping the options of an update that offers a model.
+    async fn next(&mut self) -> Result<Value, Error> {
+        loop {
+            let Some(line) = self.lines.next_line().await.map_err(failed)? else {
+                return Err(Error::refused(
+                    refusal::REFUSED,
+                    format!("`{EXECUTABLE} acp` closed before it answered"),
+                ));
+            };
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let update = &message["params"]["update"];
+            if message["method"] == "session/update"
+                && update["sessionUpdate"] == "config_option_update"
+                && !listed(update).is_empty()
+            {
+                self.updated = Some(update["configOptions"].clone());
+            }
             return Ok(message);
         }
     }
