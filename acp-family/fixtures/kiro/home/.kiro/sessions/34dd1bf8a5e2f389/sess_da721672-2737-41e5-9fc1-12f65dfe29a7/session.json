@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "sess_da721672-2737-41e5-9fc1-12f65dfe29a7",
+  "title": "New Session",
+  "agentMode": "vibe",
+  "workspacePaths": [
+    "/var/folders/xs/90vd1gxs4plg6gvhq6h8rc3c0000gn/T/tmpwfpprqyn"
+  ],
+  "createdAt": "2026-11-14T10:44:21.701Z",
+  "lastModifiedAt": "2026-11-14T10:44:21.706Z",
+  "semanticReviewEnabled": true,
+  "memoryConfig": {
+    "mode": "disabled",
+    "reflection": false
+  },
+  "memoryConfigSource": "legacy",
+  "disableAutoCompaction": false,
+  "ftaEnabled": false,
+  "workflowsEnabled": false,
+  "specPlanEnabled": false,
+  "specWorkflow": "quick",
+  "specSkipClarificationEnabled": true,
+  "workflowLaunch": "when-asked",
+  "_meta": {
+    "kiro": {}
+  },
+  "dataModelVersion": 1,
+  "rootPaths": [
+    "/var/folders/xs/90vd1gxs4plg6gvhq6h8rc3c0000gn/T/tmpwfpprqyn"
+  ]
+}

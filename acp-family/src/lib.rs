@@ -16,6 +16,7 @@ mod harness;
 mod hermes;
 mod jsonc;
 mod kilo;
+mod kiro;
 mod openclaw;
 mod opencode;
 mod qwen;
@@ -75,5 +76,9 @@ pub async fn serve(harness: Harness) -> std::io::Result<()> {
             _ => steery_sdk::serve(openclaw::Driver::new).await,
         },
         Harness::Droid => steery_sdk::serve(|_notifier| droid::Driver::default()).await,
+        Harness::Kiro => match std::env::args().nth(1).as_deref() {
+            Some("turn") => turn::main(kiro::drive::Turns, std::env::args().skip(2)).await,
+            _ => steery_sdk::serve(|_notifier| kiro::Driver::default()).await,
+        },
     }
 }

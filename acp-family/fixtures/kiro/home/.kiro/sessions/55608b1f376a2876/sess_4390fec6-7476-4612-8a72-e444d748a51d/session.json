@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "dataModelVersion": 1,
+  "id": "sess_4390fec6-7476-4612-8a72-e444d748a51d",
+  "title": "Shell Command And Subagent Line Count",
+  "agentMode": "vibe",
+  "workspacePaths": [
+    "/private/tmp/kiro-w2"
+  ],
+  "rootPaths": [
+    "/private/tmp/kiro-w2"
+  ],
+  "createdAt": "2026-11-14T08:50:10.121Z",
+  "lastModifiedAt": "2026-11-14T08:50:19.520Z",
+  "modelId": "auto",
+  "workflowLaunch": "when-asked",
+  "contextSnapshotModelDisplay": {
+    "modelId": "auto",
+    "display": "Auto (model selected dynamically on the server)"
+  },
+  "semanticReviewEnabled": true,
+  "disableAutoCompaction": false,
+  "ftaEnabled": false,
+  "workflowsEnabled": false,
+  "specPlanEnabled": false,
+  "specWorkflow": "quick",
+  "specSkipClarificationEnabled": true,
+  "memoryConfig": {
+    "mode": "disabled",
+    "reflection": false
+  },
+  "memoryConfigSource": "explicit",
+  "status": "idle",
+  "_meta": {
+    "kiro": {
+      "settings": {
+        "memory": {
+          "mode": "disabled",
+          "reflection": false
+        },
+        "workflows": {
+          "enabled": false
+        },
+        "goal": {
+          "enabled": false
+        }
+      },
+      "nonInteractive": true
+    }
+  }
+}
