@@ -1,0 +1,18 @@
+id: "task-root"
+description: "List the files"
+messages { id: "m1" request_id: "r1" timestamp { seconds: 1794650000 nanos: 250000000 } user_query { query: "List the files." context { directory { pwd: "/work" } } } }
+messages { id: "m2" request_id: "r1" timestamp { seconds: 1794650001 nanos: 250000000 } model_used { model_id: "claude-4-sonnet" model_display_name: "Claude 4 Sonnet" } }
+messages { id: "m3" request_id: "r1" timestamp { seconds: 1794650002 nanos: 250000000 } agent_reasoning { reasoning: "The person wants a listing." } }
+messages { id: "m4" request_id: "r1" timestamp { seconds: 1794650003 nanos: 250000000 } agent_output { text: "I'll run ls." } }
+messages { id: "m5" request_id: "r1" timestamp { seconds: 1794650004 nanos: 250000000 } tool_call { tool_call_id: "call-ls" run_shell_command { command: "ls" } } }
+messages { id: "m6" request_id: "r1" timestamp { seconds: 1794650005 nanos: 250000000 } tool_call { tool_call_id: "call-steery" call_mcp_tool { name: "sessions_describe" args { fields { key: "text" value { string_value: "Listing" } } } server_id: "uuid-1" server_identity { display_name: "steery" } } } }
+messages { id: "m7" request_id: "r1" timestamp { seconds: 1794650006 nanos: 250000000 } request_metadata { outcome: OUTCOME_COMPLETED charges { usage_by_category { key: "primary" value { direct_api_inference_usage { key: "claude-4-sonnet" value { token_count { input: 1200 output: 80 input_cache_read: 300 input_cache_write: 50 } } } } } } } }
+messages { id: "m8" request_id: "r2" timestamp { seconds: 1794650007 nanos: 250000000 } tool_call_result { tool_call_id: "call-ls" run_shell_command { command: "ls" command_finished { output: "a.txt\nb.txt" exit_code: 0 } } } }
+messages { id: "m9" request_id: "r2" timestamp { seconds: 1794650008 nanos: 250000000 } tool_call_result { tool_call_id: "call-steery" call_mcp_tool { error { message: "denied" } } } }
+messages { id: "m10" request_id: "r2" timestamp { seconds: 1794650009 nanos: 250000000 } tool_call { tool_call_id: "call-sub" subagent { task_id: "task-sub" payload: "Look around" } } }
+messages { id: "m11" request_id: "r2" timestamp { seconds: 1794650010 nanos: 250000000 } request_metadata { outcome: OUTCOME_COMPLETED charges { usage_by_category { key: "primary" value { direct_api_inference_usage { key: "claude-4-sonnet" value { token_count { input: 1500 output: 40 input_cache_read: 1200 input_cache_write: 0 } } } } } } } }
+messages { id: "m12" request_id: "r3" timestamp { seconds: 1794650020 nanos: 250000000 } tool_call_result { tool_call_id: "call-sub" subagent { payload: "Two files." } } }
+messages { id: "m13" request_id: "r3" timestamp { seconds: 1794650021 nanos: 250000000 } agent_output { text: "Two files: a.txt and b.txt." } }
+messages { id: "m14" request_id: "r3" timestamp { seconds: 1794650022 nanos: 250000000 } request_metadata { outcome: OUTCOME_COMPLETED charges { usage_by_category { key: "primary" value { direct_api_inference_usage { key: "claude-4-sonnet" value { token_count { input: 1700 output: 30 input_cache_read: 1500 input_cache_write: 0 } } } } } } } }
+messages { id: "m15" request_id: "r4" timestamp { seconds: 1794650030 nanos: 250000000 } user_query { query: "And the sizes?" context { directory { pwd: "/work" } } } }
+messages { id: "m16" request_id: "r4" timestamp { seconds: 1794650031 nanos: 250000000 } agent_output { text: "Checking the si" } }

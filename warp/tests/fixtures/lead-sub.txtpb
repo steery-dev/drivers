@@ -1,0 +1,6 @@
+id: "task-sub"
+description: "Look around\nin the work folder"
+dependencies { parent_task_id: "task-root" }
+messages { id: "s1" request_id: "rs1" timestamp { seconds: 1794650011 nanos: 250000000 } user_query { query: "List the folder." } }
+messages { id: "s2" request_id: "rs1" timestamp { seconds: 1794650012 nanos: 250000000 } agent_output { text: "Two files." } }
+messages { id: "s3" request_id: "rs1" timestamp { seconds: 1794650013 nanos: 250000000 } request_metadata { outcome: OUTCOME_COMPLETED } }
