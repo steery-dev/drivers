@@ -1366,7 +1366,7 @@ driver opens read-only.
     `thinkingLevel`, read back from `resolved`. A model the last `models` lacks is
     `model-missing`. A patch that raced a change of the session
     (`SESSION_MUTATION_AUTHORIZATION_CHANGED`, or `UNAVAILABLE` while a reset rewrites its
-    storage) is sent again after 50 ms, at most 3 times in all.
+    storage) is sent again every 25 ms for up to 3 s, then refused `refused`.
   - `stop`: `chat.abort` of the run `held` named, checked against `say`; proof is the run's
     lifecycle `end` with `aborted: true`.
   - `session/changed`: from the session's `agent` events (lifecycle, tool, approval,
@@ -1374,7 +1374,11 @@ driver opens read-only.
     `compacting`, `pending`, model, thinking and `context_left`. An exec approval is a
     `confirm` dialog, `Allow <command>?`: lifecycle `waiting-approval` until
     `approval-resolved`, where the run waits for an approval client; the `approval` stream
-    where it asks after its run. A closed connection sends an empty state.
+    where it asks after its run. An approval open before the driver joined sent its event
+    already: on joining a running session, a second, short connection with scope
+    `operator.admin` lists it from `exec.approval.list` (the gateway lists an approval only to
+    its run's client or an admin), then closes. The operator stays no admin: the gateway runs
+    an admin's words as its owner's. A closed connection sends an empty state.
 
 Ran (OpenClaw 2026.11.3, `/opt/homebrew/bin/openclaw`, ollama `qwen3:1.7b`): five real
 conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd record, one
@@ -1413,6 +1417,13 @@ The rest of Live ran on the same gateway, through a recording proxy:
 - Raced `pick`: 240 `thinking` picks during runs while another client sent 51
   `sessions.reset`. One try only: 11 `AUTHORIZATION_CHANGED` retried and passed, 13
   `UNAVAILABLE` refused. With 3 tries: 134 of 134 picks passed, 32 refusals retried.
+- Raced `pick`, with the 3 s retry: 298 of 298 picks passed during runs with no resets; 69
+  of 72 with a reset every 500 ms; 117 of 126 with five clients resetting back to back
+  (about 20 resets a second), each refusal after 3 s. 425 of 425 raw `sessions.patch`
+  passed during a whole run, so a run alone does not race a patch.
+- Joined mid-approval: a `touch` waited on an approval client that answers after 60 s; the
+  driver started after, sent the `confirm` dialog `Allow touch …?` 2.7 s later, cleared it
+  when the approval was answered, and kept one connection to the gateway.
 
 Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
 idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the

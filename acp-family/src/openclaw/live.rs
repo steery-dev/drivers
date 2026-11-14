@@ -4,6 +4,8 @@
 //! gateway's own secret from `openclaw.json`, subscribes to every session's events
 //! (`sessions.subscribe`), takes words (`chat.send`), a model and a thinking level
 //! (`sessions.patch`) and a stop (`chat.abort`), and sends what runs as `session/changed`.
+//! An approval open before the driver joined has no event left to see: a second, short
+//! connection as admin reads it from `exec.approval.list`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,6 +29,11 @@ use crate::turn::drive::now;
 
 /// The gateway protocol this driver speaks (`connect.minProtocol`, `maxProtocol`).
 const PROTOCOL: u64 = 4;
+/// The driver's scopes: a run takes the scopes of the client that sent its words, and
+/// without `operator.approvals` an exec that asks fails at registration.
+const OPERATOR: [&str; 3] = ["operator.read", "operator.write", "operator.approvals"];
+/// The scopes of the connection that lists approvals other clients' runs asked.
+const LOOKOUT: [&str; 1] = ["operator.admin"];
 /// The gateway's port where neither `OPENCLAW_GATEWAY_PORT` nor `gateway.port` names one
 /// (`DEFAULT_GATEWAY_PORT`).
 const PORT: u16 = 18789;
@@ -48,7 +55,7 @@ pub struct Live {
 
 /// One connection to OpenClaw's gateway, and what its events said of each session followed.
 struct Gateway {
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::UnboundedSender<Message>,
     next: AtomicU64,
     ended: AtomicBool,
     /// Replies awaited, by request id.
@@ -74,14 +81,18 @@ impl Live {
         {
             return Ok(Arc::clone(gateway));
         }
-        let gateway = self.connect(root).await?;
+        let gateway = self.connect(root, &OPERATOR).await?;
         *held = Some(Arc::clone(&gateway));
         Ok(gateway)
     }
 
-    /// Dial the gateway on loopback, answer its `connect.challenge` with `connect` as an
-    /// operator, and subscribe to every session's events.
-    async fn connect(self: &Arc<Self>, root: &Path) -> Result<Arc<Gateway>, String> {
+    /// Dial the gateway on loopback and answer its `connect.challenge` with `connect` as an
+    /// operator with `scopes`; as the operator, subscribe to every session's events.
+    async fn connect(
+        self: &Arc<Self>,
+        root: &Path,
+        scopes: &[&str],
+    ) -> Result<Arc<Gateway>, String> {
         let config = std::fs::read_to_string(root.join("openclaw.json"))
             .ok()
             .and_then(|text| crate::jsonc::parse(&text).ok())
@@ -101,7 +112,7 @@ impl Live {
                 .map_err(|_| unreached())?
                 .map_err(|_| unreached())?;
         let (mut sink, mut source) = socket.split();
-        let (out, mut outgoing) = mpsc::unbounded_channel::<String>();
+        let (out, mut outgoing) = mpsc::unbounded_channel::<Message>();
         let gateway = Arc::new(Gateway {
             out,
             next: AtomicU64::new(0),
@@ -111,7 +122,7 @@ impl Live {
         });
         tokio::spawn(async move {
             while let Some(frame) = outgoing.recv().await {
-                if sink.send(Message::text(frame)).await.is_err() {
+                if sink.send(frame).await.is_err() {
                     break;
                 }
             }
@@ -156,19 +167,19 @@ impl Live {
                         "mode": "backend",
                     },
                     "role": "operator",
-                    // A run takes the scopes of the client that sent its words: without
-                    // `operator.approvals` an exec that asks fails at registration.
-                    "scopes": ["operator.read", "operator.write", "operator.approvals"],
+                    "scopes": scopes,
                     "auth": auth(&config),
                 }),
             )
             .await
             .map_err(|why| format!("OpenClaw's gateway refused Steery's connection: {why}"));
         let subscribed = match hello {
-            Ok(_) => gateway
+            Ok(_) if scopes == OPERATOR => gateway
                 .ask("sessions.subscribe", json!({}))
                 .await
+                .map(|_| ())
                 .map_err(|why| format!("OpenClaw's gateway did not subscribe Steery: {why}")),
+            Ok(_) => Ok(()),
             Err(why) => Err(why),
         };
         if let Err(why) = subscribed {
@@ -176,6 +187,31 @@ impl Live {
             return Err(why);
         }
         Ok(gateway)
+    }
+
+    /// The exec approvals open in session `key`, as (call id, command). The gateway lists an
+    /// approval only to the client whose run asked it, or to an admin; the operator stays
+    /// no admin, since the gateway runs an admin's words as its owner's.
+    async fn open_approvals(self: &Arc<Self>, root: &Path, key: &str) -> Vec<(String, String)> {
+        let Ok(lookout) = self.connect(root, &LOOKOUT).await else {
+            return Vec::new();
+        };
+        let listed = lookout.ask("exec.approval.list", json!({})).await;
+        lookout.close();
+        let Ok(Value::Array(approvals)) = listed else {
+            return Vec::new();
+        };
+        approvals
+            .iter()
+            .filter_map(|approval| approval.get("request"))
+            .filter(|request| text(request, "sessionKey") == Some(key))
+            .filter_map(|request| {
+                Some((
+                    text(request, "toolCallId")?.to_owned(),
+                    text(request, "command").unwrap_or_default().to_owned(),
+                ))
+            })
+            .collect()
     }
 
     /// One frame of the gateway: a reply to a request, or an event of a session.
@@ -274,8 +310,15 @@ impl Live {
                 .map(|answer| answer.get("session").cloned().unwrap_or(Value::Null));
             match described {
                 Ok(session) if session.is_object() => {
-                    if let Some(fold) = lock(&gateway.followed).get_mut(&key) {
+                    let running = lock(&gateway.followed).get_mut(&key).is_some_and(|fold| {
                         fold.snapshot(&session, now());
+                        fold.turn.is_some()
+                    });
+                    if running {
+                        let open = self.open_approvals(root, &key).await;
+                        if let Some(fold) = lock(&gateway.followed).get_mut(&key) {
+                            fold.waiting(open, now());
+                        }
                     }
                 }
                 Ok(_) => {
@@ -378,17 +421,24 @@ impl Live {
             patch["thinkingLevel"] = json!(level);
         }
         // The gateway refuses a patch that raced a change of the session (an abort's end, a
-        // run's start, a reset) and asks for it again; a reset holds it for tens of ms.
+        // run's start, a reset) and asks for it again. Back-to-back resets race each try, so
+        // the patch goes again until a time, not a count, runs out.
+        let until = tokio::time::Instant::now() + RACED_FOR;
         let mut answer = gateway.ask("sessions.patch", patch.clone()).await;
-        for _ in 1..PATCH_TRIES {
-            if !matches!(&answer, Err(Refused { raced: true, .. })) {
-                break;
-            }
+        while matches!(&answer, Err(Refused { raced: true, .. }))
+            && tokio::time::Instant::now() + RACED_PAUSE < until
+        {
             tokio::time::sleep(RACED_PAUSE).await;
             answer = gateway.ask("sessions.patch", patch.clone()).await;
         }
-        let answer = answer
-            .map_err(|why| Error::refused(refusal::SELECTION_UNSUPPORTED, why.to_string()))?;
+        let answer = answer.map_err(|why| {
+            let code = if why.raced {
+                refusal::REFUSED
+            } else {
+                refusal::SELECTION_UNSUPPORTED
+            };
+            Error::refused(code, why.to_string())
+        })?;
         let resolved = answer.get("resolved").unwrap_or(&Value::Null);
         let mut followed = lock(&gateway.followed);
         let fold = followed.get_mut(&key);
@@ -472,9 +522,8 @@ impl Gateway {
         let id = (self.next.fetch_add(1, Ordering::Relaxed) + 1).to_string();
         let (reply, answer) = oneshot::channel();
         lock(&self.replies).insert(id.clone(), reply);
-        let _ = self
-            .out
-            .send(json!({"type": "req", "id": id, "method": method, "params": params}).to_string());
+        let frame = json!({"type": "req", "id": id, "method": method, "params": params});
+        let _ = self.out.send(Message::text(frame.to_string()));
         let answer = tokio::time::timeout(WITHIN, answer).await;
         lock(&self.replies).remove(&id);
         answer
@@ -484,6 +533,12 @@ impl Gateway {
             .map_err(|_| {
                 Refused::unanswered("the connection to OpenClaw's gateway closed".into())
             })?
+    }
+
+    /// Close the connection: the gateway ends it, and its reader ends.
+    fn close(&self) {
+        self.ended.store(true, Ordering::Relaxed);
+        let _ = self.out.send(Message::Close(None));
     }
 
     /// A fresh run id, sent as the `idempotencyKey` that the gateway names the run by.
@@ -557,6 +612,9 @@ struct Fold {
     dialogs: Vec<(String, Dialog)>,
     /// The command of each running call that has one, by call id: an approval names it.
     commands: HashMap<String, String>,
+    /// The calls whose approval was answered, or that ended, in the turn that runs: an
+    /// approval listed as open before its answer came is not open.
+    answered: std::collections::HashSet<String>,
     /// The state last sent.
     sent: Option<LiveState>,
 }
@@ -710,7 +768,7 @@ impl Fold {
             }
             Some("approval-resolved") => {
                 if let Some(id) = text(data, "toolCallId") {
-                    self.dialogs.retain(|(open, _)| open != id);
+                    self.answer(id);
                 }
             }
             _ => {}
@@ -750,7 +808,7 @@ impl Fold {
                 }
             }
             Some("result") => {
-                self.dialogs.retain(|(open, _)| open != id);
+                self.answer(id);
                 self.commands.remove(id);
                 if let Some(index) = self.calls.iter().position(|call| call.id == id) {
                     let call = self.calls.remove(index);
@@ -772,8 +830,26 @@ impl Fold {
                 let title = text(data, "title").map(str::to_owned);
                 self.confirm(id, command.as_deref(), title.as_deref(), at);
             }
-            (Some("resolved"), _) => self.dialogs.retain(|(open, _)| open != id),
+            (Some("resolved"), _) => self.answer(id),
             _ => {}
+        }
+    }
+
+    /// The approval of call `id` was answered: its dialog closes.
+    fn answer(&mut self, id: &str) {
+        self.dialogs.retain(|(open, _)| open != id);
+        self.answered.insert(id.to_owned());
+    }
+
+    /// Approvals the gateway lists as open, as (call id, command), in a turn joined late.
+    fn waiting(&mut self, open: Vec<(String, String)>, at: u64) {
+        if self.turn.is_none() {
+            return;
+        }
+        for (id, command) in open {
+            if !self.answered.contains(&id) {
+                self.confirm(&id, Some(&command), None, at);
+            }
         }
     }
 
@@ -820,6 +896,7 @@ impl Fold {
         }
         self.dialogs.clear();
         self.commands.clear();
+        self.answered.clear();
         self.compacting = false;
         let Some(turn) = self.turn.take() else {
             return;
@@ -935,9 +1012,9 @@ const MUTATION_RACED: &str = "SESSION_MUTATION_AUTHORIZATION_CHANGED";
 /// The code of the gateway's refusal while a reset rewrites the session's storage
 /// (`SessionMutationFactsUnavailableError`: "retry after session storage is ready").
 const STORAGE_UNAVAILABLE: &str = "UNAVAILABLE";
-/// How often a raced `sessions.patch` goes to the gateway, at most.
-const PATCH_TRIES: usize = 3;
-const RACED_PAUSE: Duration = Duration::from_millis(50);
+/// How long a raced `sessions.patch` goes to the gateway again, and the pause between tries.
+const RACED_FOR: Duration = Duration::from_secs(3);
+const RACED_PAUSE: Duration = Duration::from_millis(25);
 
 /// The gateway's refusal of a request, or a request it never answered.
 struct Refused {
