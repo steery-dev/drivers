@@ -1,0 +1,31 @@
+{
+  "options": [
+    {
+      "kind": "allow_once",
+      "name": "Yes, proceed",
+      "optionId": "accept"
+    },
+    {
+      "kind": "reject_once",
+      "name": "Reject",
+      "optionId": "reject"
+    },
+    {
+      "kind": "allow_always",
+      "name": "Always proceed (don't ask again)",
+      "optionId": "always_proceed"
+    },
+    {
+      "kind": "allow_once",
+      "name": "Auto-confirm LOW/MEDIUM risk, ask for HIGH risk action",
+      "optionId": "risk_based"
+    }
+  ],
+  "sessionId": "7be62222-933c-4839-ab17-ea0ece4c4b4c",
+  "toolCall": {
+    "kind": "other",
+    "status": "pending",
+    "title": "Confirm Agent Actions",
+    "toolCallId": "confirmation-7be62222-933c-4839-ab17-ea0ece4c4b4c"
+  }
+}

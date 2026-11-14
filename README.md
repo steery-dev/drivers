@@ -44,6 +44,7 @@ short name, its tint and its mark.
 | `antigravity` | Antigravity | [`acp-family`](acp-family/) | observe, drive, live (Antigravity's own door: `keeps`) |
 | `openclaw` | OpenClaw | [`acp-family`](acp-family/) | observe, drive, live (OpenClaw's gateway: `picks`) |
 | `droid` | Droid | [`acp-family`](acp-family/) | observe, drive |
+| `openhands` | OpenHands | [`acp-family`](acp-family/) | observe, drive |
 | `crush` | Crush | [`crush`](crush/) | observe, drive, live (Crush's server: `keeps`) |
 
 Each crate is a Cargo workspace of its own, with its own `Cargo.lock`. Thus each crate builds
@@ -92,6 +93,7 @@ agrees (PROTOCOL.md §4.1).
 | `antigravity` | `~/.local/bin` (it adds the folder to the shell's profile) | `bash -c "curl -fsSL https://antigravity.google/cli/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `openclaw` | npm's global folder, else `~/.npm-global/bin` (the installer's user prefix), else `~/.local/bin` (its git install's wrapper) | `bash -c "curl -fsSL https://openclaw.ai/install.sh \| bash -s -- --no-onboard --no-prompt"`, offered where bash and curl are on `PATH` |
 | `droid` | `~/.local/bin` | `sh -c "curl -fsSL https://app.factory.ai/cli \| sh"`, offered where curl and sh are on `PATH` |
+| `openhands` | `/usr/local/bin` where writable, else `~/.local/bin` | `bash -c "curl -fsSL https://install.openhands.dev/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -133,6 +135,7 @@ signed in, as the harness itself says.
 | `antigravity` | ``run `agy` in a terminal and sign in with Google, or set `GEMINI_API_KEY` `` | `agy models`. Exit 0 with a list: signed in. `Please sign in` or `environment variable is not set` on standard error: not signed in. A Google sign-in lives in the system keyring, so the command is what tells. |
 | `openclaw` | ``run `openclaw onboard` in a terminal`` | `openclaw models status --json --check`. Exit 0 or 2 (a sign-in expires soon): signed in. Exit 1 (`auth.missingProvidersInUse` names the providers): not signed in. |
 | `droid` | ``run `droid` in a terminal and sign in, or set `FACTORY_API_KEY`; a custom model of your own runs without a Factory account`` | not told: a custom model in Droid's settings runs turns with no account, so the plan asks for no sign-in and only notes it |
+| `openhands` | ``run `openhands` in a terminal and set up its model`` | `agent_settings.json` names a model: signed in. None: not signed in, and `start` refuses. OpenHands runs local models with no account. |
 | `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
@@ -347,6 +350,7 @@ the `mcpServers` files that omp, pi and Claude Code share.
 | `antigravity` | `~/.gemini/config/mcp_config.json` `mcpServers`, then each plugin's `mcp_config.json` in `~/.gemini/config/plugins/<plugin>/`, named `<plugin>_<server>`. `disabled: true` off; a plugin off where `config.json` has `plugins.<plugin>.enabled: false`. | `.agents/mcp_config.json` and `.agents/plugins/<plugin>/mcp_config.json` in the folder. The person's server wins a name both give. | never: `--add-dir` widens the workspace, a plugin installed while Antigravity runs |
 | `openclaw` | `mcp.servers` of `<state>/openclaw.json` (comments and trailing commas read). `enabled: false` off. A server with a `command` runs it, so it keeps no URL. | the same file: OpenClaw reads none per folder | never: enabled plugins bring servers |
 | `droid` | `~/.factory/mcp.json` `mcpServers`. `disabled: true` off. | `.factory/mcp.json` in the folder and in each folder above it, the nearest ranked first. Droid loads one definition of a name given at several levels; its documentation does not say which. | never: servers its organization manages win and are not readable |
+| `openhands` | `<root>/mcp.json` `mcpServers`. `enabled: false` off. | the same file: OpenHands reads none per folder | always |
 | `crush` | `/etc/crush/crush.json`, then `<CRUSH_GLOBAL_CONFIG or XDG_CONFIG_HOME/crush or ~/.config/crush>/crush.json`, then the `crush.json` of Crush's data folder. `mcp.<name>`, a later file's fields over an earlier's. `disabled: true` off. | each folder's `crush.json`, `.crush.json`, from the project's git root down to it, then `.crush/crush.json`. The store's `mcp_disabled_servers` and `mcp_enabled_servers` over every file. | not where a `crushrc` that Crush reads exists: it is a shell script |
 
 ## Adding a driver
@@ -1508,6 +1512,51 @@ loads, the installer on a host without Droid, and any turn on a Factory model (n
 ```sh
 cd acp-family && cargo build
 steery programs test target/debug/steery-driver-droid
+```
+
+## OpenHands: `acp-family/src/openhands/`
+
+One binary, `steery-driver-openhands`, at observe and drive, from release 1.16.0. OpenHands keeps
+everything in `OPENHANDS_PERSISTENCE_DIR`, else `~/.openhands`. Each conversation is a folder
+`conversations/<id as 32 hex digits>` (`OPENHANDS_CONVERSATIONS_DIR` moves it): `base_state.json`
+and `events/event-<NNNNN>-<event id>.json`, one file per event, written once.
+
+- **Conversations.** A `MessageEvent` from `user` begins a turn, unless it is OpenHands' own
+  nudge to a model that answered with neither a call nor words. `ActionEvent` is a call;
+  `ObservationEvent`, `UserRejectObservation` and `AgentErrorEvent` end it.
+  `ConversationErrorEvent` fails the turn. No event ends a turn: the next prompt does, else
+  `execution_status`. A folder with no person's prompt (an ACP session never prompted) is
+  excluded. `stats` gives each response's tokens.
+- **Setup.** Steery's MCP server at `/mcpServers/steery` of `mcp.json` (`transport: http`);
+  Steery's skill in `~/.openhands/skills/steery/SKILL.md` (the home's, whatever
+  `OPENHANDS_PERSISTENCE_DIR` says); Steery's hook command line in `<root>/steery/hook`, which
+  only this driver's turns read. No `hooks.json` entry: a turn is OpenHands' ACP client, and
+  OpenHands asks it before it runs anything.
+- **Hooks.** OpenHands asks once per batch of actions (`Confirm Agent Actions`), not per call.
+  The moment's call is the oldest `ActionEvent` that nothing answered yet. Allow is `accept`,
+  deny `reject`; the `always` suggestion is `always_proceed`.
+- **Knowing.** OpenHands gives the agent no conversation id.
+- **Models.** The one model `agent_settings.json` names. Its ACP server sets no model or
+  reasoning effort per session, so `start` refuses another model and any thinking level.
+- **Drive.** A turn is `openhands acp` under [`turn`](acp-family/src/turn/): `session/new` or
+  `session/load`, then `session/prompt`. A loaded conversation works in its server's folder and
+  saves that folder over its own, so a continue runs where the conversation ran; a gone folder
+  is `no-place`. No fork, no `hand`. `stop` is the runtime's signal, a `session/cancel`.
+  OpenHands leaves `execution_status: running` where its process ends, so a stopped turn reads
+  as interrupted. `terminal` is `cd '<cwd>' && openhands --resume '<id>'`.
+
+Ran (OpenHands CLI 1.16.0, `~/.local/bin/openhands`, ollama `qwen3:4b` and `qwen3:1.7b`): real
+conversations through `openhands acp` and this driver's turns: a terminal call allowed, a
+continue rejected, calls that failed validation, an unknown model, a turn stopped mid-answer
+and continued after. `fixtures/openhands` holds those folders and the permission documents.
+
+Not verified: `--headless --json -t` (no permission asked: the driver does not run it),
+OpenHands Cloud conversations, sub-agents, compaction, a `PauseEvent`, and the installer on a
+host without OpenHands.
+
+```sh
+cd acp-family && cargo build
+steery programs test target/debug/steery-driver-openhands
 ```
 
 ## Amp: `amp/`

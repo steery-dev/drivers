@@ -1,0 +1,1 @@
+{"id":"dd1d924e-a395-4479-8b0d-7f5b537f19d4","timestamp":"2026-11-14T10:20:56.337259","source":"hook","hook_event_type":"SessionStart","hook_command":"/tmp/oh-hook.py SessionStart","success":true,"blocked":false,"exit_code":0,"stdout":"","stderr":"","kind":"HookExecutionEvent"}

@@ -29,6 +29,8 @@ pub enum Harness {
     OpenClaw,
     /// Factory's Droid, whose executable is `droid`.
     Droid,
+    /// All Hands AI's OpenHands CLI, whose executable is `openhands`.
+    OpenHands,
 }
 
 impl Harness {
@@ -48,6 +50,7 @@ impl Harness {
             Self::Qwen => "qwen",
             Self::OpenClaw => "openclaw",
             Self::Droid => "droid",
+            Self::OpenHands => "openhands",
         }
     }
 
@@ -67,6 +70,7 @@ impl Harness {
             Self::Qwen => "Qwen Code",
             Self::OpenClaw => "OpenClaw",
             Self::Droid => "Droid",
+            Self::OpenHands => "OpenHands",
         }
     }
 
@@ -86,6 +90,7 @@ impl Harness {
             Self::Qwen => "Qw",
             Self::OpenClaw => "Ow",
             Self::Droid => "Dr",
+            Self::OpenHands => "Oh",
         }
     }
 
@@ -105,6 +110,7 @@ impl Harness {
             Self::Qwen => "#615ced",
             Self::OpenClaw => "#e8453c",
             Self::Droid => "#ee6018",
+            Self::OpenHands => "#ffe165",
         }
     }
 

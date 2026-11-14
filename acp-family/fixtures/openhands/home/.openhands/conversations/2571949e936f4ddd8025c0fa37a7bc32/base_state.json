@@ -1,0 +1,204 @@
+{
+  "id": "2571949e-936f-4ddd-8025-c0fa37a7bc32",
+  "agent": {
+    "llm": {
+      "model": "ollama_chat/qwen3:4b",
+      "base_url": "http://127.0.0.1:11434",
+      "openrouter_site_url": "https://docs.all-hands.dev/",
+      "openrouter_app_name": "OpenHands",
+      "num_retries": 5,
+      "retry_multiplier": 8.0,
+      "retry_min_wait": 8,
+      "retry_max_wait": 64,
+      "timeout": 300,
+      "max_message_chars": 30000,
+      "stream": false,
+      "drop_params": true,
+      "modify_params": true,
+      "disable_stop_word": false,
+      "caching_prompt": true,
+      "log_completions": false,
+      "log_completions_folder": "logs/completions",
+      "native_tool_calling": true,
+      "reasoning_effort": "high",
+      "enable_encrypted_reasoning": true,
+      "prompt_cache_retention": "24h",
+      "extended_thinking_budget": 200000,
+      "usage_id": "default",
+      "litellm_extra_body": {}
+    },
+    "tools": [
+      {
+        "name": "terminal",
+        "params": {}
+      },
+      {
+        "name": "file_editor",
+        "params": {}
+      },
+      {
+        "name": "task_tracker",
+        "params": {}
+      },
+      {
+        "name": "task_tool_set",
+        "params": {}
+      }
+    ],
+    "include_default_tools": [
+      "FinishTool",
+      "ThinkTool"
+    ],
+    "kind": "Agent",
+    "system_prompt_filename": "system_prompt.j2",
+    "security_policy_filename": "security_policy.j2",
+    "system_prompt_kwargs": {
+      "llm_security_analyzer": true
+    },
+    "tool_concurrency_limit": 1
+  },
+  "workspace": {
+    "working_dir": "/private/tmp/oh-home/proj",
+    "kind": "LocalWorkspace"
+  },
+  "persistence_dir": "/tmp/oh-home/.openhands/conversations/2571949e936f4ddd8025c0fa37a7bc32",
+  "max_iterations": 500,
+  "stuck_detection": true,
+  "execution_status": "running",
+  "confirmation_policy": {
+    "kind": "AlwaysConfirm"
+  },
+  "security_analyzer": {
+    "kind": "LLMSecurityAnalyzer"
+  },
+  "activated_knowledge_skills": [],
+  "invoked_skills": [],
+  "blocked_actions": {},
+  "blocked_messages": {},
+  "last_user_message_id": "734bad2a-5189-41c5-a618-37d1d023245e",
+  "stats": {
+    "usage_to_metrics": {
+      "agent": {
+        "model_name": "ollama_chat/qwen3:4b",
+        "accumulated_cost": 0.0,
+        "accumulated_token_usage": {
+          "model": "ollama_chat/qwen3:4b",
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "context_window": 0,
+          "per_turn_token": 0,
+          "response_id": ""
+        },
+        "costs": [],
+        "response_latencies": [],
+        "token_usages": []
+      },
+      "condenser": {
+        "model_name": "ollama_chat/qwen3:1.7b",
+        "accumulated_cost": 0.0,
+        "accumulated_token_usage": {
+          "model": "ollama_chat/qwen3:1.7b",
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "context_window": 0,
+          "per_turn_token": 0,
+          "response_id": ""
+        },
+        "costs": [],
+        "response_latencies": [],
+        "token_usages": []
+      }
+    }
+  },
+  "secret_registry": {
+    "secret_sources": {}
+  },
+  "tags": {},
+  "agent_state": {},
+  "hook_config": {
+    "pre_tool_use": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py PreToolUse",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "post_tool_use": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py PostToolUse",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "user_prompt_submit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py UserPromptSubmit",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "session_start": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py SessionStart",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "session_end": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py SessionEnd",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py Stop",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ]
+  }
+}
