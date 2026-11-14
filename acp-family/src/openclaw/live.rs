@@ -156,7 +156,9 @@ impl Live {
                         "mode": "backend",
                     },
                     "role": "operator",
-                    "scopes": ["operator.read", "operator.write"],
+                    // A run takes the scopes of the client that sent its words: without
+                    // `operator.approvals` an exec that asks fails at registration.
+                    "scopes": ["operator.read", "operator.write", "operator.approvals"],
                     "auth": auth(&config),
                 }),
             )
@@ -376,14 +378,14 @@ impl Live {
             patch["thinkingLevel"] = json!(level);
         }
         // The gateway refuses a patch that raced a change of the session (an abort's end, a
-        // run's start) and asks for it again; once more is enough.
+        // run's start, a reset) and asks for it again; a reset holds it for tens of ms.
         let mut answer = gateway.ask("sessions.patch", patch.clone()).await;
-        if let Err(Refused {
-            code: Some(code), ..
-        }) = &answer
-            && code == MUTATION_RACED
-        {
-            answer = gateway.ask("sessions.patch", patch).await;
+        for _ in 1..PATCH_TRIES {
+            if !matches!(&answer, Err(Refused { raced: true, .. })) {
+                break;
+            }
+            tokio::time::sleep(RACED_PAUSE).await;
+            answer = gateway.ask("sessions.patch", patch.clone()).await;
         }
         let answer = answer
             .map_err(|why| Error::refused(refusal::SELECTION_UNSUPPORTED, why.to_string()))?;
@@ -553,6 +555,8 @@ struct Fold {
     settled: std::collections::VecDeque<LiveSettled>,
     /// Exec approvals open in front of the person, by the call they gate.
     dialogs: Vec<(String, Dialog)>,
+    /// The command of each running call that has one, by call id: an approval names it.
+    commands: HashMap<String, String>,
     /// The state last sent.
     sent: Option<LiveState>,
 }
@@ -697,6 +701,18 @@ impl Fold {
                 };
                 self.close(ended, error);
             }
+            // A gateway exec waits in its run for an approval client's answer.
+            Some("waiting-approval") if self.runs(run) => {
+                if let Some(id) = text(data, "toolCallId") {
+                    let command = self.commands.get(id).cloned();
+                    self.confirm(id, command.as_deref(), None, at);
+                }
+            }
+            Some("approval-resolved") => {
+                if let Some(id) = text(data, "toolCallId") {
+                    self.dialogs.retain(|(open, _)| open != id);
+                }
+            }
             _ => {}
         }
     }
@@ -717,8 +733,12 @@ impl Fold {
                 if self.calls.iter().any(|call| call.id == id) {
                     return;
                 }
+                let args = data.get("args").cloned().unwrap_or(Value::Null);
+                if let Some(command) = text(&args, "command") {
+                    self.commands.insert(id.to_owned(), command.to_owned());
+                }
                 let part = json!({"id": id, "name": text(data, "name").unwrap_or("tool"),
-                                  "arguments": data.get("args").cloned().unwrap_or(Value::Null)});
+                                  "arguments": args});
                 if let Some(call) = super::events::call(&part, None, &[]) {
                     self.calls.push(LiveCall {
                         id: call.id,
@@ -731,6 +751,7 @@ impl Fold {
             }
             Some("result") => {
                 self.dialogs.retain(|(open, _)| open != id);
+                self.commands.remove(id);
                 if let Some(index) = self.calls.iter().position(|call| call.id == id) {
                     let call = self.calls.remove(index);
                     self.end(call.id, at);
@@ -740,34 +761,39 @@ impl Fold {
         }
     }
 
-    /// An exec approval the gateway waits on (`stream: "approval"`), and its resolution.
+    /// An exec approval that resolves after its run (`stream: "approval"`), and its resolution.
     fn approval(&mut self, data: &Value, at: u64) {
         let Some(id) = text(data, "toolCallId").or_else(|| text(data, "itemId")) else {
             return;
         };
         match (text(data, "phase"), text(data, "status")) {
             (Some("requested"), Some("pending")) => {
-                if self.dialogs.iter().any(|(open, _)| open == id) {
-                    return;
-                }
-                let title = match text(data, "command").filter(|command| !command.is_empty()) {
-                    Some(command) => format!("Allow {command}?"),
-                    None => text(data, "title")
-                        .unwrap_or("Allow this command?")
-                        .to_owned(),
-                };
-                self.dialogs.push((
-                    id.to_owned(),
-                    Dialog {
-                        kind: DialogKind::Confirm,
-                        title: cut(&title, TITLE_AT_MOST),
-                        since: at,
-                    },
-                ));
+                let command = text(data, "command").map(str::to_owned);
+                let title = text(data, "title").map(str::to_owned);
+                self.confirm(id, command.as_deref(), title.as_deref(), at);
             }
             (Some("resolved"), _) => self.dialogs.retain(|(open, _)| open != id),
             _ => {}
         }
+    }
+
+    /// Call `id` waits for the person to allow `command`.
+    fn confirm(&mut self, id: &str, command: Option<&str>, title: Option<&str>, at: u64) {
+        if self.dialogs.iter().any(|(open, _)| open == id) {
+            return;
+        }
+        let title = match command.filter(|command| !command.is_empty()) {
+            Some(command) => format!("Allow {command}?"),
+            None => title.unwrap_or("Allow this command?").to_owned(),
+        };
+        self.dialogs.push((
+            id.to_owned(),
+            Dialog {
+                kind: DialogKind::Confirm,
+                title: cut(&title, TITLE_AT_MOST),
+                since: at,
+            },
+        ));
     }
 
     fn begin(&mut self, run: Option<String>, at: u64) {
@@ -793,6 +819,7 @@ impl Fold {
             self.end(call.id, at);
         }
         self.dialogs.clear();
+        self.commands.clear();
         self.compacting = false;
         let Some(turn) = self.turn.take() else {
             return;
@@ -905,18 +932,24 @@ fn no_answer(why: impl std::fmt::Display) -> Error {
 /// The code of the gateway's refusal of a mutation that raced a change of the session
 /// (`sessionMutationTargetChanged`, `session-sharing-source`).
 const MUTATION_RACED: &str = "SESSION_MUTATION_AUTHORIZATION_CHANGED";
+/// The code of the gateway's refusal while a reset rewrites the session's storage
+/// (`SessionMutationFactsUnavailableError`: "retry after session storage is ready").
+const STORAGE_UNAVAILABLE: &str = "UNAVAILABLE";
+/// How often a raced `sessions.patch` goes to the gateway, at most.
+const PATCH_TRIES: usize = 3;
+const RACED_PAUSE: Duration = Duration::from_millis(50);
 
 /// The gateway's refusal of a request, or a request it never answered.
 struct Refused {
     /// Its message, with its code.
     why: String,
-    /// The code of its `details`, which names the refusal exactly.
-    code: Option<String>,
+    /// Whether it raced a change of the session, and the same request may pass again.
+    raced: bool,
 }
 
 impl Refused {
     fn unanswered(why: String) -> Self {
-        Self { why, code: None }
+        Self { why, raced: false }
     }
 }
 
@@ -928,10 +961,8 @@ impl From<&Value> for Refused {
                 Some(code) => format!("{message} ({code})"),
                 None => message.to_owned(),
             },
-            code: error
-                .pointer("/details/code")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            raced: error.pointer("/details/code").and_then(Value::as_str) == Some(MUTATION_RACED)
+                || text(error, "code") == Some(STORAGE_UNAVAILABLE),
         }
     }
 }

@@ -1337,7 +1337,9 @@ driver opens read-only.
   `openclaw acp`) runs its turns there. The port is `OPENCLAW_GATEWAY_PORT`, else
   `gateway.port`, else 18789.
   - The driver joins as an operator (`gateway-client`, mode `backend`, scopes
-    `operator.read` and `operator.write`) with the gateway's own secret from
+    `operator.read`, `operator.write` and `operator.approvals`: a run takes its sender's
+    scopes, and an `exec` that asks fails at registration without the last) with the
+    gateway's own secret from
     `openclaw.json`: `gateway.auth.token`, or `gateway.auth.password` in mode `password`,
     else `OPENCLAW_GATEWAY_TOKEN` or `OPENCLAW_GATEWAY_PASSWORD`. It answers
     `connect.challenge`, then `sessions.subscribe`.
@@ -1351,13 +1353,16 @@ driver opens read-only.
   - `pick`: `sessions.patch` of `model` (`<provider>/<model>`, as `models` split it) and
     `thinkingLevel`, read back from `resolved`. A model the last `models` lacks is
     `model-missing`. A patch that raced a change of the session
-    (`SESSION_MUTATION_AUTHORIZATION_CHANGED`) is sent once more.
+    (`SESSION_MUTATION_AUTHORIZATION_CHANGED`, or `UNAVAILABLE` while a reset rewrites its
+    storage) is sent again after 50 ms, at most 3 times in all.
   - `stop`: `chat.abort` of the run `held` named, checked against `say`; proof is the run's
     lifecycle `end` with `aborted: true`.
   - `session/changed`: from the session's `agent` events (lifecycle, tool, approval,
     compaction) and `sessions.changed` rows: the turn and its says, calls and ended calls,
-    an exec approval as a `confirm` dialog, `compacting`, `pending`, model, thinking and
-    `context_left`. A closed connection sends an empty state.
+    `compacting`, `pending`, model, thinking and `context_left`. An exec approval is a
+    `confirm` dialog, `Allow <command>?`: lifecycle `waiting-approval` until
+    `approval-resolved`, where the run waits for an approval client; the `approval` stream
+    where it asks after its run. A closed connection sends an empty state.
 
 Ran (OpenClaw 2026.11.3, `/opt/homebrew/bin/openclaw`, ollama `qwen3:1.7b`): five real
 conversations of `openclaw agent` (an `exec` call, two failed turns, one zstd record, one
@@ -1388,11 +1393,19 @@ then `stopped: true`, settled `failed` with `aborted (rpc)`; `session/changed` n
 `exec` call, its end and `context_left`. A `pick` right after an abort was refused
 `SESSION_MUTATION_AUTHORIZATION_CHANGED` once, before the retry was built.
 
+The rest of Live ran on the same gateway, through a recording proxy:
+- Exec approval (`security: allowlist`, `ask: on-miss`, an approval client connected with
+  `operator.admin`, as the Control UI does): `touch` waited; `confirm` dialog
+  `Allow touch /tmp/ocproof/approved.txt?` within 0.2 s; it cleared when
+  `openclaw approvals resolve` allowed once; the file was made.
+- Raced `pick`: 240 `thinking` picks during runs while another client sent 51
+  `sessions.reset`. One try only: 11 `AUTHORIZATION_CHANGED` retried and passed, 13
+  `UNAVAILABLE` refused. With 3 tries: 134 of 134 picks passed, 32 refusals retried.
+
 Not verified: window chains, forks and `leaf` records (none in a real store: `/new` and an
 idle `session.reset` kept the same window); `needs/give` with a real OpenRouter key; the
 installer on a host without OpenClaw; `~/.npm-global/bin` and `~/.local/bin` as install
-folders (read from `install.sh`, not seen installed); the raced `pick` retry itself (the race
-did not come again); an exec approval as a live `dialog`; `retry` and `jobs` (no gateway
+folders (read from `install.sh`, not seen installed); `retry` and `jobs` (no gateway
 event for them seen); a gateway on a non-loopback bind or with a password.
 
 ```sh
