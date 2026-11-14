@@ -1,0 +1,1 @@
+{"id":"2a4bf8dc-f371-4553-9754-bde6552a50fa","timestamp":"2026-11-14T10:06:20.034828","source":"agent","tool_name":"task","tool_call_id":"call_4jdmt1zq","error":"Error validating tool 'task': Failed to provide security_risk field in tool 'task'. Parameters provided: ['required', 'type', 'title', 'description']","kind":"AgentErrorEvent"}

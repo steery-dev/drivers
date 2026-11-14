@@ -1,0 +1,1 @@
+{"id":"fadb224c-31f5-41a7-a672-1a53c2386dff","timestamp":"2026-11-14T11:12:20.527776","source":"hook","hook_event_type":"Stop","hook_command":"/tmp/oh-hook.py Stop","success":true,"blocked":false,"exit_code":0,"stdout":"","stderr":"","hook_input":{"reason":"agent_finished"},"kind":"HookExecutionEvent"}

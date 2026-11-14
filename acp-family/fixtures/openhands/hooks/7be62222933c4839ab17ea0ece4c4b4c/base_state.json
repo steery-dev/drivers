@@ -1,0 +1,358 @@
+{
+  "id": "7be62222-933c-4839-ab17-ea0ece4c4b4c",
+  "agent": {
+    "llm": {
+      "model": "ollama_chat/qwen3:4b",
+      "api_key": "**********",
+      "base_url": "http://127.0.0.1:11434",
+      "openrouter_site_url": "https://docs.all-hands.dev/",
+      "openrouter_app_name": "OpenHands",
+      "num_retries": 5,
+      "retry_multiplier": 8.0,
+      "retry_min_wait": 8,
+      "retry_max_wait": 64,
+      "timeout": 300,
+      "max_message_chars": 30000,
+      "stream": false,
+      "drop_params": true,
+      "modify_params": true,
+      "disable_stop_word": false,
+      "caching_prompt": true,
+      "log_completions": false,
+      "log_completions_folder": "logs/completions",
+      "native_tool_calling": true,
+      "reasoning_effort": "high",
+      "enable_encrypted_reasoning": true,
+      "prompt_cache_retention": "24h",
+      "extended_thinking_budget": 200000,
+      "usage_id": "agent",
+      "litellm_extra_body": {}
+    },
+    "tools": [
+      {
+        "name": "terminal",
+        "params": {}
+      },
+      {
+        "name": "file_editor",
+        "params": {}
+      },
+      {
+        "name": "task_tracker",
+        "params": {}
+      },
+      {
+        "name": "task_tool_set",
+        "params": {}
+      }
+    ],
+    "include_default_tools": [
+      "FinishTool",
+      "ThinkTool"
+    ],
+    "system_prompt_filename": "system_prompt.j2",
+    "security_policy_filename": "security_policy.j2",
+    "system_prompt_kwargs": {
+      "llm_security_analyzer": true
+    },
+    "condenser": {
+      "llm": {
+        "model": "ollama_chat/qwen3:1.7b",
+        "api_key": "**********",
+        "base_url": "http://127.0.0.1:11434",
+        "openrouter_site_url": "https://docs.all-hands.dev/",
+        "openrouter_app_name": "OpenHands",
+        "num_retries": 5,
+        "retry_multiplier": 8.0,
+        "retry_min_wait": 8,
+        "retry_max_wait": 64,
+        "timeout": 300,
+        "max_message_chars": 30000,
+        "stream": false,
+        "drop_params": true,
+        "modify_params": true,
+        "disable_stop_word": false,
+        "caching_prompt": true,
+        "log_completions": false,
+        "log_completions_folder": "logs/completions",
+        "native_tool_calling": true,
+        "reasoning_effort": "high",
+        "enable_encrypted_reasoning": true,
+        "prompt_cache_retention": "24h",
+        "extended_thinking_budget": 200000,
+        "usage_id": "condenser",
+        "litellm_extra_body": {}
+      },
+      "max_size": 240,
+      "keep_first": 2,
+      "minimum_progress": 0.1,
+      "hard_context_reset_max_retries": 5,
+      "hard_context_reset_context_scaling": 0.8,
+      "kind": "LLMSummarizingCondenser"
+    },
+    "tool_concurrency_limit": 1,
+    "kind": "Agent"
+  },
+  "workspace": {
+    "working_dir": "/private/tmp/oh-home/proj",
+    "kind": "LocalWorkspace"
+  },
+  "persistence_dir": "/tmp/oh-home/.openhands/conversations/7be62222933c4839ab17ea0ece4c4b4c",
+  "max_iterations": 500,
+  "stuck_detection": true,
+  "execution_status": "waiting_for_confirmation",
+  "confirmation_policy": {
+    "kind": "AlwaysConfirm"
+  },
+  "security_analyzer": {
+    "kind": "LLMSecurityAnalyzer"
+  },
+  "activated_knowledge_skills": [],
+  "invoked_skills": [],
+  "blocked_actions": {},
+  "blocked_messages": {},
+  "last_user_message_id": "e9654ba6-6244-4e64-a28b-3ccc7fdc740f",
+  "stats": {
+    "usage_to_metrics": {
+      "agent": {
+        "model_name": "ollama_chat/qwen3:4b",
+        "accumulated_cost": 0.0,
+        "accumulated_token_usage": {
+          "model": "ollama_chat/qwen3:4b",
+          "prompt_tokens": 10250,
+          "completion_tokens": 5967,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "context_window": 0,
+          "per_turn_token": 3123,
+          "response_id": ""
+        },
+        "costs": [],
+        "response_latencies": [
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "latency": 59.48654007911682,
+            "response_id": "chatcmpl-1bacf5c9-9164-4754-afec-fbea1b7ffb72"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "latency": 27.64297580718994,
+            "response_id": "chatcmpl-a3f62047-b272-4447-a16c-39d63c586f94"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "latency": 49.932271003723145,
+            "response_id": "chatcmpl-121433fd-48bc-4ade-820f-2b3ee680935d"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "latency": 16.589080095291138,
+            "response_id": "chatcmpl-b579f5ff-167d-4baa-8230-aabb86cf572e"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "latency": 30.285722255706787,
+            "response_id": "chatcmpl-e5b0d0bb-87bb-42ca-a63c-01321ea9d450"
+          }
+        ],
+        "token_usages": [
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "prompt_tokens": 2050,
+            "completion_tokens": 1990,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_window": 0,
+            "per_turn_token": 4040,
+            "response_id": "chatcmpl-1bacf5c9-9164-4754-afec-fbea1b7ffb72"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "prompt_tokens": 2050,
+            "completion_tokens": 917,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_window": 0,
+            "per_turn_token": 2967,
+            "response_id": "chatcmpl-a3f62047-b272-4447-a16c-39d63c586f94"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "prompt_tokens": 2050,
+            "completion_tokens": 1526,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_window": 0,
+            "per_turn_token": 3576,
+            "response_id": "chatcmpl-121433fd-48bc-4ade-820f-2b3ee680935d"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "prompt_tokens": 2050,
+            "completion_tokens": 461,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_window": 0,
+            "per_turn_token": 2511,
+            "response_id": "chatcmpl-b579f5ff-167d-4baa-8230-aabb86cf572e"
+          },
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "prompt_tokens": 2050,
+            "completion_tokens": 1073,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_window": 0,
+            "per_turn_token": 3123,
+            "response_id": "chatcmpl-e5b0d0bb-87bb-42ca-a63c-01321ea9d450"
+          }
+        ]
+      },
+      "condenser": {
+        "model_name": "ollama_chat/qwen3:1.7b",
+        "accumulated_cost": 0.0,
+        "accumulated_token_usage": {
+          "model": "ollama_chat/qwen3:1.7b",
+          "prompt_tokens": 0,
+          "completion_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "context_window": 0,
+          "per_turn_token": 0,
+          "response_id": ""
+        },
+        "costs": [],
+        "response_latencies": [],
+        "token_usages": []
+      },
+      "task:task_00000001": {
+        "model_name": "default",
+        "accumulated_cost": 0.0,
+        "accumulated_token_usage": {
+          "model": "default",
+          "prompt_tokens": 2050,
+          "completion_tokens": 3093,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "context_window": 0,
+          "per_turn_token": 5143,
+          "response_id": ""
+        },
+        "costs": [],
+        "response_latencies": [
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "latency": 91.89238572120667,
+            "response_id": "chatcmpl-682dead9-0cef-4499-b982-048856bf82bb"
+          }
+        ],
+        "token_usages": [
+          {
+            "model": "ollama_chat/qwen3:4b",
+            "prompt_tokens": 2050,
+            "completion_tokens": 3093,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+            "context_window": 0,
+            "per_turn_token": 5143,
+            "response_id": "chatcmpl-682dead9-0cef-4499-b982-048856bf82bb"
+          }
+        ]
+      }
+    }
+  },
+  "secret_registry": {
+    "secret_sources": {}
+  },
+  "tags": {},
+  "agent_state": {},
+  "hook_config": {
+    "pre_tool_use": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py PreToolUse",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "post_tool_use": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py PostToolUse",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "user_prompt_submit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py UserPromptSubmit",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "session_start": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py SessionStart",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "session_end": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py SessionEnd",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ],
+    "stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/tmp/oh-hook.py Stop",
+            "timeout": 60,
+            "async_": false
+          }
+        ]
+      }
+    ]
+  }
+}
