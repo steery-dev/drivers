@@ -25,6 +25,9 @@ const LISTED_WITHIN: Duration = Duration::from_secs(30);
 /// The config option of a session that picks its model.
 const MODEL: &str = "model";
 
+/// How many sessions `models` opens at most before it says Kiro lists none.
+const ATTEMPTS: u32 = 5;
+
 /// `models` for the person at `home`, with Kiro's folder `root`: none, signed out, where
 /// `kiro-cli whoami` names no account.
 pub async fn list(home: &Path, root: &Path) -> Result<Models, Error> {
@@ -87,7 +90,10 @@ async fn signed_in(binary: &Path, home: &Path) -> bool {
 }
 
 /// Start `kiro-cli acp` in a folder of its own, initialize it, ask for a new session and
-/// delete it again; Kiro's answer to the new session.
+/// delete it again; Kiro's answer to the new session. Kiro fetches its models in the
+/// background as it starts, and a session opened before they came offers no `model` option
+/// (seen on a first run), so a session that lists none is asked for again, at most
+/// [`ATTEMPTS`] times, a second apart.
 async fn open(binary: &Path, home: &Path) -> Result<Value, Error> {
     let cwd = std::env::temp_dir().join(format!("steery-kiro-models-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).map_err(failed)?;
@@ -110,38 +116,50 @@ async fn open(binary: &Path, home: &Path) -> Result<Value, Error> {
         .take()
         .ok_or_else(|| failed(std::io::ErrorKind::BrokenPipe.into()))?;
     let mut lines = BufReader::new(stdout).lines();
+    let mut id = 1;
     let mut answer = ask(
         &mut stdin,
         &mut lines,
-        1,
+        id,
         "initialize",
         json!({"protocolVersion": 1, "clientCapabilities": {}}),
     )
     .await?;
-    if answer.get("error").is_none() {
+    for attempt in 1..=ATTEMPTS {
+        if answer.get("error").is_some() {
+            break;
+        }
+        id += 1;
         answer = ask(
             &mut stdin,
             &mut lines,
-            2,
+            id,
             "session/new",
             json!({"cwd": cwd.to_string_lossy(), "mcpServers": []}),
         )
         .await?;
-    }
-    if let Some(session) = answer.pointer("/result/sessionId").cloned() {
-        let deleted = ask(
-            &mut stdin,
-            &mut lines,
-            3,
-            "session/delete",
-            json!({"sessionId": session}),
-        )
-        .await?;
-        if let Some(error) = deleted.get("error") {
-            return Err(Error::refused(
-                refusal::REFUSED,
-                format!("`{EXECUTABLE} acp` kept the session it listed models in: {error}"),
-            ));
+        if let Some(session) = answer.pointer("/result/sessionId").cloned() {
+            id += 1;
+            let deleted = ask(
+                &mut stdin,
+                &mut lines,
+                id,
+                "session/delete",
+                json!({"sessionId": session}),
+            )
+            .await?;
+            if let Some(error) = deleted.get("error") {
+                return Err(Error::refused(
+                    refusal::REFUSED,
+                    format!("`{EXECUTABLE} acp` kept the session it listed models in: {error}"),
+                ));
+            }
+        }
+        if answer.get("error").is_some() || !listed(&answer["result"]).is_empty() {
+            break;
+        }
+        if attempt < ATTEMPTS {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
     drop(stdin);
