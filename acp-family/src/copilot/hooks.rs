@@ -128,6 +128,7 @@ pub fn table(protocol: u32) -> Vec<Hook> {
             waits: Some(event.waits),
             // Copilot hands a hook no file to append a lead to.
             env: Vec::new(),
+            room: None,
             // `permissionRequest`'s output is `behavior` and `message` alone: a yes covers
             // its one call, so Copilot keeps neither scope.
             keeps: (event.kind == HookKind::Permission && protocol >= steery_sdk::KEEPS)
@@ -185,6 +186,7 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
         // `timeout` end a run without the person leaving it.
         person_exited: event.kind == HookKind::SessionEnd
             && document.get("reason").and_then(Value::as_str) == Some("user_exit"),
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()

@@ -103,6 +103,7 @@ pub fn table() -> Vec<Hook> {
             waits: Some(event.waits),
             // Gemini hands a hook no file to export a lead into.
             env: Vec::new(),
+            room: None,
             keeps: None,
         })
         .collect()
@@ -153,6 +154,7 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
         // `clear` as `/clear` starts the next conversation.
         person_exited: event.kind == HookKind::SessionEnd
             && text(document, "reason") == Some("exit"),
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()

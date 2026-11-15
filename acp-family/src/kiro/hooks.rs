@@ -78,6 +78,7 @@ pub fn table(protocol: u32) -> Vec<Hook> {
             waits: Some(SAYS_WAITS),
             // Kiro hands a hook no file to export a lead into.
             env: Vec::new(),
+            room: None,
             keeps: None,
         })
         .chain(turn_hooks::table(protocol))
@@ -133,6 +134,7 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
         // A person who quits `kiro-cli chat` ends it `client_disconnect`, as a turn's
         // process that ends does; Kiro names no reason of the person's alone.
         person_exited: false,
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()

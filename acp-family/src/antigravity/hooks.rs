@@ -101,6 +101,7 @@ pub fn table() -> Vec<Hook> {
             waits: Some(event.waits),
             // Antigravity hands a hook no file to export a lead into.
             env: Vec::new(),
+            room: None,
             // It keeps no permission from a hook.
             keeps: (event.kind == HookKind::BeforeCall).then(Vec::new),
         })
@@ -166,6 +167,7 @@ fn moment(root: &Path, name: &str, document: &Value) -> Option<Moment> {
         continued: event.kind == HookKind::TurnEnd
             && document["executionNum"].as_u64().is_some_and(|n| n > 0),
         person_exited: false,
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| text(document, "lastUserInput"))
             .flatten()

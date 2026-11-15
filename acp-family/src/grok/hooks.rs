@@ -112,6 +112,7 @@ pub fn table() -> Vec<Hook> {
             waits: Some(event.waits),
             // Grok hands a hook no file to export a lead into.
             env: Vec::new(),
+            room: None,
             keeps: None,
         })
         .collect()
@@ -172,6 +173,7 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
         // Grok's `SessionEnd` reasons (`shutdown`, `channel_closed`) do not tell a person
         // leaving at the prompt from a run that ended.
         person_exited: false,
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()
