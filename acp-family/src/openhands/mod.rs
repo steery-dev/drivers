@@ -102,6 +102,7 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             touches: false,
         },
         hooks: crate::turn::hooks::table(protocol),
+        bare: false,
     }
 }
 

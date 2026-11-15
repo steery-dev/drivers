@@ -596,8 +596,8 @@ dependencies = [
 
 [[package]]
 name = "steery-sdk"
-version = "15.0.0"
-source = "git+https://github.com/steery-dev/sdk?tag=v15.0.0#31c6fd766b737fb3a9c92ab59c5d45725fa5267a"
+version = "16.0.0"
+source = "git+https://github.com/steery-dev/sdk?tag=v16.0.0#925cc4397653f8cea62877f024f1c89f469a6e97"
 dependencies = [
  "libc",
  "serde",

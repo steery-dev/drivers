@@ -167,6 +167,7 @@ impl Driver {
                 touches: false,
             },
             hooks: hooks::table(),
+            bare: false,
         }
     }
 }

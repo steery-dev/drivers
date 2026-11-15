@@ -13,6 +13,9 @@
 //! omp's `--model` resolves loosely, so a pick goes to omp only as one of its own catalog's
 //! entries; pi's goes to Steery's plugin too (`--steery-model`), which ends the process with
 //! a refusal where pi does not run exactly that pick.
+//!
+//! A bare turn (`start`'s `bare`) runs on its system prompt alone, with the shell as its
+//! only tool and Steery's plugin as its only extension ([`bared`]), whatever its act.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -156,12 +159,18 @@ pub async fn start(
             .unwrap_or(start.cwd),
         false => start.cwd,
     };
+    let bare = match &start.bare {
+        Some(bare) => bared(harness, store.root(), &start.folder, &bare.system)
+            .map_err(|why| Error::refused(refusal::START_FAILED, why))?,
+        None => Vec::new(),
+    };
     let mut argv: Vec<String> = vec![binary.to_string_lossy().into_owned()];
     argv.extend(args(
         harness,
         opened,
         start.model.as_deref(),
         start.thinking.as_deref(),
+        bare,
     ));
     Ok(Launch {
         argv,
@@ -238,14 +247,94 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// omp's settings overlay for a bare turn (`--config`): every discovery source off, so no
+/// MCP server, extension, hook, rule or command of the person's or a project's loads, and
+/// the autolearn tools off. omp has no flag that turns MCP off, and `--tools` leaves MCP
+/// and extension tools on (omp 18.20.2). The list replaces the person's own
+/// `disabledProviders`, model backends among them, for the turn: the model is picked.
+const OMP_BARE: &str = "\
+disabledProviders: [native, claude, codex, gemini, opencode, github, agents, agents-md, \
+claude-md, custom-context, cursor, windsurf, cline, vscode, mcp-json, claude-plugins, \
+omp-plugins, agent-plugins, ssh-json, ssh-config, builtin-defaults]
+enabledProviders: []
+autolearn:
+  enabled: false
+";
+
+/// The file a bare omp turn's overlay is written to, in the turn's folder.
+const OMP_BARE_FILE: &str = "omp-bare.yml";
+
+/// The flags of a bare turn (`start`'s `bare`, the same for a new conversation, a fork
+/// and a continue): `system` alone as the system prompt; no rules, skills, context files
+/// or prompt templates; the shell as the only tool; and of every extension only Steery's,
+/// loaded by its path under `root`, so its door stays. For omp the overlay [`OMP_BARE`]
+/// is written into the turn's `folder` first; it also drops omp's extension discovery.
+fn bared(
+    harness: Harness,
+    root: &Path,
+    folder: &Path,
+    system: &str,
+) -> Result<Vec<String>, String> {
+    let path = |path: PathBuf| {
+        path.into_os_string()
+            .into_string()
+            .map_err(|path| format!("{} is not UTF-8", PathBuf::from(path).display()))
+    };
+    let extension = path(root.join("extensions/steery.ts"))?;
+    // An explicit empty append keeps the person's `APPEND_SYSTEM.md` out.
+    let mut flags = ["--system-prompt", system, "--append-system-prompt", ""]
+        .map(String::from)
+        .to_vec();
+    match harness {
+        Harness::Omp => {
+            let overlay = folder.join(OMP_BARE_FILE);
+            std::fs::write(&overlay, OMP_BARE)
+                .map_err(|e| format!("cannot write {}: {e}", overlay.display()))?;
+            flags.extend(
+                [
+                    "--no-rules",
+                    "--no-skills",
+                    "--no-context-files",
+                    "--tools=bash",
+                    "--config",
+                ]
+                .map(String::from),
+            );
+            flags.extend([path(overlay)?, "-e".to_owned(), extension]);
+        }
+        // `--no-extensions` also drops pi's built-in MCP support, so Steery's plugin
+        // registers no MCP entry (`--steery-bare`).
+        Harness::Pi => {
+            flags.extend(
+                [
+                    "--no-skills",
+                    "--no-context-files",
+                    "--no-prompt-templates",
+                    "--no-extensions",
+                    "--no-approve",
+                    "--tools",
+                    "bash",
+                    "--steery-bare",
+                    "-e",
+                ]
+                .map(String::from),
+            );
+            flags.push(extension);
+        }
+    }
+    Ok(flags)
+}
+
 /// A turn's arguments after the binary: the harness's kept RPC host (omp's with no client
-/// UI to wait on), the conversation it opens as the harness names it, and the pick — to pi
-/// also as Steery's plugin's own flags. RPC takes no prompt argument.
+/// UI to wait on), the conversation it opens as the harness names it, the pick — to pi
+/// also as Steery's plugin's own flags — and a bare turn's flags ([`bared`]). RPC takes no
+/// prompt argument.
 fn args(
     harness: Harness,
     opened: Option<[String; 2]>,
     model: Option<&str>,
     thinking: Option<&str>,
+    bare: Vec<String>,
 ) -> Vec<String> {
     let mut args: Vec<String> = match harness {
         Harness::Omp => ["--mode", "rpc", "--no-ui"].map(String::from).into(),
@@ -266,6 +355,7 @@ fn args(
             args.push(format!("--{STEERY_THINKING}={thinking}"));
         }
     }
+    args.extend(bare);
     args
 }
 
@@ -709,7 +799,13 @@ mod tests {
     fn a_pick_keeps_its_provider_and_model() {
         let resume = || Some(["--resume".to_owned(), "source".to_owned()]);
         assert_eq!(
-            args(Harness::Omp, resume(), Some("provider/model"), Some("high")),
+            args(
+                Harness::Omp,
+                resume(),
+                Some("provider/model"),
+                Some("high"),
+                Vec::new()
+            ),
             [
                 "--mode",
                 "rpc",
@@ -723,7 +819,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            args(Harness::Pi, None, Some("provider/model"), Some("high")),
+            args(
+                Harness::Pi,
+                None,
+                Some("provider/model"),
+                Some("high"),
+                Vec::new()
+            ),
             [
                 "--mode",
                 "rpc",
@@ -740,7 +842,8 @@ mod tests {
                 Harness::Omp,
                 Some(["--fork".to_owned(), "01a0cd6f".to_owned()]),
                 None,
-                None
+                None,
+                Vec::new()
             ),
             ["--mode", "rpc", "--no-ui", "--fork", "01a0cd6f"]
         );

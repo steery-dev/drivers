@@ -108,6 +108,7 @@ impl Driver {
                 touches: false,
             },
             hooks: hooks::table(protocol),
+            bare: false,
         }
     }
 

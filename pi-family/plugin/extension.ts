@@ -1484,11 +1484,13 @@ export const surfaces = {
   // come in (`input`, below). pi refuses a flag nobody registered before anything
   // starts, which is the runtime's sign this copy is absent. omp is given none: the
   // runtime checks a pick against omp's own catalog before the run starts.
+  // `steery-bare`: a bare run, which gets no MCP entry ([`registers`]).
   flags:
     HARNESS === "pi"
       ? [
           { name: "steery-model", description: "The model that Steery's runtime picked", type: "string" as const },
           { name: "steery-thinking", description: "The thinking level that Steery's runtime picked", type: "string" as const },
+          { name: "steery-bare", description: "A bare run: no MCP entry of Steery's", type: "boolean" as const },
         ]
       : [],
 };
@@ -2323,12 +2325,18 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
+   * pi: whether this conversation gets Steery's MCP entry: not in a bare run
+   * (`--steery-bare`), whose only tool is the shell and which loads no MCP support.
+   */
+  const registers = (): boolean => REGISTERS && pi.getFlag?.("steery-bare") !== true;
+
+  /**
    * pi: Steery's MCP entry for this conversation, with headers naming it. pi connects it
    * as the session starts, and a registration the same as the one it holds changes
    * nothing. One pi refuses leaves the harness as it is without Steery.
    */
   const register = (ctx: Context) => {
-    if (!REGISTERS || !pi.registerMcpServer) return;
+    if (!registers() || !pi.registerMcpServer) return;
     try {
       pi.registerMcpServer("steery", { ...MCP, headers: callerHeaders(ctx) });
     } catch {
@@ -2344,7 +2352,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * not one that changed nothing.
    */
   const reconnect = () => {
-    if (!REGISTERS || !pi.unregisterMcpServer) return;
+    if (!registers() || !pi.unregisterMcpServer) return;
     try {
       pi.unregisterMcpServer("steery");
     } catch {
@@ -2371,7 +2379,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     clearInterval(looking);
     looking = setInterval(noteState, LOOK_EVERY_MS);
     looking.unref?.();
-    if (REGISTERS && missed && !reached(pi)) reconnect();
+    if (registers() && missed && !reached(pi)) reconnect();
     missed = false;
     const ctx = live;
     if (ctx && entries && typeof entries === "object") {

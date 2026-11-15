@@ -147,6 +147,7 @@ impl Driver {
             // A turn of this driver's runs Steery's hook at each permission `openclaw acp`
             // relays, and at its end.
             hooks: crate::turn::hooks::table(protocol),
+            bare: false,
         }
     }
 }

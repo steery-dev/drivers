@@ -51,14 +51,21 @@ pub fn protocol(offered: &[u32]) -> Option<u32> {
 }
 
 /// Like [`protocol`], for a driver that plans a need again where `setup/plan`'s `ask` names
-/// it and names `unset` in a `done` (`steery_sdk::ASK`, protocol 15): 15 where the runtime
-/// offered it, else what [`protocol`] gives. A driver that does not do so keeps
+/// it and names `unset` in a `done` (`steery_sdk::ASK`, protocol 15), and that maps
+/// `start`'s `bare` (`steery_sdk::BARE`, protocol 16): the newest of 16 and 15 that the
+/// runtime offered, else what [`protocol`] gives. A driver that does neither keeps
 /// [`protocol`], which stops at 14.
-pub fn protocol_asking(offered: &[u32]) -> Option<u32> {
-    match offered.contains(&steery_sdk::ASK) {
-        true => Some(steery_sdk::ASK),
-        false => protocol(offered),
-    }
+pub fn protocol_bare(offered: &[u32]) -> Option<u32> {
+    [steery_sdk::BARE, steery_sdk::ASK]
+        .into_iter()
+        .find(|version| offered.contains(version))
+        .or_else(|| protocol(offered))
+}
+
+/// Whether the protocol `picked` has `start`'s `bare`: 16 or newer. A driver says
+/// `bare: true` in `initialize` only then; the runtime sends an older one no `bare`.
+pub fn bare(picked: u32) -> bool {
+    picked >= steery_sdk::BARE
 }
 
 /// Whether the person asked to give the need `id` again: the protocol `picked` is 15 or
@@ -240,13 +247,15 @@ mod tests {
         assert_eq!(release_within("none"), None);
     }
 
-    /// Only a driver that asks to be asked picks 15; the others stop at 14.
+    /// Only a driver that asks and maps a bare start picks 16, else 15; the others stop at 14.
     #[test]
-    fn only_an_asking_driver_picks_15() {
-        assert_eq!(protocol(&[4, 14, 15]), Some(14));
-        assert_eq!(protocol_asking(&[4, 14, 15]), Some(15));
-        assert_eq!(protocol_asking(&[4, 14]), Some(14));
-        assert_eq!(protocol_asking(&[3]), None);
+    fn only_a_bare_driver_picks_15_and_16() {
+        assert_eq!(protocol(&[4, 14, 15, 16]), Some(14));
+        assert_eq!(protocol_bare(&[4, 14, 15, 16]), Some(16));
+        assert_eq!(protocol_bare(&[4, 14, 15]), Some(15));
+        assert_eq!(protocol_bare(&[4, 14]), Some(14));
+        assert_eq!(protocol_bare(&[3]), None);
+        assert!(bare(16) && !bare(15));
     }
 
     #[test]
