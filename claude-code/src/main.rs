@@ -152,7 +152,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_bare(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_words(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
@@ -238,7 +238,8 @@ impl Program for ClaudeCode {
             method::HOOK_READ => {
                 let store = Arc::clone(self.shared()?);
                 let read = given(params)?;
-                result(blocking(move || hooks::read(&store, read)).await?)
+                let picked = self.place()?.protocol;
+                result(blocking(move || hooks::read(&store, read, picked)).await?)
             }
             method::HOOK_ANSWER => result(hooks::answer(given(params)?)?),
             method::HELD => result(drive::held(self.root()?, self.store()?, given(params)?)),
@@ -308,7 +309,7 @@ fn info(protocol: u32) -> wire::HarnessInfo {
         // `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH` characters, 2,048 when unset, then
         // `… [truncated]`, so the escalation policies are said whole at its start.
         setup: wire::SetupFacts {
-            reads_skills: true,
+            skill: wire::SkillAt::Listed,
             cuts_tool_text: true,
             call_bound: None,
         },
@@ -350,7 +351,7 @@ fn info(protocol: u32) -> wire::HarnessInfo {
                 harness::Act::New,
             ],
         },
-        hooks: hooks::table(),
+        hooks: hooks::table(protocol),
         bare: steery_driver_common::program::bare(protocol),
     }
 }
@@ -432,21 +433,30 @@ mod tests {
 
     #[test]
     fn claude_code_states_itself_as_the_protocol_checks() {
-        let initialized = steery_sdk::wire::Initialized {
-            protocol: 4,
-            program: steery_sdk::wire::ProgramInfo {
-                id: "claude-code".parse().unwrap(),
-                kind: steery_sdk::wire::Kind::Harness,
-                release: "0.1.0".into(),
-                label: "Claude Code".into(),
-                short: "CC".into(),
-                tint: Some("#c96a4a".into()),
-                mark: Some(super::MARK.into()),
-            },
-            harness: Some(Box::new(super::info(steery_sdk::BARE))),
-            machine: None,
-            settings: Vec::new(),
-        };
-        initialized.check().unwrap();
+        for protocol in [steery_sdk::BARE, steery_sdk::WORDS] {
+            let initialized = steery_sdk::wire::Initialized {
+                protocol,
+                program: steery_sdk::wire::ProgramInfo {
+                    id: "claude-code".parse().unwrap(),
+                    kind: steery_sdk::wire::Kind::Harness,
+                    release: "0.1.0".into(),
+                    label: "Claude Code".into(),
+                    short: "CC".into(),
+                    tint: Some("#c96a4a".into()),
+                    mark: Some(super::MARK.into()),
+                },
+                harness: Some(Box::new(super::info(protocol))),
+                machine: None,
+                settings: Vec::new(),
+            };
+            initialized.check().unwrap();
+            // A runtime on 16 reads `reads_skills`, one on 17 `skill`.
+            let said = initialized.said().unwrap();
+            let setup = &said["harness"]["setup"];
+            match protocol >= steery_sdk::WORDS {
+                true => assert_eq!(setup["skill"], "listed"),
+                false => assert_eq!(setup["reads_skills"], true),
+            }
+        }
     }
 }
