@@ -4,11 +4,13 @@
 //! it knows beside it. Every document carries `session_id` (the conversation; for an omp
 //! sub-agent filed in its lead's transcript, the lead's), `agent_id` (that sub-agent's own
 //! id), `cwd`, `context_left`, `transcript_path` (never a sub-agent's) and `at`; a
-//! moment's lead is the runtime's to read, from the door's hello. `UserPromptSubmit` adds
-//! `prompt`; `PreToolUse` `tool_name`, `tool_use_id` and `tool_input`; `PostToolUse`
-//! `tool_name`, `tool_use_id` and `is_error`; `Stop` the last answer's `stop_reason` and
-//! `error_message`, and `continued` where a settle's answer already kept the turn going;
-//! `SessionEnd` `mode`, `reason` and, in pi, `signal`.
+//! moment's lead is the runtime's to read, from the door's hello. `SessionStart` adds the
+//! harness's `reason` (`compact` after a compaction, `branch` for omp's branch) and its
+//! `previous_session_file`; `UserPromptSubmit` adds `prompt`; `PreToolUse` `tool_name`,
+//! `tool_use_id` and `tool_input`; `PostToolUse` `tool_name`, `tool_use_id` and
+//! `is_error`; `Stop` the last answer's `stop_reason` and `error_message`, and `continued`
+//! where a settle's answer already kept the turn going; `SessionEnd` `mode`, `reason` and,
+//! in pi, `signal`.
 
 use std::path::{Path, PathBuf};
 
@@ -20,15 +22,15 @@ use crate::Harness;
 use crate::events::text;
 use crate::transcripts::{Store, id_of};
 
-/// `hook/read`.
-pub fn read(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
+/// `hook/read`, under the protocol `picked`.
+pub fn read(store: &Store, read: HookRead, picked: u32) -> Result<HookMoment, Error> {
     let moment = serde_json::from_str::<Value>(&read.document)
         .ok()
-        .and_then(|document| moment(store, &read.event, &document));
+        .and_then(|document| moment(store, &read.event, &document, picked));
     Ok(HookMoment { moment })
 }
 
-fn moment(store: &Store, event: &str, document: &Value) -> Option<Moment> {
+fn moment(store: &Store, event: &str, document: &Value, picked: u32) -> Option<Moment> {
     let harness = store.harness();
     if !matches!(
         event,
@@ -84,6 +86,14 @@ fn moment(store: &Store, event: &str, document: &Value) -> Option<Moment> {
         prompt: (event == "UserPromptSubmit")
             .then(|| text(document, "prompt").map(str::to_owned))
             .flatten(),
+        // A fork's start, or omp's branch, names the transcript it came from.
+        forked_from: (steery_driver_common::program::words(picked)
+            && event == "SessionStart"
+            && matches!(said("reason"), Some("fork" | "branch")))
+        .then(|| said("previous_session_file"))
+        .flatten()
+        .and_then(|file| id_of(Path::new(file)))
+        .map(str::to_owned),
         context_left: document
             .get("context_left")
             .and_then(Value::as_f64)
@@ -136,6 +146,7 @@ mod tests {
                 document: document.to_string(),
                 env: Default::default(),
             },
+            steery_sdk::WORDS,
         )
         .expect("hook/read answers")
         .moment
@@ -160,7 +171,9 @@ mod tests {
     }
 
     /// The transcript a moment names is a harness's word: only an absolute `.jsonl` filed
-    /// under that conversation's own id is taken, never a path that names another file.
+    /// under that conversation's own id is taken, never a path that names another file. A
+    /// fork's start, pi's or omp's branch, names the conversation it came from by its
+    /// transcript; any other start names none.
     #[test]
     fn an_identifier_from_a_harness_cannot_name_a_file_elsewhere() {
         let id = "01a0a013-c9d7-7000-8000-000000000001";
@@ -182,6 +195,23 @@ mod tests {
             "/home/a/.ssh/id_ed25519".to_owned(),
         ] {
             assert_eq!(named(&refused), None, "{refused} was taken");
+        }
+        let parent = "01a0a013-c9d7-7000-8000-000000000002";
+        let file = format!("/home/a/.omp/agent/sessions/--w--/2026-10-09T10-00-00-000Z_{parent}.jsonl");
+        let forked = |reason: &str| {
+            read_one(
+                Harness::Omp,
+                "SessionStart",
+                json!({"session_id": id, "reason": reason, "previous_session_file": file}),
+            )
+            .expect("a start")
+            .forked_from
+        };
+        for reason in ["fork", "branch"] {
+            assert_eq!(forked(reason).as_deref(), Some(parent), "{reason}");
+        }
+        for reason in ["resume", "new", "compact"] {
+            assert_eq!(forked(reason), None, "{reason}");
         }
     }
 

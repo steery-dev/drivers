@@ -1,10 +1,12 @@
 //! `setup/plan`: what sets the harness up for Steery, each an entry the runtime writes and
-//! records: Steery's skill; Steery's plugin, which is a loader in the harness's
-//! `extensions` folder and the copy of Steery's extension it runs, kept in the runtime's
-//! config folder and named there; and Steery's MCP server. omp reads that from its
-//! `mcp.json`; pi lets an extension register a server for each conversation, so in pi the
-//! plugin carries it, with headers naming the conversation. Neither runs hook commands:
-//! the plugin says the moments over the door.
+//! records: Steery's skill, which the plugin puts whole into every turn's system prompt,
+//! kept beside the plugin's copy in the runtime's config folder and never in the harness's
+//! own skills folder, where the harness would list it a second time; Steery's plugin,
+//! which is a loader in the harness's `extensions` folder and the copy of Steery's
+//! extension it runs, kept in the runtime's config folder and named there; and Steery's MCP
+//! server. omp reads that from its `mcp.json`; pi lets an extension register a server for
+//! each conversation, so in pi the plugin carries it, with headers naming the conversation.
+//! Neither runs hook commands: the plugin says the moments over the door.
 
 use std::path::{Path, PathBuf};
 
@@ -28,13 +30,14 @@ const LOADER: &str = include_str!("../plugin/loader.ts");
 /// Steery's MCP server, as the entries name it.
 const SERVER: &str = "steery";
 
-/// The plan for this machine. Whether the release found is one Steery speaks to is the
-/// runtime's to say, from `initialize`'s minimum.
+/// The plan for this machine, under the protocol `picked`. Whether the release found is one
+/// Steery speaks to is the runtime's to say, from `initialize`'s minimum.
 pub async fn plan(
     harness: Harness,
     home: &Path,
     config: &Path,
     setup: Setup,
+    picked: u32,
 ) -> Result<Planned, Error> {
     let refused = |why: String| Planned {
         found: None,
@@ -68,15 +71,15 @@ pub async fn plan(
             needs: Vec::new(),
         });
     };
-    // omp and pi read the same variable for their folder, and one folder holds one skill
-    // and one plugin: where both are installed there, neither is set up.
+    // omp and pi read the same variable for their folder, and one folder holds one plugin
+    // loader: where both are installed there, neither is set up.
     let other = harness.other();
     if other.binary().is_some() && other.root(home).as_ref() == Ok(&root) {
         return Ok(refused(format!(
             "pi and omp are both installed here, and both keep their configuration in {}. Steery \
-             writes the skill as one file, and that file cannot belong to both. Unset the \
-             variable that moved them together, or give each one its own directory. Then run \
-             setup again.",
+             writes its plugin's loader there as one file, and that file cannot belong to both. \
+             Unset the variable that moved them together, or give each one its own directory. \
+             Then run setup again.",
             root.display()
         )));
     }
@@ -96,8 +99,10 @@ pub async fn plan(
         root: root.clone(),
     };
     let named = config.join("extension").join(harness.id());
-    let skill = root.join("skills/steery/SKILL.md");
-    let extension = extension(harness, &setup, &skill)?;
+    let skill = config
+        .join("extension")
+        .join(format!("{}-SKILL.md", harness.id()));
+    let extension = extension(harness, &setup, &skill, picked)?;
     let digest = Sha256::digest(extension.as_bytes());
     let digest: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     let copy = config
@@ -197,8 +202,10 @@ fn pi_entry(setup: &Setup) -> Value {
 
 /// Steery's extension for the harness, its placeholders filled: the harness; the door's
 /// address; the MCP entry the extension registers, none in omp, which reads Steery's
-/// from its own `mcp.json`; and the skill's file, which goes into every turn's system prompt.
-fn extension(harness: Harness, setup: &Setup, skill: &Path) -> Result<String, Error> {
+/// from its own `mcp.json`; the skill's file, which goes into every turn's system prompt;
+/// and whether the protocol `picked` has Steery's words fitted to the harness (17), which
+/// shapes the turn's end the plugin says.
+fn extension(harness: Harness, setup: &Setup, skill: &Path, picked: u32) -> Result<String, Error> {
     let door = setup.door.as_str();
     if door.is_empty() || door.contains(['"', '\\', '\n', '\r']) {
         return Err(Error::invalid(format!(
@@ -211,11 +218,16 @@ fn extension(harness: Harness, setup: &Setup, skill: &Path) -> Result<String, Er
     };
     // Written into a "…" literal: the JSON's own quotes and escapes are escaped once more.
     let mcp = mcp.replace('\\', "\\\\").replace('"', "\\\"");
+    let words = match steery_driver_common::program::words(picked) {
+        true => "yes",
+        false => "no",
+    };
     Ok(EXTENSION
         .replace("__STEERY_HARNESS__", harness.id())
         .replace("__STEERY_DOOR__", door)
         .replace("__STEERY_MCP__", &mcp)
-        .replace("__STEERY_SKILL__", literal(skill)?))
+        .replace("__STEERY_SKILL__", literal(skill)?)
+        .replace("__STEERY_WORDS__", words))
 }
 
 /// The `mcp.json` files pi reads that hold a `steery` server of a person's own, which
@@ -320,8 +332,8 @@ pub(crate) mod tests {
     }
 
     /// pi and omp read the same variables, so a machine that moves one moves both, and the
-    /// skill Steery writes is one file that cannot belong to two harnesses. Neither is set
-    /// up on the guess that the folder is really the other's.
+    /// plugin's loader Steery writes is one file that cannot belong to two harnesses. Neither
+    /// is set up on the guess that the folder is really the other's.
     #[test]
     fn two_harnesses_in_one_directory_are_both_refused() {
         let _held = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
@@ -347,19 +359,33 @@ pub(crate) mod tests {
         }
         for harness in [Harness::Omp, Harness::Pi] {
             let planned = runtime
-                .block_on(plan(harness, &dir, &dir.join("config"), given()))
+                .block_on(plan(harness, &dir, &dir.join("config"), given(), steery_sdk::WORDS))
                 .unwrap();
             let why = planned.refused.expect("refused with a reason");
             assert!(why.contains(&shared.display().to_string()), "{why}");
             assert!(planned.entries.is_empty(), "nothing is written for either");
         }
-        // Only one installed: the folder is that one's alone.
+        // Only one installed: the folder is that one's alone. The skill stays out of its
+        // skills folder, beside the plugin's copy that puts it into the prompt.
         std::fs::remove_file(bin.join("pi")).unwrap();
         let planned = runtime
-            .block_on(plan(Harness::Omp, &dir, &dir.join("config"), given()))
+            .block_on(plan(Harness::Omp, &dir, &dir.join("config"), given(), steery_sdk::WORDS))
             .unwrap();
         assert_eq!(planned.refused, None);
-        assert!(!planned.entries.is_empty());
+        let skill = planned
+            .entries
+            .iter()
+            .find(|entry| entry.carries == [Part::Skill])
+            .expect("the skill");
+        assert_eq!(skill.path, dir.join("config/extension/omp-SKILL.md"));
+        let copy = planned
+            .entries
+            .iter()
+            .find(|entry| entry.path.extension().is_some_and(|ext| ext == "ts") && entry.path.starts_with(dir.join("config")))
+            .expect("the plugin's copy");
+        let source = copy.value.as_str().unwrap();
+        assert!(source.contains(&format!("const SKILL: string = \"{}\";", skill.path.display())));
+        assert!(source.contains("const PICKED: string = \"yes\";"));
         unsafe {
             std::env::set_var("PATH", path);
             std::env::remove_var("PI_CODING_AGENT_DIR");
@@ -397,7 +423,7 @@ pub(crate) mod tests {
             std::env::remove_var("PI_INSTALL_DIR");
         }
         let missing = runtime
-            .block_on(plan(Harness::Omp, &home, &home.join("config"), given()))
+            .block_on(plan(Harness::Omp, &home, &home.join("config"), given(), steery_sdk::WORDS))
             .unwrap();
         assert!(missing.found.is_none());
         let install = missing.install.expect("omp's installer is offered");
@@ -412,7 +438,7 @@ pub(crate) mod tests {
         std::fs::write(&omp, "#!/bin/sh\necho 99.0.0\n").unwrap();
         std::fs::set_permissions(&omp, std::fs::Permissions::from_mode(0o755)).unwrap();
         let found = runtime
-            .block_on(plan(Harness::Omp, &home, &home.join("config"), given()))
+            .block_on(plan(Harness::Omp, &home, &home.join("config"), given(), steery_sdk::WORDS))
             .unwrap();
         assert_eq!(found.found.map(|found| found.binary), Some(omp));
         assert_eq!(found.install, None);
@@ -465,7 +491,7 @@ pub(crate) mod tests {
         }
         let offered = || {
             runtime
-                .block_on(plan(Harness::Pi, &home, &home.join("config"), given()))
+                .block_on(plan(Harness::Pi, &home, &home.join("config"), given(), steery_sdk::WORDS))
                 .unwrap()
                 .install
                 .is_some()
@@ -486,7 +512,7 @@ pub(crate) mod tests {
                 std::time::Instant::now()
             };
             let planned = async {
-                let planned = plan(Harness::Pi, &home, &home.join("config"), given()).await;
+                let planned = plan(Harness::Pi, &home, &home.join("config"), given(), steery_sdk::WORDS).await;
                 (planned, std::time::Instant::now())
             };
             let ((planned, at), ticked) = tokio::join!(planned, ticked);

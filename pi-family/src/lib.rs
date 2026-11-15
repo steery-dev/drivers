@@ -85,7 +85,7 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_bare(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_words(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
@@ -141,7 +141,7 @@ impl Program for Driver {
                     }
                 };
                 let (planned, lacking) = tokio::join!(
-                    setup::plan(harness, &place.home, &place.config, asked),
+                    setup::plan(harness, &place.home, &place.config, asked, place.protocol),
                     lacking,
                 );
                 let mut planned = planned?;
@@ -187,7 +187,11 @@ impl Program for Driver {
                 }
                 result(fold)
             }
-            method::HOOK_READ => result(hooks::read(self.store()?, steery_sdk::params(params)?)?),
+            method::HOOK_READ => result(hooks::read(
+                self.store()?,
+                steery_sdk::params(params)?,
+                self.place()?.protocol,
+            )?),
             method::MCP_LIST => result(mcp::list(
                 harness,
                 self.store()?.root(),

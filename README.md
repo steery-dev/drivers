@@ -475,7 +475,9 @@ What each driver does:
   driver still gives the tokens that an abandoned branch used, once, as the `tokens` of each of
   its responses.
 - **Setup** (`setup/plan`). The plan has these entries:
-  - the skill
+  - the skill, `extension/<harness>-SKILL.md` in the runtime's config folder, beside the
+    plugin's copy. It stays out of the harness's own `skills/` folder, where the harness would
+    list it a second time (`skill: prompt`, protocol 17).
   - Steery's plugin
   - in omp, the MCP entry in `mcp.json`
 
@@ -493,9 +495,21 @@ What each driver does:
   the body to every turn's system prompt as `<skill name="steery">…</skill>`, the same text on
   each turn. A missing file adds nothing. Once a moment's answer says `quiet: true` (a chat's
   session, told nothing of Steery), the plugin adds the block no more in that conversation. A
-  bare turn (`--steery-bare`, in omp and pi) gets no block.
+  bare turn (`--steery-bare`, in omp and pi) and a sub-agent's copy (its lead's words reach
+  it) get no block.
 - **Moments** (`hook/read`). The plugin forwards each moment that the harness gives it over the
-  door. The driver reads it as a Moment.
+  door. The driver reads it as a Moment. A start says the harness's `reason` and the
+  transcript it came from. At protocol 17 a fork's start (pi's `fork`, omp's `fork` switch and
+  `branch`) names its parent (`forked_from`). omp's switch to another conversation and every
+  compaction (Steery's or the harness's) say a start too: the context is fresh, so the runtime
+  owes its start's words again. The prompt hook says `context` and no `notice` (17).
+- **Turn ends** (`settle`). At protocol 17 the plugin settles every turn end the harness
+  offers, with its `outcome` (`finished`, `failed`, `interrupted`) and `continued`. The runtime
+  decides from its own record whether a turn asked, waits, was parked, failed, or is a
+  sub-agent's, and says nothing then. The plugin wraps the words it gets back in
+  `<system-reminder reason="steery">`, as every other moment's. Against a runtime on 16 the
+  plugin sends 16's settle (`asked`, `parked`, `waiting` all false), only after a turn that
+  stopped by itself, not for a sub-agent, and leaves the words as the runtime wraps them.
 - **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
   `terminal`).
   - `held`: there is no registry, so the runtime looks for processes. In pi, the runtime also
@@ -668,9 +682,10 @@ that it outranks, so that the way just given is the one Claude Code uses:
   read, as in omp.
 - **Setup** (`setup/plan`). The plan has these entries:
   - Steery's MCP entry in `.claude.json` (beside the root, when the root is `~/.claude`)
-  - the skill in `skills/steery/SKILL.md`
+  - the skill in `skills/steery/SKILL.md`, which Claude Code lists (`skill: listed`)
   - one hook group per event in `settings.json`, at `/hooks/<event>/-`, beside the person's
-    own groups. Steery's group runs `steery hook claude-code <event>`
+    own groups. Steery's group runs `steery hook claude-code <event>`. At protocol 17 the
+    events include `SubagentStop` (`sub_agent_end`) and `PreCompact` (`compacting`).
 
   `found.release` is what `claude --version` says.
 - **Moments** (`hook/read`, `hook/answer`). A hook's document becomes a Moment, with the state
@@ -678,11 +693,24 @@ that it outranks, so that the way just given is the one Claude Code uses:
   - the model (`SessionStart`'s `model`, `PostModelSwitch`'s `to_model`)
   - the effort (`effort.level`)
   - at `StopFailure`, the failure (`error`, with its words in `last_assistant_message`)
+  - at protocol 17, a fork's parent (`forked_from`) at a `SessionStart` whose `source` is
+    `fork`. The document names none; the fork's transcript, which opens with the parent's
+    records, does.
+  - at protocol 17, no `prompt` for words that are nobody's instruction: a background task's
+    report (`<task-notification>`), or a `source` of `loop_wakeup`, `schedule_wakeup` or
+    `poll_event` (Claude Code 2.1.325 fills `source` only for `poll_event`)
+  - a `SubagentStop` with an empty `agent_type` (an agent Claude Code runs for itself) gives
+    no moment
 
   The documents carry no time. `PreCompact`/`PostCompact` carry no compaction id or tokens. Thus
-  compactions come only from the transcript. Steery's answer becomes what Claude Code reads:
-  - `hookSpecificOutput.additionalContext`
-  - a `Stop` that keeps the turn running (`decision: block`)
+  compactions come only from the transcript. Every hook that says `context` declares
+  `room: 10000` at protocol 17: Claude Code keeps 10,000 characters whole and replaces a longer
+  paragraph with a 2,000-character preview. No hook declares `notice` at 17. Steery's answer
+  becomes what Claude Code reads:
+  - `hookSpecificOutput.additionalContext`, at a `Stop` or `SubagentStop` too, where it keeps
+    the turn running as hook feedback (Claude Code 2.1.163)
+  - at `PreCompact`, the plain output that Claude Code reads as its instructions for the
+    summary
   - a `PreToolUse` or `PermissionRequest` decision
   - the conversation's lead, written to `CLAUDE_ENV_FILE` (`append`)
 
