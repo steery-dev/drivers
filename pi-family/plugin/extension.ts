@@ -1516,15 +1516,16 @@ export const surfaces = {
   // come in (`input`, below). pi refuses a flag nobody registered before anything
   // starts, which is the runtime's sign this copy is absent. omp is given none: the
   // runtime checks a pick against omp's own catalog before the run starts.
-  // `steery-bare`: a bare run, which gets no MCP entry ([`registers`]).
-  flags:
-    HARNESS === "pi"
+  // `steery-bare`, in both: a bare run ([`bare`]).
+  flags: [
+    ...(HARNESS === "pi"
       ? [
           { name: "steery-model", description: "The model that Steery's runtime picked", type: "string" as const },
           { name: "steery-thinking", description: "The thinking level that Steery's runtime picked", type: "string" as const },
-          { name: "steery-bare", description: "A bare run: no MCP entry of Steery's", type: "boolean" as const },
         ]
-      : [],
+      : []),
+    { name: "steery-bare", description: "A bare run: no skill block or MCP entry of Steery's", type: "boolean" as const },
+  ],
 };
 
 export default function steery(pi: Api, carried: Carried = {}): Running {
@@ -2372,10 +2373,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * pi: whether this conversation gets Steery's MCP entry: not in a bare run
-   * (`--steery-bare`), whose only tool is the shell and which loads no MCP support.
+   * A bare run (`--steery-bare`): its system prompt alone, with no skill block of Steery's,
+   * and in pi its only tool the shell, with no MCP support.
    */
-  const registers = (): boolean => REGISTERS && pi.getFlag?.("steery-bare") !== true;
+  const bare = (): boolean => pi.getFlag?.("steery-bare") === true;
+  /** pi: whether this conversation gets Steery's MCP entry: not in a bare run. */
+  const registers = (): boolean => REGISTERS && !bare();
 
   /**
    * pi: Steery's MCP entry for this conversation, with headers naming it. pi connects it
@@ -3369,7 +3372,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // An answer that did not come in time leaves the session as it was.
     if (quietOf(answer)) untold = true;
     const line = sayOf(answer);
-    const systemPrompt = skill === undefined || untold ? undefined : skilled(event.systemPrompt, skill);
+    const systemPrompt = skill === undefined || untold || bare() ? undefined : skilled(event.systemPrompt, skill);
     if (!line && systemPrompt === undefined) return undefined;
     return {
       ...(systemPrompt === undefined ? {} : { systemPrompt }),
