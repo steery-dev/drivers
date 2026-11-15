@@ -142,6 +142,7 @@ impl Driver {
                 .into_iter()
                 .chain(crate::turn::hooks::table(protocol))
                 .collect(),
+            bare: false,
         }
     }
 }

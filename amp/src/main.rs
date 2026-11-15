@@ -188,5 +188,6 @@ fn info() -> wire::HarnessInfo {
             acts: vec![harness::Act::Continue, harness::Act::New],
         },
         hooks: Vec::new(),
+        bare: false,
     }
 }

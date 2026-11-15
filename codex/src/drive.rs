@@ -293,6 +293,7 @@ impl Drive {
             model: start.model,
             thinking: start.thinking,
             inbox: Some(start.folder.join("inbox")),
+            bare: start.bare.map(|bare| bare.system),
         };
         let mut argv = vec![program.to_string_lossy().into_owned(), "turn".to_owned()];
         argv.extend(asked.args());
@@ -1365,6 +1366,64 @@ pub fn reader_read(read: ReaderRead) -> Result<Text, Error> {
             failed.unwrap_or_else(|| "the reader gave no text that is an answer".into()),
         )
     })
+}
+
+/// Every Codex feature a bare turn takes away: each tool but the shell, plugins and apps
+/// with their MCP servers, and memories and skill search. `hooks` stay: Steery's are among
+/// them.
+const BARE_TAKEN: &[&str] = &[
+    "apply_patch_freeform",
+    "view_image",
+    "image_generation",
+    "browser_use",
+    "browser_use_external",
+    "computer_use",
+    "in_app_browser",
+    "plugins",
+    "remote_plugin",
+    "apps",
+    "web_search_request",
+    "standalone_web_search",
+    "multi_agent",
+    "goals",
+    "sleep_tool",
+    "memories",
+    "skill_search",
+    "skill_mcp_dependency_install",
+    "tool_suggest",
+];
+
+/// The configuration a bare turn (`start`'s `bare`) opens its thread with, as dotted keys
+/// the way `-c` takes them, in `cwd`: no project `AGENTS.md` (`project_doc_max_bytes`;
+/// Codex 0.159 still reads `$CODEX_HOME/AGENTS.md`, which no setting turns off), no
+/// skills or their instructions, no web search, each feature
+/// of [`BARE_TAKEN`] this Codex knows taken away, every MCP server it would reach turned
+/// off ([`servers`]), and the network kept for `steery` in a `workspace-write` sandbox.
+pub(crate) async fn bare_config(codex: &Path, cwd: &Path) -> Result<Value, Error> {
+    let known = features(codex).await?;
+    let off: Vec<&str> = BARE_TAKEN
+        .iter()
+        .copied()
+        .filter(|feature| known.iter().any(|known| known == feature))
+        .collect();
+    let mut config = serde_json::Map::from_iter([
+        ("project_doc_max_bytes".to_owned(), Value::from(0)),
+        ("developer_instructions".to_owned(), Value::from("")),
+        ("skills.bundled.enabled".to_owned(), Value::from(false)),
+        ("skills.include_instructions".to_owned(), Value::from(false)),
+        ("web_search".to_owned(), Value::from("disabled")),
+        (
+            "sandbox_workspace_write.network_access".to_owned(),
+            Value::from(true),
+        ),
+    ]);
+    for server in servers(codex, cwd, &off).await? {
+        config.insert(format!("mcp_servers.{server}.enabled"), Value::from(false));
+    }
+    for feature in off {
+        config.insert(format!("features.{feature}"), Value::from(false));
+    }
+    Ok(Value::Object(config))
 }
 
 /// Every Codex feature that would let captured text reach this machine or the network.

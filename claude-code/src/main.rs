@@ -152,7 +152,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_asking(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_bare(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
@@ -184,7 +184,7 @@ impl Program for ClaudeCode {
                 tint: Some("#c96a4a".into()),
                 mark: Some(MARK.into()),
             },
-            harness: Some(Box::new(info())),
+            harness: Some(Box::new(info(self.place()?.protocol))),
             machine: None,
             settings: Vec::new(),
         })
@@ -278,8 +278,8 @@ impl Program for ClaudeCode {
     }
 }
 
-/// Claude Code as Steery reads it.
-fn info() -> wire::HarnessInfo {
+/// Claude Code as Steery reads it, under the protocol picked.
+fn info(protocol: u32) -> wire::HarnessInfo {
     wire::HarnessInfo {
         levels: wire::Level::ALL.to_vec(),
         // The first release whose `claude agents --json --all` lists a background session
@@ -351,6 +351,7 @@ fn info() -> wire::HarnessInfo {
             ],
         },
         hooks: hooks::table(),
+        bare: steery_driver_common::program::bare(protocol),
     }
 }
 
@@ -442,7 +443,7 @@ mod tests {
                 tint: Some("#c96a4a".into()),
                 mark: Some(super::MARK.into()),
             },
-            harness: Some(Box::new(super::info())),
+            harness: Some(Box::new(super::info(steery_sdk::BARE))),
             machine: None,
             settings: Vec::new(),
         };

@@ -109,6 +109,7 @@ impl Driver {
                 touches: false,
             },
             hooks: crate::turn::hooks::table(protocol),
+            bare: false,
         }
     }
 

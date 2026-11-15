@@ -3,7 +3,8 @@
 //! `thread/resume` or `thread/fork`, then `turn/start` with the words — every message it
 //! sends written verbatim to standard output, and out once `turn/completed` says the
 //! turn's last turn ended. What runs is the conversation the Codex app would have run: the
-//! person's configuration, MCP servers, hooks and skills; it is in the app's sidebar.
+//! person's configuration, MCP servers, hooks and skills; it is in the app's sidebar. A
+//! bare turn keeps only the hooks, the shell and its own system prompt ([`opening`]).
 //!
 //! While the turn runs, more words told on its inbox (a unix socket in the turn's folder)
 //! go in the way the Codex app puts them: `turn/steer` into the turn running, or
@@ -27,7 +28,8 @@ use crate::appserver::{self, AppServer};
 /// How long a caller at the inbox has to finish writing its words.
 const WORDS_WITHIN: Duration = Duration::from_secs(10);
 
-/// What a turn is asked to do, as its command line says it.
+/// What a turn is asked to do, as its command line says it. `bare`: the system prompt of
+/// a bare turn (`start`'s `bare`).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Asked {
     pub codex: PathBuf,
@@ -37,6 +39,7 @@ pub struct Asked {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub inbox: Option<PathBuf>,
+    pub bare: Option<String>,
 }
 
 impl Asked {
@@ -51,7 +54,11 @@ impl Asked {
         if self.worktree {
             args.push("--worktree".into());
         }
-        for (flag, value) in [("--model", &self.model), ("--thinking", &self.thinking)] {
+        for (flag, value) in [
+            ("--model", &self.model),
+            ("--thinking", &self.thinking),
+            ("--bare", &self.bare),
+        ] {
             if let Some(value) = value {
                 args.push(flag.into());
                 args.push(value.clone());
@@ -74,13 +81,14 @@ impl Asked {
                 "--model" => asked.model = Some(value("--model")?),
                 "--thinking" => asked.thinking = Some(value("--thinking")?),
                 "--inbox" => asked.inbox = Some(PathBuf::from(value("--inbox")?)),
+                "--bare" => asked.bare = Some(value("--bare")?),
                 _ if asked.act.is_empty() => asked.act = arg,
                 _ if asked.id.is_none() => asked.id = Some(arg),
                 other => return Err(format!("unexpected argument {other}")),
             }
         }
         if asked.codex.as_os_str().is_empty() || asked.act.is_empty() {
-            return Err("usage: turn --codex <binary> <continue|fork|new> [id] [--worktree] [--model m] [--thinking t] [--inbox path]".into());
+            return Err("usage: turn --codex <binary> <continue|fork|new> [id] [--worktree] [--model m] [--thinking t] [--bare system] [--inbox path]".into());
         }
         Ok(asked)
     }
@@ -105,8 +113,17 @@ pub async fn run(asked: Asked) -> Result<(), String> {
     let mut server = AppServer::open(command, true)
         .await
         .map_err(|e| e.to_string())?;
-    let sandbox = sandbox(&mut server, place).await;
-    let (method, params) = opening(&asked.act, asked.id.as_deref(), place, sandbox)?;
+    let sandbox = sandbox(&mut server, place, asked.bare.is_some()).await;
+    let bare = match &asked.bare {
+        Some(system) => Some((
+            system.as_str(),
+            crate::drive::bare_config(&asked.codex, place)
+                .await
+                .map_err(|e| e.to_string())?,
+        )),
+        None => None,
+    };
+    let (method, params) = opening(&asked.act, asked.id.as_deref(), place, sandbox, bare)?;
     let opened = server
         .call(method, params)
         .await
@@ -228,12 +245,16 @@ fn ends(message: &Value, thread: &str, turn: &str) -> bool {
         && message.pointer("/params/turn/id").and_then(Value::as_str) == Some(turn)
 }
 
-/// The request that opens the thread for an act, in `place`, in the `sandbox` named.
+/// The request that opens the thread for an act, in `place`, in the `sandbox` named, and
+/// for a bare turn on its system prompt alone (`baseInstructions`, which replaces Codex's
+/// own) and its configuration ([`crate::drive::bare_config`]): the same for a start, a
+/// fork and a resume.
 fn opening(
     act: &str,
     id: Option<&str>,
     place: &Path,
     sandbox: Option<&str>,
+    bare: Option<(&str, Value)>,
 ) -> Result<(&'static str, Value), String> {
     let cwd = place.to_string_lossy();
     let (method, mut params) = match (act, id) {
@@ -252,6 +273,10 @@ fn opening(
     if let Some(sandbox) = sandbox {
         params["sandbox"] = json!(sandbox);
     }
+    if let Some((system, config)) = bare {
+        params["baseInstructions"] = json!(system);
+        params["config"] = config;
+    }
     Ok((method, params))
 }
 
@@ -259,8 +284,10 @@ fn opening(
 /// for `place`, names one, else `workspace-write`, the sandbox Codex gives a project its
 /// person trusts and the Codex app gives each thread it starts. Without it Codex runs a
 /// folder nobody trusted in its `read-only` sandbox, and the turn writes nothing (2026-11-08:
-/// asked to write a file, a Steery turn wrote nothing in 3 of 3 tries).
-async fn sandbox(server: &mut AppServer, place: &Path) -> Option<&'static str> {
+/// asked to write a file, a Steery turn wrote nothing in 3 of 3 tries). A `bare` turn
+/// needs the network for `steery`, which only `workspace-write` (with its network on) and
+/// `danger-full-access` give: it takes `workspace-write` over any other the person named.
+async fn sandbox(server: &mut AppServer, place: &Path, bare: bool) -> Option<&'static str> {
     let read = server
         .call(
             "config/read",
@@ -268,9 +295,11 @@ async fn sandbox(server: &mut AppServer, place: &Path) -> Option<&'static str> {
         )
         .await
         .ok()?;
-    read.pointer("/config/sandbox_mode")
-        .is_none_or(Value::is_null)
-        .then_some("workspace-write")
+    match read.pointer("/config/sandbox_mode").and_then(Value::as_str) {
+        None => Some("workspace-write"),
+        Some("danger-full-access") => None,
+        Some(_) => bare.then_some("workspace-write"),
+    }
 }
 
 /// A new worktree of the repository `cwd` is in, where Codex makes its own, and the folder
@@ -330,24 +359,32 @@ mod tests {
     #[test]
     fn each_act_opens_its_thread() {
         let place = Path::new("/w");
-        let (method, params) = opening("new", None, place, Some("workspace-write")).unwrap();
+        let (method, params) = opening("new", None, place, Some("workspace-write"), None).unwrap();
         assert_eq!(
             (method, params["sandbox"].as_str()),
             ("thread/start", Some("workspace-write"))
         );
-        let (method, params) = opening("fork", Some("t"), place, None).unwrap();
+        let (method, params) = opening("fork", Some("t"), place, None, None).unwrap();
         assert_eq!(
             (method, params["cwd"].as_str()),
             ("thread/fork", Some("/w"))
         );
         assert!(params.get("sandbox").is_none());
-        let (method, params) =
-            opening("continue", Some("t"), place, Some("workspace-write")).unwrap();
+        let (method, params) = opening(
+            "continue",
+            Some("t"),
+            place,
+            Some("workspace-write"),
+            Some(("BARE", json!({"project_doc_max_bytes": 0}))),
+        )
+        .unwrap();
         assert_eq!(method, "thread/resume");
         assert!(params.get("cwd").is_none());
         assert_eq!(params["sandbox"], "workspace-write");
-        assert!(opening("continue", None, place, None).is_err());
-        assert!(opening("hand", Some("t"), place, None).is_err());
+        assert_eq!(params["baseInstructions"], "BARE");
+        assert_eq!(params["config"]["project_doc_max_bytes"], 0);
+        assert!(opening("continue", None, place, None, None).is_err());
+        assert!(opening("hand", Some("t"), place, None, None).is_err());
     }
 
     #[test]
@@ -360,6 +397,7 @@ mod tests {
             model: Some("gpt-6".into()),
             thinking: Some("high".into()),
             inbox: Some("/f/inbox".into()),
+            bare: Some("Answer only: BARE".into()),
         };
         assert_eq!(Asked::parse(asked.args().into_iter()).unwrap(), asked);
         assert!(Asked::parse(["new".to_owned()].into_iter()).is_err());

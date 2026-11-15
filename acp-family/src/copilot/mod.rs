@@ -279,5 +279,6 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             ],
         },
         hooks: hooks::table(protocol),
+        bare: false,
     }
 }

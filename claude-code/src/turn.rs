@@ -93,7 +93,16 @@ const ENDS: [&str; 2] = ["Stop", "StopFailure"];
 /// turn's process, which only the session it starts carries on ([`follow`]).
 const STEERY: &str = "STEERY_";
 
-/// A turn, as `start` plans it and the turn mode reads it back.
+/// The settings' variables of a bare turn's session: Claude Code loads no `CLAUDE.md`
+/// (`CLAUDE_CODE_DISABLE_CLAUDE_MDS`, 2.1.317) and no auto-memory. Through the settings, as
+/// Steery's own variables are, so a kept job wakes with them.
+const BARE_ENV: [(&str, &str); 2] = [
+    ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
+    ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
+];
+
+/// A turn, as `start` plans it and the turn mode reads it back. `bare`: the system prompt
+/// of a bare turn (`start`'s `bare`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
     pub binary: PathBuf,
@@ -103,6 +112,7 @@ pub struct Turn {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub reads: Vec<PathBuf>,
+    pub bare: Option<String>,
 }
 
 impl Turn {
@@ -124,6 +134,9 @@ impl Turn {
         }
         for folder in &self.reads {
             args.extend(["--reads".into(), text(folder)?.to_owned()]);
+        }
+        if let Some(system) = &self.bare {
+            args.extend(["--bare".into(), system.clone()]);
         }
         Ok(args)
     }
@@ -148,6 +161,7 @@ impl Turn {
             model: None,
             thinking: None,
             reads: Vec::new(),
+            bare: None,
         };
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -156,6 +170,7 @@ impl Turn {
                 "--model" => turn.model = Some(value()?),
                 "--thinking" => turn.thinking = Some(value()?),
                 "--reads" => turn.reads.push(PathBuf::from(value()?)),
+                "--bare" => turn.bare = Some(value()?),
                 id if turn.id.is_none() && !id.starts_with('-') => turn.id = Some(id.to_owned()),
                 other => return Err(format!("a turn does not take the argument {other}")),
             }
@@ -174,6 +189,11 @@ impl Turn {
     /// session that names the flag at all. A `continue` of a session Claude Code keeps a
     /// background job for (`kept`, [`Kept`]) is `--bg --resume <id>` alone: Claude Code
     /// wakes it with the options the job saved, and starts a copy for any flag passed.
+    /// A bare turn runs on its system prompt alone (`--system-prompt`, which Claude Code
+    /// records once and sends on every resume), with `Bash` its only tool, no MCP server,
+    /// and no skill or command; its settings keep `CLAUDE.md` and auto-memory out
+    /// ([`BARE_ENV`]). Not `--bare` or `--safe-mode`: both drop hooks, Steery's among them,
+    /// and `--bare` reads no plan's sign-in. A kept job wakes with these flags, as saved.
     fn launching(&self, bypass: bool, kept: bool) -> Result<Vec<String>, String> {
         let mut args: Vec<String> = vec!["--bg".into()];
         if let (Act::Continue, Some(id), true) = (self.act, self.id.as_deref(), kept) {
@@ -210,6 +230,20 @@ impl Turn {
                 .is_none_or(|model| !efforts(model).is_empty())
         {
             args.extend(["--effort".into(), thinking.clone()]);
+        }
+        if let Some(system) = &self.bare {
+            args.extend(["--system-prompt".into(), system.clone()]);
+            args.extend(
+                [
+                    "--tools",
+                    "Bash",
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    r#"{"mcpServers":{}}"#,
+                    "--disable-slash-commands",
+                ]
+                .map(String::from),
+            );
         }
         Ok(args)
     }
@@ -342,14 +376,17 @@ async fn follow(
     // The settings' `env` outranks the supervisor's (2.1.317). A session Claude Code keeps
     // a background job for is given nothing ([`Kept`]): it goes on with the settings its
     // own launch gave it, which Claude Code gives it again whenever it wakes it.
-    let steery: serde_json::Map<String, Value> = std::env::vars_os()
+    let mut env: serde_json::Map<String, Value> = std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| name.starts_with(STEERY))
         .map(|(name, value)| (name, Value::String(value)))
         .collect();
     let mut command = tokio::process::Command::new(&turn.binary);
-    for name in steery.keys() {
+    for name in env.keys() {
         command.env_remove(name);
+    }
+    if turn.bare.is_some() {
+        env.extend(BARE_ENV.map(|(name, value)| (name.to_owned(), Value::from(value))));
     }
     command.stdin(std::process::Stdio::null());
     command.args(turn.launching(bypass, kept.is_some())?);
@@ -370,7 +407,7 @@ async fn follow(
     };
     let keyed = through_helper(key, gateway, marker, signed);
     if kept.is_none()
-        && let Some(settings) = settings(heard.as_ref(), Some(&steery), keyed)?
+        && let Some(settings) = settings(heard.as_ref(), Some(&env), keyed)?
     {
         command.args(["--settings".to_owned(), settings]);
     }
@@ -606,6 +643,8 @@ struct Kept {
     model: Option<String>,
     effort: Option<String>,
     provider: serde_json::Map<String, Value>,
+    /// Its flags name a system prompt of their own: a bare turn started it.
+    bare: bool,
 }
 
 impl Kept {
@@ -654,14 +693,23 @@ impl Kept {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default(),
+            bare: flags.contains(&"--system-prompt"),
         }))
     }
 
     /// Whether the job runs the turn's pick anyway: the model its flags name, else its
-    /// provider's `ANTHROPIC_MODEL`, and the effort its flags name. Any other pick is
-    /// refused in Claude Code's own words for it ([`agents::OWN_OPTIONS`]), which read as
-    /// `selection-unsupported`: woken, the job would run its own, and a fork takes another.
+    /// provider's `ANTHROPIC_MODEL`, and the effort its flags name, and bare where the
+    /// turn is. Any other pick is refused in Claude Code's own words for it
+    /// ([`agents::OWN_OPTIONS`]), which read as `selection-unsupported`: woken, the job
+    /// would run its own, and a fork takes another.
     fn takes(&self, turn: &Turn) -> Result<(), String> {
+        if turn.bare.is_some() && !self.bare {
+            return Err(format!(
+                "background session {} {}: it runs Claude Code's own system prompt, not a bare one",
+                self.job,
+                agents::OWN_OPTIONS
+            ));
+        }
         let runs = self
             .model
             .as_deref()
@@ -785,7 +833,8 @@ fn through_helper(key: bool, gateway: bool, marker: bool, signed: Option<bool>) 
 
 /// The launch's `--settings`, none where it has nothing to say: the hooks that hand the
 /// turn's end back ([`Heard`]), Steery's variables the session's processes carry (`env`,
-/// [`STEERY`]), and [`KEY_HELPER`] where the turn is `keyed`.
+/// [`STEERY`], and [`BARE_ENV`] in a bare turn), and [`KEY_HELPER`] where the turn is
+/// `keyed`.
 fn settings(
     heard: Option<&Heard>,
     env: Option<&serde_json::Map<String, Value>>,
@@ -981,6 +1030,7 @@ mod tests {
             model: None,
             thinking: None,
             reads: Vec::new(),
+            bare: None,
         }
     }
 
@@ -1066,6 +1116,27 @@ mod tests {
         assert_eq!(
             haiku.launching(false, false).unwrap(),
             ["--bg", "--model", "claude-haiku-4-5-20251001"]
+        );
+        // A bare turn runs on its system prompt alone, the shell its only tool, and reads
+        // its flags back from its command line.
+        let bare = Turn {
+            bare: Some("Answer only: BARE".into()),
+            ..turn(Act::New, None, false)
+        };
+        assert_eq!(Turn::parse(bare.args().unwrap().into_iter()).unwrap(), bare);
+        assert_eq!(
+            bare.launching(false, false).unwrap(),
+            [
+                "--bg",
+                "--system-prompt",
+                "Answer only: BARE",
+                "--tools",
+                "Bash",
+                "--strict-mcp-config",
+                "--mcp-config",
+                r#"{"mcpServers":{}}"#,
+                "--disable-slash-commands"
+            ]
         );
     }
 

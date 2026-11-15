@@ -85,7 +85,7 @@ impl Driver {
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_asking(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_bare(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
@@ -114,7 +114,7 @@ impl Program for Driver {
                 tint: Some(harness.tint().into()),
                 mark: None,
             },
-            harness: Some(Box::new(harness.info())),
+            harness: Some(Box::new(harness.info(self.place()?.protocol))),
             machine: None,
             settings: Vec::new(),
         })

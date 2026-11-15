@@ -170,5 +170,6 @@ fn info() -> wire::HarnessInfo {
             acts: Vec::new(),
         },
         hooks: Vec::new(),
+        bare: false,
     }
 }
