@@ -1233,6 +1233,8 @@ type Kept = {
   calls: Call[];
   ended: Ended[];
   dialog: Dialog | null;
+  /** The runtime said this session is told nothing of Steery: no skill block goes in. */
+  untold: boolean;
 };
 
 /**
@@ -1280,6 +1282,7 @@ function restored(kept: unknown): Kept {
     calls: Array.isArray(calls) ? calls.filter(isCall) : [],
     ended: Array.isArray(ended) ? ended.filter(isEnded).slice(-ENDED_KEPT) : [],
     dialog: isDialog(dialog) ? dialog : null,
+    untold: field("untold") === true,
   };
 }
 
@@ -1540,10 +1543,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let live: Context | undefined;
   // Steery's skill block for every turn's system prompt, read as the session begins.
   let skill: string | undefined;
+  // Once a moment's answer says the runtime tells this session nothing of Steery (a chat's),
+  // it stays so: no skill block goes into its system prompt.
+  let untold = kept.untold;
   // The turn `before_agent_start` prepares, until it runs. omp calls the handler again for
   // the same turn where its own system prompt changed while the handler ran, and gives up
   // after a few such calls: the turn is answered as it was the first time, at once.
-  let preparing: { prompt: unknown; line: Promise<string | undefined> } | undefined;
+  let preparing: { prompt: unknown; answer: Promise<Frame | undefined> } | undefined;
   // omp mutates its SessionManager in place before announcing a switch. Keep the
   // identity this copy took up, not another read through that mutable object.
   let sessionId: string | undefined;
@@ -1982,6 +1988,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const ok = answered?.ok;
     const say = ok && typeof ok === "object" && "say" in ok ? ok.say : undefined;
     return typeof say === "string" && say.trim() ? say : undefined;
+  };
+
+  /** Whether a moment's answer says the runtime tells this session nothing of Steery: `ok.quiet`. */
+  const quietOf = (answered: Frame | undefined): boolean => {
+    const ok = answered?.ok;
+    return !!ok && typeof ok === "object" && "quiet" in ok && ok.quiet === true;
   };
 
   /**
@@ -3265,7 +3277,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
     reloading().delete(id);
     if (stood) {
-      ({ asked, parked, waiting, reminded, turning, began, retrying, retry, continued, dialog } = stood);
+      ({ asked, parked, waiting, reminded, turning, began, retrying, retry, continued, dialog, untold } = stood);
       says.splice(0, says.length, ...stood.says);
       ours = new Set(stood.ours);
       calls.clear();
@@ -3320,6 +3332,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       turnSays = new Set();
       settled.splice(0, settled.length);
       continued = undefined;
+      // The conversation moved to is told what its own answers say.
+      untold = false;
       const { promise, resolve } = Promise.withResolvers<void>();
       setTimeout(resolve, 0);
       await promise;
@@ -3342,9 +3356,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const turn =
       preparing !== undefined && preparing.prompt === event.prompt
         ? preparing
-        : (preparing = { prompt: event.prompt, line: prepare(event, ctx) });
-    const line = await turn.line;
-    const systemPrompt = skill === undefined ? undefined : skilled(event.systemPrompt, skill);
+        : (preparing = { prompt: event.prompt, answer: prepare(event, ctx) });
+    const answer = await turn.answer;
+    // An answer that did not come in time leaves the session as it was.
+    if (quietOf(answer)) untold = true;
+    const line = sayOf(answer);
+    const systemPrompt = skill === undefined || untold ? undefined : skilled(event.systemPrompt, skill);
     if (!line && systemPrompt === undefined) return undefined;
     return {
       ...(systemPrompt === undefined ? {} : { systemPrompt }),
@@ -3359,8 +3376,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         : {}),
     };
   });
-  /** A turn the person starts: whose it is, said to the runtime, and the line Steery has for its agent. */
-  const prepare = async (event: Event, ctx: Context): Promise<string | undefined> => {
+  /** A turn the person starts: whose it is, said to the runtime, and the runtime's answer, if it came in time. */
+  const prepare = async (event: Event, ctx: Context): Promise<Frame | undefined> => {
     // Steery's words the batch holds are taken now ([`heard`], [`took`]).
     // Whose the stretch is now. omp going on with the reminder its stop hook asked for
     // carries on whoever's turn that was.
@@ -3391,7 +3408,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (!going && said.theirs) parked = false;
     reminded = false;
     const prompt = typeof event.prompt === "string" ? { prompt: event.prompt } : {};
-    return sayOf(await awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS));
+    return awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS);
   };
   pi.on("agent_start", (_event, ctx) => {
     live = ctx;
@@ -3841,6 +3858,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         calls: [...calls.values()],
         ended: [...ended],
         dialog,
+        untold,
       };
     },
   };

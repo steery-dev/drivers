@@ -491,7 +491,8 @@ What each driver does:
 
   The plugin reads the skill's file as each conversation begins, frontmatter cut. It appends
   the body to every turn's system prompt as `<skill name="steery">…</skill>`, the same text on
-  each turn. A missing file adds nothing.
+  each turn. A missing file adds nothing. Once a moment's answer says `quiet: true` (a chat's
+  session, told nothing of Steery), the plugin adds the block no more in that conversation.
 - **Moments** (`hook/read`). The plugin forwards each moment that the harness gives it over the
   door. The driver reads it as a Moment.
 - **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
