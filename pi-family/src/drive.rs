@@ -267,8 +267,10 @@ const OMP_BARE_FILE: &str = "omp-bare.yml";
 /// The flags of a bare turn (`start`'s `bare`, the same for a new conversation, a fork
 /// and a continue): `system` alone as the system prompt; no rules, skills, context files
 /// or prompt templates; the shell as the only tool; and of every extension only Steery's,
-/// loaded by its path under `root`, so its door stays. For omp the overlay [`OMP_BARE`]
-/// is written into the turn's `folder` first; it also drops omp's extension discovery.
+/// loaded by its path under `root`, so its door stays. `--steery-bare` tells Steery's plugin
+/// so: it adds no skill block, and in pi registers no MCP entry. For omp the overlay
+/// [`OMP_BARE`] is written into the turn's `folder` first; it also drops omp's extension
+/// discovery.
 fn bared(
     harness: Harness,
     root: &Path,
@@ -282,9 +284,15 @@ fn bared(
     };
     let extension = path(root.join("extensions/steery.ts"))?;
     // An explicit empty append keeps the person's `APPEND_SYSTEM.md` out.
-    let mut flags = ["--system-prompt", system, "--append-system-prompt", ""]
-        .map(String::from)
-        .to_vec();
+    let mut flags = [
+        "--system-prompt",
+        system,
+        "--append-system-prompt",
+        "",
+        "--steery-bare",
+    ]
+    .map(String::from)
+    .to_vec();
     match harness {
         Harness::Omp => {
             let overlay = folder.join(OMP_BARE_FILE);
@@ -303,7 +311,7 @@ fn bared(
             flags.extend([path(overlay)?, "-e".to_owned(), extension]);
         }
         // `--no-extensions` also drops pi's built-in MCP support, so Steery's plugin
-        // registers no MCP entry (`--steery-bare`).
+        // registers no MCP entry.
         Harness::Pi => {
             flags.extend(
                 [
@@ -314,7 +322,6 @@ fn bared(
                     "--no-approve",
                     "--tools",
                     "bash",
-                    "--steery-bare",
                     "-e",
                 ]
                 .map(String::from),

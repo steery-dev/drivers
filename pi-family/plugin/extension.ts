@@ -39,6 +39,33 @@ const O_CLOEXEC = process.platform === "darwin" ? 0x1000000 : 0o2000000;
 /** `pi` or `omp`: the harness this copy was written for. */
 const HARNESS: string = "__STEERY_HARNESS__";
 
+/** Steery's skill, where `steery setup` wrote it into the harness's agent folder. */
+const SKILL: string = "__STEERY_SKILL__";
+
+/**
+ * The skill's body, frontmatter cut, in one block that names it, or nothing where the file
+ * is missing or empty. The block goes last in the system prompt of every turn
+ * ([`skilled`]): read once per session, it is the same text each turn, so the provider's
+ * cached prefix holds.
+ */
+function skillBlock(file: string): string | undefined {
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return undefined;
+  }
+  const front = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  const body = (front ? text.slice(front[0].length) : text).trim();
+  return body ? `<skill name="steery">\n${body}\n</skill>` : undefined;
+}
+
+/** The turn's system prompt with the skill's block after it: omp's is parts, pi's one text. */
+function skilled(system: unknown, block: string): string | string[] | undefined {
+  if (HARNESS === "omp") return Array.isArray(system) ? [...system, block] : undefined;
+  return typeof system === "string" ? `${system}\n\n${block}` : undefined;
+}
+
 /** The plugin door version this copy speaks (PROTOCOL.md §4.4). */
 const DOOR_VERSION = 1;
 
@@ -495,6 +522,8 @@ type Event = {
   messages?: unknown;
   /** `before_provider_request`: what goes to the model's provider, the harness's to send unless replaced. */
   payload?: unknown;
+  /** `before_agent_start`: the turn's system prompt so far, omp's as parts, pi's as one text. */
+  systemPrompt?: unknown;
 };
 
 type Api = {
@@ -1204,6 +1233,8 @@ type Kept = {
   calls: Call[];
   ended: Ended[];
   dialog: Dialog | null;
+  /** The runtime said this session is told nothing of Steery: no skill block goes in. */
+  untold: boolean;
 };
 
 /**
@@ -1251,6 +1282,7 @@ function restored(kept: unknown): Kept {
     calls: Array.isArray(calls) ? calls.filter(isCall) : [],
     ended: Array.isArray(ended) ? ended.filter(isEnded).slice(-ENDED_KEPT) : [],
     dialog: isDialog(dialog) ? dialog : null,
+    untold: field("untold") === true,
   };
 }
 
@@ -1484,15 +1516,16 @@ export const surfaces = {
   // come in (`input`, below). pi refuses a flag nobody registered before anything
   // starts, which is the runtime's sign this copy is absent. omp is given none: the
   // runtime checks a pick against omp's own catalog before the run starts.
-  // `steery-bare`: a bare run, which gets no MCP entry ([`registers`]).
-  flags:
-    HARNESS === "pi"
+  // `steery-bare`, in both: a bare run ([`bare`]).
+  flags: [
+    ...(HARNESS === "pi"
       ? [
           { name: "steery-model", description: "The model that Steery's runtime picked", type: "string" as const },
           { name: "steery-thinking", description: "The thinking level that Steery's runtime picked", type: "string" as const },
-          { name: "steery-bare", description: "A bare run: no MCP entry of Steery's", type: "boolean" as const },
         ]
-      : [],
+      : []),
+    { name: "steery-bare", description: "A bare run: no skill block or MCP entry of Steery's", type: "boolean" as const },
+  ],
 };
 
 export default function steery(pi: Api, carried: Carried = {}): Running {
@@ -1511,6 +1544,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   let reminded = kept.reminded;
   // The context the harness last handed a handler: the one the door speaks through.
   let live: Context | undefined;
+  // Steery's skill block for every turn's system prompt, read as the session begins.
+  let skill: string | undefined;
+  // Once a moment's answer says the runtime tells this session nothing of Steery (a chat's),
+  // it stays so: no skill block goes into its system prompt.
+  let untold = kept.untold;
+  // The turn `before_agent_start` prepares, until it runs. omp calls the handler again for
+  // the same turn where its own system prompt changed while the handler ran, and gives up
+  // after a few such calls: the turn is answered as it was the first time, at once.
+  let preparing: { prompt: unknown; answer: Promise<Frame | undefined> } | undefined;
   // omp mutates its SessionManager in place before announcing a switch. Keep the
   // identity this copy took up, not another read through that mutable object.
   let sessionId: string | undefined;
@@ -1951,6 +1993,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     return typeof say === "string" && say.trim() ? say : undefined;
   };
 
+  /** Whether a moment's answer says the runtime tells this session nothing of Steery: `ok.quiet`. */
+  const quietOf = (answered: Frame | undefined): boolean => {
+    const ok = answered?.ok;
+    return !!ok && typeof ok === "object" && "quiet" in ok && ok.quiet === true;
+  };
+
   /**
    * Words queued into a running turn that the harness let go unseen: no turn runs, nothing
    * waits to go in, and nothing took them ([`lost`]).
@@ -2325,10 +2373,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   };
 
   /**
-   * pi: whether this conversation gets Steery's MCP entry: not in a bare run
-   * (`--steery-bare`), whose only tool is the shell and which loads no MCP support.
+   * A bare run (`--steery-bare`): its system prompt alone, with no skill block of Steery's,
+   * and in pi its only tool the shell, with no MCP support.
    */
-  const registers = (): boolean => REGISTERS && pi.getFlag?.("steery-bare") !== true;
+  const bare = (): boolean => pi.getFlag?.("steery-bare") === true;
+  /** pi: whether this conversation gets Steery's MCP entry: not in a bare run. */
+  const registers = (): boolean => REGISTERS && !bare();
 
   /**
    * pi: Steery's MCP entry for this conversation, with headers naming it. pi connects it
@@ -3153,6 +3203,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     unheld = false;
     live = ctx;
     sessionId = ctx.sessionManager.getSessionId();
+    skill = skillBlock(SKILL);
     hold(ctx);
     // The first session here that no other leads is the lead of every process it starts,
     // said before any of them is started.
@@ -3237,7 +3288,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
     reloading().delete(id);
     if (stood) {
-      ({ asked, parked, waiting, reminded, turning, began, retrying, retry, continued, dialog } = stood);
+      ({ asked, parked, waiting, reminded, turning, began, retrying, retry, continued, dialog, untold } = stood);
       says.splice(0, says.length, ...stood.says);
       ours = new Set(stood.ours);
       calls.clear();
@@ -3292,6 +3343,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       turnSays = new Set();
       settled.splice(0, settled.length);
       continued = undefined;
+      // The conversation moved to is told what its own answers say.
+      untold = false;
       const { promise, resolve } = Promise.withResolvers<void>();
       setTimeout(resolve, 0);
       await promise;
@@ -3311,6 +3364,31 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // text is read as nothing much at all.
   pi.on("before_agent_start", async (event, ctx) => {
     live = ctx;
+    const turn =
+      preparing !== undefined && preparing.prompt === event.prompt
+        ? preparing
+        : (preparing = { prompt: event.prompt, answer: prepare(event, ctx) });
+    const answer = await turn.answer;
+    // An answer that did not come in time leaves the session as it was.
+    if (quietOf(answer)) untold = true;
+    const line = sayOf(answer);
+    const systemPrompt = skill === undefined || untold || bare() ? undefined : skilled(event.systemPrompt, skill);
+    if (!line && systemPrompt === undefined) return undefined;
+    return {
+      ...(systemPrompt === undefined ? {} : { systemPrompt }),
+      ...(line
+        ? {
+            message: {
+              customType: "steery",
+              content: `<system-reminder reason="steery">\n${line}\n</system-reminder>`,
+              display: false,
+            },
+          }
+        : {}),
+    };
+  });
+  /** A turn the person starts: whose it is, said to the runtime, and the runtime's answer, if it came in time. */
+  const prepare = async (event: Event, ctx: Context): Promise<Frame | undefined> => {
     // Steery's words the batch holds are taken now ([`heard`], [`took`]).
     // Whose the stretch is now. omp going on with the reminder its stop hook asked for
     // carries on whoever's turn that was.
@@ -3341,18 +3419,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (!going && said.theirs) parked = false;
     reminded = false;
     const prompt = typeof event.prompt === "string" ? { prompt: event.prompt } : {};
-    const line = sayOf(await awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS));
-    if (!line) return undefined;
-    return {
-      message: {
-        customType: "steery",
-        content: `<system-reminder reason="steery">\n${line}\n</system-reminder>`,
-        display: false,
-      },
-    };
-  });
+    return awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS);
+  };
   pi.on("agent_start", (_event, ctx) => {
     live = ctx;
+    preparing = undefined;
     begun();
     turning = true;
     // A run starts only once omp's asked compaction is over, failed or not ([`askedCompaction`]).
@@ -3798,6 +3869,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         calls: [...calls.values()],
         ended: [...ended],
         dialog,
+        untold,
       };
     },
   };
