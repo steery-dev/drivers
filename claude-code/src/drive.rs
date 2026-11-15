@@ -864,6 +864,7 @@ pub fn start(store: &Store, start: Start) -> Result<Launch, Error> {
             model: start.model,
             thinking: start.thinking,
             reads: start.reads,
+            bare: start.bare.map(|bare| bare.system),
         }
         .args()
         .map_err(|why| Error::refused(refusal::START_FAILED, why))?,

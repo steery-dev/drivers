@@ -102,8 +102,8 @@ impl Harness {
         }
     }
 
-    /// The harness as Steery reads it.
-    pub fn info(self) -> wire::HarnessInfo {
+    /// The harness as Steery reads it, under the protocol picked.
+    pub fn info(self, protocol: u32) -> wire::HarnessInfo {
         wire::HarnessInfo {
             levels: wire::Level::ALL.to_vec(),
             minimum: Some(wire::Minimum {
@@ -180,6 +180,7 @@ impl Harness {
                 ],
             },
             hooks: self.hooks(),
+            bare: steery_driver_common::program::bare(protocol),
         }
     }
 

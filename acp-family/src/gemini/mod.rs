@@ -126,6 +126,7 @@ impl Driver {
                         .filter(|hook| hook.event == crate::turn::hooks::PERMISSION),
                 )
                 .collect(),
+            bare: false,
         }
     }
 }
