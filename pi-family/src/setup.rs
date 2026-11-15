@@ -96,7 +96,8 @@ pub async fn plan(
         root: root.clone(),
     };
     let named = config.join("extension").join(harness.id());
-    let extension = extension(harness, &setup)?;
+    let skill = root.join("skills/steery/SKILL.md");
+    let extension = extension(harness, &setup, &skill)?;
     let digest = Sha256::digest(extension.as_bytes());
     let digest: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     let copy = config
@@ -116,7 +117,7 @@ pub async fn plan(
     }
     entries.extend([
         Entry {
-            path: root.join("skills/steery/SKILL.md"),
+            path: skill,
             format: Format::Text,
             at: None,
             value: json!(setup.skill),
@@ -195,9 +196,9 @@ fn pi_entry(setup: &Setup) -> Value {
 }
 
 /// Steery's extension for the harness, its placeholders filled: the harness; the door's
-/// address; and the MCP entry the extension registers, none in omp, which reads Steery's
-/// from its own `mcp.json`.
-fn extension(harness: Harness, setup: &Setup) -> Result<String, Error> {
+/// address; the MCP entry the extension registers, none in omp, which reads Steery's
+/// from its own `mcp.json`; and the skill's file, which goes into every turn's system prompt.
+fn extension(harness: Harness, setup: &Setup, skill: &Path) -> Result<String, Error> {
     let door = setup.door.as_str();
     if door.is_empty() || door.contains(['"', '\\', '\n', '\r']) {
         return Err(Error::invalid(format!(
@@ -213,7 +214,8 @@ fn extension(harness: Harness, setup: &Setup) -> Result<String, Error> {
     Ok(EXTENSION
         .replace("__STEERY_HARNESS__", harness.id())
         .replace("__STEERY_DOOR__", door)
-        .replace("__STEERY_MCP__", &mcp))
+        .replace("__STEERY_MCP__", &mcp)
+        .replace("__STEERY_SKILL__", literal(skill)?))
 }
 
 /// The `mcp.json` files pi reads that hold a `steery` server of a person's own, which

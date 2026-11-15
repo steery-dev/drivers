@@ -488,6 +488,10 @@ What each driver does:
   that starts while the runtime is down waits its own 10 s for the entry. Then it runs without
   Steery. The plugin connects the entry again when the door is back. When omp and pi are both
   installed and share one folder, the plan writes no setup for either harness.
+
+  The plugin reads the skill's file as each conversation begins, frontmatter cut. It appends
+  the body to every turn's system prompt as `<skill name="steery">…</skill>`, the same text on
+  each turn. A missing file adds nothing.
 - **Moments** (`hook/read`). The plugin forwards each moment that the harness gives it over the
   door. The driver reads it as a Moment.
 - **Drive** (`held`, `idle`, `models`, `start`, `turn/read`, `receipt/*`, `reader`,
