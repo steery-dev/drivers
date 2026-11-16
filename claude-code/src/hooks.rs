@@ -41,30 +41,42 @@ const SAYS_WAITS: u32 = 5;
 /// (2026-11-02).
 const ASKS_WAITS: u32 = (i32::MAX / 1000) as u32;
 
+/// The characters of one paragraph Claude Code keeps whole. Longer `additionalContext` it
+/// saves to a file and replaces with the file's path and a 2,000-character preview, and it
+/// cuts a `PreCompact` hook's output there (https://code.claude.com/docs/en/hooks, "JSON
+/// output", "PreCompact output").
+const ROOM: u32 = 10_000;
+
 /// One of Claude Code's hook events Steery is hooked on.
 pub(crate) struct Event {
     pub(crate) name: &'static str,
     kind: HookKind,
     says: &'static [Says],
+    /// What a driver that picked a protocol older than 17 ([`steery_sdk::WORDS`]) declares
+    /// this event to say; none where the event is 17's.
+    before: Option<&'static [Says]>,
     /// The `timeout` setup writes on its hook, in seconds, as Claude Code reads it.
     pub(crate) waits: u32,
 }
 
 /// Every event Claude Code fires once per moment that Steery reads, in the order setup
 /// writes them. Claude Code reads a hook's `additionalContext` on `SessionStart`,
-/// `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` and `SubagentStart`, and goes
-/// on from a `Stop` that a hook blocks with a reason.
-pub(crate) const EVENTS: [Event; 12] = [
+/// `UserPromptSubmit`, `PostToolUse`, `PostToolUseFailure` and `SubagentStart`, goes on
+/// from a `Stop` or `SubagentStop` that gives one, and reads a `PreCompact` hook's output
+/// as its instructions for the summary.
+pub(crate) const EVENTS: [Event; 14] = [
     Event {
         name: "SessionStart",
         kind: HookKind::SessionStart,
-        says: &[Says::Context, Says::Notice],
+        says: &[Says::Context],
+        before: Some(&[Says::Context, Says::Notice]),
         waits: SAYS_WAITS,
     },
     Event {
         name: "UserPromptSubmit",
         kind: HookKind::Prompt,
-        says: &[Says::Context, Says::Notice],
+        says: &[Says::Context],
+        before: Some(&[Says::Context, Says::Notice]),
         waits: SAYS_WAITS,
     },
     // Both the moment a call is about to run and the moment Steery may put
@@ -73,38 +85,44 @@ pub(crate) const EVENTS: [Event; 12] = [
         name: "PreToolUse",
         kind: HookKind::BeforeCall,
         says: &[],
+        before: Some(&[]),
         waits: ASKS_WAITS,
     },
     // Words for a conversation Steery started reach it deep in a tool loop as a call comes back.
     Event {
         name: "PostToolUse",
         kind: HookKind::AfterCall,
-        says: &[Says::Notice, Says::Calls, Says::Working],
+        says: &[Says::Context, Says::Calls, Says::Working],
+        before: Some(&[Says::Notice, Says::Calls, Says::Working]),
         waits: SAYS_WAITS,
     },
     // Fires in place of `PostToolUse` when the call fails.
     Event {
         name: "PostToolUseFailure",
         kind: HookKind::AfterCall,
-        says: &[Says::Notice, Says::Working],
+        says: &[Says::Context, Says::Working],
+        before: Some(&[Says::Notice, Says::Working]),
         waits: SAYS_WAITS,
     },
     Event {
         name: "PermissionRequest",
         kind: HookKind::Permission,
         says: &[],
+        before: Some(&[]),
         waits: ASKS_WAITS,
     },
     Event {
         name: "Notification",
         kind: HookKind::Notification,
         says: &[],
+        before: Some(&[]),
         waits: SAYS_WAITS,
     },
     Event {
         name: "Stop",
         kind: HookKind::TurnEnd,
         says: &[Says::Context],
+        before: Some(&[Says::Context]),
         waits: SAYS_WAITS,
     },
     // The turn ended in a failure; Claude Code reads nothing back from it.
@@ -112,12 +130,14 @@ pub(crate) const EVENTS: [Event; 12] = [
         name: "StopFailure",
         kind: HookKind::TurnEnd,
         says: &[],
+        before: Some(&[]),
         waits: SAYS_WAITS,
     },
     Event {
         name: "SessionEnd",
         kind: HookKind::SessionEnd,
         says: &[],
+        before: Some(&[]),
         waits: SAYS_WAITS,
     },
     // A Task sub-agent starting, fired in its lead's hooks with the lead's `session_id`
@@ -126,6 +146,24 @@ pub(crate) const EVENTS: [Event; 12] = [
         name: "SubagentStart",
         kind: HookKind::SubAgentStart,
         says: &[Says::Context],
+        before: Some(&[Says::Context]),
+        waits: SAYS_WAITS,
+    },
+    // A sub-agent about to stop, under its lead's `session_id` beside its own `agent_id`:
+    // its words keep the sub-agent going once more.
+    Event {
+        name: "SubagentStop",
+        kind: HookKind::SubAgentEnd,
+        says: &[Says::Context],
+        before: None,
+        waits: SAYS_WAITS,
+    },
+    // Claude Code is about to summarise the conversation, asked (`/compact`) or on its own.
+    Event {
+        name: "PreCompact",
+        kind: HookKind::Compacting,
+        says: &[Says::Context],
+        before: None,
         waits: SAYS_WAITS,
     },
     // The session's model changed: `/model`, an automatic fallback, a resume restoring it
@@ -135,19 +173,29 @@ pub(crate) const EVENTS: [Event; 12] = [
         name: "PostModelSwitch",
         kind: HookKind::Changed,
         says: &[],
+        before: Some(&[]),
         waits: SAYS_WAITS,
     },
 ];
 
-/// The hooks `initialize` declares.
-pub fn table() -> Vec<Hook> {
-    EVENTS
-        .iter()
-        .map(|event| Hook {
+/// Every event Steery is hooked on under the protocol `picked`, with what it says there.
+pub(crate) fn declared(picked: u32) -> impl Iterator<Item = (&'static Event, &'static [Says])> {
+    let words = steery_driver_common::program::words(picked);
+    EVENTS.iter().filter_map(move |event| match words {
+        true => Some((event, event.says)),
+        false => event.before.map(|says| (event, says)),
+    })
+}
+
+/// The hooks `initialize` declares under the protocol `picked`.
+pub fn table(picked: u32) -> Vec<Hook> {
+    let words = steery_driver_common::program::words(picked);
+    declared(picked)
+        .map(|(event, says)| Hook {
             event: event.name.to_owned(),
             kind: event.kind,
             via: Via::Command,
-            says: event.says.to_vec(),
+            says: says.to_vec(),
             waits: Some(event.waits),
             // Every hook is told whether Cursor runs it; only a start is handed the file a
             // lead is appended to.
@@ -157,18 +205,19 @@ pub fn table() -> Vec<Hook> {
                 .collect(),
             // Claude Code keeps both scopes (`updatedPermissions`): absent says both.
             keeps: None,
+            room: (words && says.contains(&Says::Context)).then_some(ROOM),
         })
         .collect()
 }
 
 /// The moment a hook's document says, or none for an event Steery is not hooked on, a
-/// document that names no conversation, or a hook Cursor runs. `store` holds Claude Code's
-/// conversations.
-pub fn read(store: &Store, read: HookRead) -> Result<HookMoment, Error> {
+/// document that names no conversation, a hook Cursor runs, or the end of an agent Claude
+/// Code runs for itself. `store` holds Claude Code's conversations; `picked` is the protocol.
+pub fn read(store: &Store, read: HookRead, picked: u32) -> Result<HookMoment, Error> {
     let document = parse(&read.document)?;
     Ok(HookMoment {
         moment: (!cursors(&document, &read.env))
-            .then(|| moment(store, &read.event, &document))
+            .then(|| moment(store, &read.event, &document, picked))
             .flatten(),
     })
 }
@@ -178,8 +227,15 @@ fn cursors(document: &Value, env: &BTreeMap<String, String>) -> bool {
     document.get("cursor_version").is_some() || env.contains_key(CURSOR)
 }
 
-fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
-    let event = event(name)?;
+fn moment(store: &Store, name: &str, document: &Value, picked: u32) -> Option<Moment> {
+    let (event, _) = declared(picked).find(|(event, _)| event.name == name)?;
+    // Claude Code ends its own agents through `SubagentStop` too (prompt suggestions,
+    // `/btw`), with the session's own agent name or an empty `agent_type`: no sub-agent the
+    // conversation started.
+    if event.kind == HookKind::SubAgentEnd && text(document, "agent_type").is_none() {
+        return None;
+    }
+    let words = steery_driver_common::program::words(picked);
     let external_id = text(document, "session_id")?.to_owned();
     let tool_input = || document.get("tool_input").cloned().unwrap_or(Value::Null);
     let call = match (event.kind, text(document, "tool_name")) {
@@ -195,7 +251,7 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
         )),
         _ => None,
     };
-    let at_end = event.kind == HookKind::TurnEnd;
+    let at_end = matches!(event.kind, HookKind::TurnEnd | HookKind::SubAgentEnd);
     let failed = name == "StopFailure";
     Some(Moment {
         event: name.to_owned(),
@@ -233,7 +289,15 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()
+            .filter(|prompt| !words || persons(document, prompt))
             .map(str::to_owned),
+        // Claude Code names no parent at a fork's start: the fork's own transcript, which
+        // opens with its parent's records, does.
+        forked_from: (words
+            && event.kind == HookKind::SessionStart
+            && text(document, "source") == Some("fork"))
+        .then(|| store.session(&external_id).ok()?.parent)
+        .flatten(),
         // No document carries the window; the conversation's own transcript, which the
         // document names, says how full it is, read on the moments a person is shown: a
         // start, a model change, a prompt for them, a turn's end. A sub-agent's document
@@ -276,6 +340,22 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
         },
         external_id,
     })
+}
+
+/// Whether a prompt's words are its person's or Steery's, and not a report or a wakeup that
+/// Claude Code posts as a prompt of its own: a background agent's or shell's report as it
+/// ends (a `<task-notification>`), or a prompt whose `source` says Claude Code gave it to
+/// itself. Claude Code's hook input schema (2.1.325) names `source`: `user`, `sdk` (a `-p`
+/// run, Steery's turns among them), `system` (another session's message, which Steery's
+/// own words through a live session's inbox are, beside task notifications),
+/// `loop_wakeup`, `schedule_wakeup` and `poll_event`; 2.1.325 fills it only for
+/// `poll_event`.
+fn persons(document: &Value, prompt: &str) -> bool {
+    !prompt.trim_start().starts_with("<task-notification>")
+        && !matches!(
+            text(document, "source"),
+            Some("loop_wakeup" | "schedule_wakeup" | "poll_event")
+        )
 }
 
 /// Why a turn ended at `StopFailure`: Claude Code's code for the API error (`error`), its
@@ -350,10 +430,11 @@ fn suggestion(update: &Value) -> Suggestion {
 }
 
 /// What Steery decided, printed as Claude Code parses it on this event: a paragraph as
-/// `additionalContext`, or at a `Stop` as the reason the turn goes on; a decision as
-/// `PreToolUse`'s `permissionDecision` or `PermissionRequest`'s `decision`; and the lead,
-/// appended to `CLAUDE_ENV_FILE` where Claude Code named one. A hook Cursor runs is
-/// answered nothing. Always exit 0: a hook that fails is one Claude Code reports to its
+/// `additionalContext`, which at a `Stop` or `SubagentStop` makes it go on, or at a
+/// `PreCompact` as the plain output it reads as its instructions for the summary; a
+/// decision as `PreToolUse`'s `permissionDecision` or `PermissionRequest`'s `decision`; and
+/// the lead, appended to `CLAUDE_ENV_FILE` where Claude Code named one. A hook Cursor runs
+/// is answered nothing. Always exit 0: a hook that fails is one Claude Code reports to its
 /// person.
 pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     let HookAnswer {
@@ -379,7 +460,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
     let output = match (event.kind, decision) {
         (_, None) => say.map(|say| context(event, say)).transpose()?,
         (HookKind::BeforeCall, Some(decision)) => {
-            Some(before_call(decision, say, &document)?)
+            Some(before_call(decision, say, &document)?.to_string())
         }
         (HookKind::Permission, Some(decision)) => {
             if say.is_some() {
@@ -387,7 +468,7 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
                     "Claude Code does not read a paragraph at PermissionRequest",
                 ));
             }
-            Some(permission(decision, &document)?)
+            Some(permission(decision, &document)?.to_string())
         }
         (_, Some(_)) => {
             return Err(Error::invalid(format!(
@@ -405,14 +486,16 @@ pub fn answer(answer: HookAnswer) -> Result<HookAnswered, Error> {
         _ => None,
     };
     Ok(HookAnswered {
-        stdout: output.map(|output| output.to_string()).unwrap_or_default(),
+        stdout: output.unwrap_or_default(),
         exit_code: 0,
         append,
     })
 }
 
-/// A paragraph for the agent, where this event's hook can give one.
-fn context(event: &Event, say: String) -> Result<Value, Error> {
+/// A paragraph for the agent, where this event's hook can give one. At a `Stop` or
+/// `SubagentStop`, `additionalContext` keeps the turn going as hook feedback, not as a hook
+/// error, with the same loop guard as a block (`stop_hook_active`; Claude Code 2.1.163).
+fn context(event: &Event, say: String) -> Result<String, Error> {
     if event.says.is_empty() {
         return Err(Error::invalid(format!(
             "Claude Code does not read a paragraph at {}",
@@ -420,11 +503,12 @@ fn context(event: &Event, say: String) -> Result<Value, Error> {
         )));
     }
     Ok(match event.kind {
-        HookKind::TurnEnd => json!({"decision": "block", "reason": say}),
+        HookKind::Compacting => say,
         _ => json!({"hookSpecificOutput": {
             "hookEventName": event.name,
             "additionalContext": say,
-        }}),
+        }})
+        .to_string(),
     })
 }
 
@@ -564,14 +648,22 @@ mod tests {
     use steery_sdk::wire::harness::FailureKind;
 
     fn read_one(event: &str, document: Value, env: &[(&str, &str)]) -> Option<Moment> {
-        read(&Store::new(PathBuf::from("/nowhere")), HookRead {
-            event: event.to_owned(),
-            document: document.to_string(),
-            env: env
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                .collect(),
-        })
+        read_at(event, document, env, steery_sdk::WORDS)
+    }
+
+    fn read_at(event: &str, document: Value, env: &[(&str, &str)], picked: u32) -> Option<Moment> {
+        read(
+            &Store::new(PathBuf::from("/nowhere")),
+            HookRead {
+                event: event.to_owned(),
+                document: document.to_string(),
+                env: env
+                    .iter()
+                    .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                    .collect(),
+            },
+            picked,
+        )
         .expect("JSON")
         .moment
     }
@@ -737,20 +829,61 @@ mod tests {
         assert_eq!(switched.outcome, None);
     }
 
+    /// From protocol 17 a sub-agent's end and a compaction are moments; Claude Code's own
+    /// agents' ends are not. A prompt that a background task's report or a wakeup posts is
+    /// nobody's instruction: it carries no words.
     #[test]
     fn a_document_that_is_no_moment_steery_carries_reads_as_none() {
-        assert!(read_one("PreCompact", json!({"session_id": "s1"}), &[]).is_none());
+        let compacting = json!({"session_id": "s1", "trigger": "auto", "custom_instructions": null});
+        assert!(read_at("PreCompact", compacting.clone(), &[], steery_sdk::BARE).is_none());
+        assert_eq!(
+            read_one("PreCompact", compacting, &[]).expect("a moment").event,
+            "PreCompact"
+        );
+        let ended = |agent_type: &str| {
+            read_one(
+                "SubagentStop",
+                json!({"session_id": "s1", "agent_id": "a7", "agent_type": agent_type,
+                    "stop_hook_active": true, "last_assistant_message": "done"}),
+                &[],
+            )
+        };
+        let sub = ended("Explore").expect("a sub-agent's end");
+        assert_eq!((sub.sub_agent.as_deref(), sub.continued), (Some("a7"), true));
+        assert!(ended("").is_none(), "an agent Claude Code runs for itself");
+        let prompt = |words: &str, source: Option<&str>, picked: u32| {
+            let mut document = json!({"session_id": "s1", "prompt": words});
+            if let Some(source) = source {
+                document["source"] = json!(source);
+            }
+            read_at("UserPromptSubmit", document, &[], picked)
+                .expect("a prompt")
+                .prompt
+        };
+        let report = "<task-notification>\n<task-id>a77006</task-id>\n<status>completed</status>\n</task-notification>";
+        assert_eq!(prompt(report, None, steery_sdk::WORDS), None);
+        assert_eq!(prompt("/loop tick", Some("loop_wakeup"), steery_sdk::WORDS), None);
+        assert_eq!(prompt("Fix it", Some("user"), steery_sdk::WORDS).as_deref(), Some("Fix it"));
+        assert_eq!(prompt("Fix it", None, steery_sdk::WORDS).as_deref(), Some("Fix it"));
+        assert_eq!(prompt(report, None, steery_sdk::BARE).as_deref(), Some(report));
         assert!(read_one("Stop", json!({"cwd": "/tmp"}), &[]).is_none());
         assert!(
-            read(&Store::new(PathBuf::from("/nowhere")), HookRead {
-                event: "Stop".into(),
-                document: "not json".into(),
-                env: BTreeMap::new(),
-            })
+            read(
+                &Store::new(PathBuf::from("/nowhere")),
+                HookRead {
+                    event: "Stop".into(),
+                    document: "not json".into(),
+                    env: BTreeMap::new(),
+                },
+                steery_sdk::WORDS,
+            )
             .is_err()
         );
     }
 
+    /// Every paragraph goes as `additionalContext`, a turn's or a sub-agent's end's too,
+    /// which keeps it going as feedback; a compaction's is the plain text Claude Code reads
+    /// as its instructions for the summary.
     #[test]
     fn a_harness_is_handed_the_paragraph_in_the_document_it_parses() {
         for event in [
@@ -759,16 +892,25 @@ mod tests {
             "PostToolUse",
             "PostToolUseFailure",
             "SubagentStart",
+            "Stop",
+            "SubagentStop",
         ] {
             let document = printed(event, json!({"session_id": "s1"}), say("Steery: hi"));
-            let out = &document["hookSpecificOutput"];
-            assert_eq!(out["hookEventName"], event);
-            assert_eq!(out["additionalContext"], "Steery: hi");
+            assert_eq!(
+                document,
+                json!({"hookSpecificOutput": {"hookEventName": event, "additionalContext": "Steery: hi"}})
+            );
         }
-        let kept = printed("Stop", json!({"session_id": "s1"}), say("Report first."));
+        let summary = super::answer(HookAnswer {
+            event: "PreCompact".into(),
+            document: json!({"session_id": "s1"}).to_string(),
+            env: BTreeMap::new(),
+            answer: say("Keep in the summary: this session's harness and external_id."),
+        })
+        .unwrap();
         assert_eq!(
-            kept,
-            json!({"decision": "block", "reason": "Report first."})
+            summary.stdout,
+            "Keep in the summary: this session's harness and external_id."
         );
     }
 
@@ -1002,17 +1144,32 @@ mod tests {
         assert!(lead("claude-code:s1'; rm -rf ~", &[(ENV_FILE, "/tmp/env")]).is_err());
     }
 
+    /// From protocol 17 every hook that says a paragraph says how much of it Claude Code
+    /// keeps whole, none says `notice`, and a sub-agent's end and a compaction are hooked;
+    /// a driver on 16 declares what it did.
     #[test]
     fn every_hook_is_a_command_with_a_bound() {
-        let table = table();
+        let table = table(steery_sdk::WORDS);
         assert_eq!(table.len(), EVENTS.len());
         for hook in &table {
             assert_eq!(hook.via, Via::Command);
             assert!(hook.waits.is_some_and(|waits| waits > 0), "{}", hook.event);
+            assert!(!hook.says.contains(&Says::Notice), "{}", hook.event);
+            let room = hook.says.contains(&Says::Context).then_some(10_000);
+            assert_eq!(hook.room, room, "{}", hook.event);
         }
         for asks in ["PreToolUse", "PermissionRequest"] {
             let hook = table.iter().find(|hook| hook.event == asks).unwrap();
             assert_eq!(hook.waits, Some(ASKS_WAITS));
         }
+        let kind = |event: &str| table.iter().find(|hook| hook.event == event).map(|hook| hook.kind);
+        assert_eq!(kind("SubagentStop"), Some(HookKind::SubAgentEnd));
+        assert_eq!(kind("PreCompact"), Some(HookKind::Compacting));
+        let old = super::table(steery_sdk::BARE);
+        assert_eq!(old.len(), EVENTS.len() - 2);
+        assert!(old.iter().all(|hook| hook.room.is_none()));
+        assert!(old.iter().all(|hook| !matches!(hook.kind, HookKind::SubAgentEnd | HookKind::Compacting)));
+        let said = |event: &str| old.iter().find(|hook| hook.event == event).unwrap().says.clone();
+        assert_eq!(said("PostToolUse"), [Says::Notice, Says::Calls, Says::Working]);
     }
 }

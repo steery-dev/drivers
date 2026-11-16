@@ -102,6 +102,7 @@ pub fn table() -> Vec<Hook> {
             waits: Some(event.waits),
             // Crush hands a hook no file to export a lead into.
             env: Vec::new(),
+            room: None,
             keeps: None,
         })
         .collect()
@@ -146,6 +147,7 @@ fn moment(home: &std::path::Path, name: &str, document: &Value) -> Option<Moment
         outcome: None,
         continued: false,
         person_exited: false,
+        forked_from: None,
         prompt: None,
         context_left: None,
         model: None,

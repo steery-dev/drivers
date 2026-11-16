@@ -1663,6 +1663,25 @@ mod tests {
         assert_eq!(parent(fork), Some(Some(lead.to_owned())));
         assert_eq!(parent(lead), Some(None));
         assert_eq!(store.session(fork).unwrap().parent.as_deref(), Some(lead));
+        // Its start names its parent, at protocol 17 alone; a start that forks nothing, none.
+        let started = |id: &str, source: &str, picked: u32| {
+            crate::hooks::read(
+                &store,
+                steery_sdk::wire::harness::HookRead {
+                    event: "SessionStart".into(),
+                    document: json!({"session_id": id, "source": source}).to_string(),
+                    env: Default::default(),
+                },
+                picked,
+            )
+            .unwrap()
+            .moment
+            .expect("a start")
+            .forked_from
+        };
+        assert_eq!(started(fork, "fork", steery_sdk::WORDS).as_deref(), Some(lead));
+        assert_eq!(started(fork, "fork", steery_sdk::BARE), None);
+        assert_eq!(started(lead, "startup", steery_sdk::WORDS), None);
         let events = reading(&store, fork, None, None).events;
         let at = |wanted: &dyn Fn(&Event) -> bool| events.iter().position(wanted);
         let said = |words: &str| {

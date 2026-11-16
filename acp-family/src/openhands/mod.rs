@@ -80,7 +80,7 @@ fn info(protocol: u32) -> wire::HarnessInfo {
             call_meta: None,
         },
         setup: wire::SetupFacts {
-            reads_skills: false,
+            skill: wire::SkillAt::Handshake,
             cuts_tool_text: false,
             // `sdk/mcp/tool.py`, `MCP_TOOL_TIMEOUT_SECONDS`: no entry changes it.
             call_bound: Some(300),

@@ -68,6 +68,23 @@ pub fn bare(picked: u32) -> bool {
     picked >= steery_sdk::BARE
 }
 
+/// Like [`protocol_bare`], for a driver that also fits Steery's words to its harness
+/// (`steery_sdk::WORDS`, protocol 17: a hook's `room`, `setup`'s `skill`, the hooks
+/// `sub_agent_end` and `compacting`, a moment's `forked_from`): 17 where the runtime
+/// offered it, else what [`protocol_bare`] gives.
+pub fn protocol_words(offered: &[u32]) -> Option<u32> {
+    offered
+        .contains(&steery_sdk::WORDS)
+        .then_some(steery_sdk::WORDS)
+        .or_else(|| protocol_bare(offered))
+}
+
+/// Whether the protocol `picked` has Steery's words fitted to the harness: 17 or newer. A
+/// driver says none of 17's fields to an older one; the runtime sends it none.
+pub fn words(picked: u32) -> bool {
+    picked >= steery_sdk::WORDS
+}
+
 /// Whether the person asked to give the need `id` again: the protocol `picked` is 15 or
 /// newer, and `ask` of `setup/plan` names the need. The runtime sends no `ask` to an older
 /// protocol; a driver ignores one it was given.
@@ -248,14 +265,19 @@ mod tests {
     }
 
     /// Only a driver that asks and maps a bare start picks 16, else 15; the others stop at 14.
+    /// One that fits Steery's words picks 17 where it is offered.
     #[test]
     fn only_a_bare_driver_picks_15_and_16() {
         assert_eq!(protocol(&[4, 14, 15, 16]), Some(14));
-        assert_eq!(protocol_bare(&[4, 14, 15, 16]), Some(16));
+        assert_eq!(protocol_bare(&[4, 14, 15, 16, 17]), Some(16));
         assert_eq!(protocol_bare(&[4, 14, 15]), Some(15));
         assert_eq!(protocol_bare(&[4, 14]), Some(14));
         assert_eq!(protocol_bare(&[3]), None);
         assert!(bare(16) && !bare(15));
+        assert_eq!(protocol_words(&[4, 14, 15, 16, 17]), Some(17));
+        assert_eq!(protocol_words(&[4, 14, 15, 16]), Some(16));
+        assert_eq!(protocol_words(&[3]), None);
+        assert!(words(17) && !words(16));
     }
 
     #[test]

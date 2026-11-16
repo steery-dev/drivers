@@ -66,26 +66,24 @@ impl Harness {
         }
     }
 
-    /// How an agent in this harness learns its conversation's id, as Steery's skill says it.
+    /// How an agent in this harness learns its conversation's id, as Steery's skill says it:
+    /// from Steery's paragraph, which the plugin puts beside the person's messages.
     fn knowing(self) -> &'static str {
         match self {
             Self::Omp => {
-                "omp gives no identifier of its own. No variable in your environment holds the\n\
-                 identifier, and omp puts nothing into this text. The Steery server names the\n\
-                 identifier when the connection names the conversation: the instructions that\n\
-                 the server announces hold that `harness` and `external_id`. Read them there and\n\
-                 send exactly those values. If the instructions name no conversation, this\n\
-                 connection named none. In that case, describe nothing."
+                "Steery's paragraph beside your person's messages names the identifier as\n\
+                 `harness` and `external_id`. Send exactly those values. omp gives no identifier\n\
+                 of its own, and no variable in your environment holds it. If no paragraph named\n\
+                 an identifier, you have no identifier: describe nothing."
             }
             Self::Pi => {
-                "Steery's paragraph names the identifier as `harness` and `external_id`. Steery\n\
-                 adds this paragraph each time your person writes to you, until you describe this\n\
-                 conversation. Send exactly those values. Every shell that pi starts for you has\n\
-                 `PI_SESSION_ID` in its environment, and that variable always holds the same\n\
-                 `external_id` value. pi names the file of this conversation from it. A person\n\
-                 can disable the variable. If no paragraph named an identifier and the variable\n\
-                 is unset or empty, you have no identifier. Do not use a different identifier:\n\
-                 describe nothing."
+                "Steery's paragraph beside your person's messages names the identifier as\n\
+                 `harness` and `external_id`. Send exactly those values. Every shell that pi\n\
+                 starts for you has `PI_SESSION_ID` in its environment, and that variable always\n\
+                 holds the same `external_id` value. pi names the file of this conversation from\n\
+                 it. A person can disable the variable. If no paragraph named an identifier and\n\
+                 the variable is unset or empty, you have no identifier. Do not use a different\n\
+                 identifier: describe nothing."
             }
         }
     }
@@ -135,7 +133,7 @@ impl Harness {
                 call_meta: None,
             },
             setup: wire::SetupFacts {
-                reads_skills: true,
+                skill: wire::SkillAt::Prompt,
                 cuts_tool_text: false,
                 call_bound: None,
             },
@@ -179,27 +177,28 @@ impl Harness {
                     harness::Act::New,
                 ],
             },
-            hooks: self.hooks(),
+            hooks: self.hooks(protocol),
             bare: steery_driver_common::program::bare(protocol),
         }
     }
 
-    /// The harness's moments, as Steery's plugin says them over the door: `session_start`,
-    /// `before_agent_start`, `tool_call`, `tool_result`, the turn's end and
-    /// `session_shutdown`. The plugin adds a paragraph beside the person's words where they
-    /// arrive; in omp also a line beside a shell command's result through `tool_call`, and
-    /// a paragraph for a sub-agent's own copy at a call's result. A turn's end is kept
-    /// going through the door's `settle`, not a moment.
-    fn hooks(self) -> Vec<harness::Hook> {
+    /// The harness's moments under the protocol `picked`, as Steery's plugin says them over
+    /// the door: `session_start` (and a fresh context after a compaction), `before_agent_start`,
+    /// `tool_call`, `tool_result`, the turn's end and `session_shutdown`. The plugin adds a
+    /// paragraph beside the person's words where they arrive; in omp also a line beside a
+    /// shell command's result through `tool_call`, and a paragraph for a sub-agent's own copy
+    /// at a call's result. A turn's end is kept going through the door's `settle`, not a
+    /// moment. Neither harness cuts a paragraph: no hook says `room`.
+    fn hooks(self, picked: u32) -> Vec<harness::Hook> {
         use harness::{HookKind as Kind, Says};
         let omp = self == Self::Omp;
+        let prompt = match steery_driver_common::program::words(picked) {
+            true => vec![Says::Context],
+            false => vec![Says::Context, Says::Notice],
+        };
         [
             ("SessionStart", Kind::SessionStart, Vec::new()),
-            (
-                "UserPromptSubmit",
-                Kind::Prompt,
-                vec![Says::Context, Says::Notice],
-            ),
+            ("UserPromptSubmit", Kind::Prompt, prompt),
             (
                 "PreToolUse",
                 Kind::BeforeCall,
@@ -222,6 +221,7 @@ impl Harness {
             waits: None,
             env: Vec::new(),
             keeps: None,
+            room: None,
         })
         .collect()
     }

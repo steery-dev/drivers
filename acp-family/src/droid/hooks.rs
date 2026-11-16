@@ -136,6 +136,7 @@ pub fn table() -> Vec<Hook> {
                 .then(|| ENV_FILE.to_owned())
                 .into_iter()
                 .collect(),
+            room: None,
             keeps: None,
         })
         .collect()
@@ -189,6 +190,7 @@ fn moment(store: &Store, name: &str, document: &Value) -> Option<Moment> {
                 text(document, "reason"),
                 Some("prompt_input_exit" | "clear" | "logout")
             ),
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()

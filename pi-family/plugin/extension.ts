@@ -39,8 +39,25 @@ const O_CLOEXEC = process.platform === "darwin" ? 0x1000000 : 0o2000000;
 /** `pi` or `omp`: the harness this copy was written for. */
 const HARNESS: string = "__STEERY_HARNESS__";
 
-/** Steery's skill, where `steery setup` wrote it into the harness's agent folder. */
+/**
+ * Steery's skill, where `steery setup` wrote it: beside this copy, outside the harness's own
+ * skills folder, so the harness lists it nowhere and only this copy's block carries it.
+ */
 const SKILL: string = "__STEERY_SKILL__";
+
+/**
+ * `yes` where the driver picked protocol 17 (`steery_sdk::WORDS`): a turn's `settle` says
+ * how the turn ended and the runtime decides from its own record whether its end is told
+ * anything; the words come back bare, for this copy to wrap as every other moment's. Else
+ * `no`: the runtime reads the settle of 16 and wraps its words itself.
+ */
+const PICKED: string = "__STEERY_WORDS__";
+const WORDS = PICKED === "yes";
+
+/** Steery's words as the agent reads every moment's: a reminder the harness gives, named Steery's. */
+function enveloped(line: string): string {
+  return `<system-reminder reason="steery">\n${line}\n</system-reminder>`;
+}
 
 /**
  * The skill's body, frontmatter cut, in one block that names it, or nothing where the file
@@ -929,6 +946,18 @@ function document(ctx: Context, extra: Record<string, unknown> = {}): Record<str
   };
 }
 
+/**
+ * What a start's document adds: the harness's word for why it started (`reason`), and the
+ * transcript of the conversation it came from (`previous_session_file`), where it names
+ * them. The driver reads a fork's parent from that transcript's name.
+ */
+function startOf(reason: unknown, previous: unknown): Record<string, unknown> {
+  return {
+    ...(typeof reason === "string" && reason ? { reason } : {}),
+    ...(typeof previous === "string" && previous ? { previous_session_file: previous } : {}),
+  };
+}
+
 /** A document written as a call's arguments, or nothing where it is not one. */
 function parsed(text: unknown): unknown {
   if (typeof text !== "string") return undefined;
@@ -940,64 +969,23 @@ function parsed(text: unknown): unknown {
 }
 
 /**
- * The tool a call reaches and the arguments it passes, as Steery spells the tool. A
- * harness calls a tool directly by its name, or — where omp mounts tools behind paths —
- * by writing its arguments, as JSON, to `xd://<name>`.
+ * The tool a call reaches, as Steery spells it. A harness calls a tool directly by its
+ * name, or — where omp mounts tools behind paths — by writing its arguments to
+ * `xd://<name>`.
  */
-function called(event: Event): { tool: string | undefined; args: unknown } {
+function called(event: Event): string | undefined {
   const input = event.input && typeof event.input === "object" ? event.input : {};
   const path = "path" in input ? input.path : undefined;
   if (event.toolName === "write" && typeof path === "string" && path.startsWith("xd://")) {
-    return {
-      tool: steerys(path.slice("xd://".length)),
-      args: parsed("content" in input ? input.content : undefined),
-    };
+    return steerys(path.slice("xd://".length));
   }
-  return { tool: steerys(event.toolName), args: input };
+  return steerys(event.toolName);
 }
 
 /** The shell command a call runs, where it runs one: a `bash` tool's `command`, in both harnesses. */
 function commandOf(input: unknown): string | undefined {
   const command = input && typeof input === "object" && "command" in input ? input.command : undefined;
   return typeof command === "string" && command.trim() ? command : undefined;
-}
-
-/** A Steery operation a shell command runs through the `steery` command line, and the words after it. */
-type Ran = { op: string; words: string };
-
-/**
- * The Steery operation a shell command runs, as the catalog names it (`requests.create`):
- * `steery <resource> <verb> …`, or a resource's singular for its `create` (`steery request
- * …`), by its path or its name alone. Nothing where the command runs no `steery`.
- */
-function ran(command: string | undefined): Ran | undefined {
-  const found = command?.match(/(?:^|[\s;&|(`'"\/])steery\s+([a-z][a-z_-]*)(?:\s+([a-z][a-z_-]*))?([^;&|\n]*)/);
-  if (!found) return undefined;
-  const [, resource, verb = "", rest = ""] = found;
-  if (resource === "request") return { op: "requests.create", words: `${verb} ${rest}` };
-  return { op: `${resource}.${verb}`, words: rest };
-}
-
-/**
- * Whether a Steery command that came back leaves its turn waiting rather than idle
- * (specs/RESOURCES.md §9): a `steery resources get` that waits, a `steery resources act`
- * `watch`, or one with `--queue` whose row says it joined the queue (`row.params.queue`).
- * Its turn's end is then not reminded: the wait, the watch or the queue wakes it.
- */
-function waits(command: Ran, content: unknown): boolean {
-  const { op, words } = command;
-  if (op === "resources.get") return /--wait\b|"wait_secs"\s*:\s*[1-9]/.test(words);
-  if (op !== "resources.act") return false;
-  if (/--action[=\s]+["']?watch\b|"action"\s*:\s*"watch"/.test(words)) return true;
-  if (!/--queue\b|"queue"\s*:\s*true/.test(words) || !Array.isArray(content)) return false;
-  const text = (content as unknown[]).find(
-    (part): part is { text: string } =>
-      !!part && typeof part === "object" && "text" in part && typeof part.text === "string",
-  )?.text;
-  const acted = parsed(text?.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
-  const row = acted && typeof acted === "object" && "row" in acted ? acted.row : undefined;
-  const params = row && typeof row === "object" && "params" in row ? row.params : undefined;
-  return !!params && typeof params === "object" && "queue" in params && params.queue === true;
 }
 
 /**
@@ -1212,10 +1200,6 @@ type Settled = { began_at: number; at: number; says: string[]; failed: boolean; 
  * and one it lacks starts as at a session's start.
  */
 type Kept = {
-  asked: boolean;
-  parked: boolean;
-  /** The turn's last Steery call was a wait: on a resource, a watch, or a place in a queue. */
-  waiting: boolean;
   reminded: boolean;
   turning: boolean;
   began: number | undefined;
@@ -1265,9 +1249,6 @@ function restored(kept: unknown): Kept {
   const began = field("began");
   const retry = field("retry");
   return {
-    asked: field("asked") === true,
-    parked: field("parked") === true,
-    waiting: field("waiting") === true,
     reminded: field("reminded") === true,
     turning,
     began: typeof began === "number" ? began : undefined,
@@ -1534,13 +1515,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   // sub-agent's included; the loader builds it again for a session already under way,
   // carrying on from what the copy before kept.
   const kept = restored(carried.kept);
-  // Whether this turn has asked its person anything, whether its agent parked the
-  // conversation, whether its last Steery call was a wait (on a resource, a watch, a place
-  // in a queue: waiting is not idling), and whether it was already reminded: each begins
-  // again at every turn the person starts.
-  let asked = kept.asked;
-  let parked = kept.parked;
-  let waiting = kept.waiting;
+  // Whether this turn was already reminded to go on: it begins again at every turn the
+  // person starts.
   let reminded = kept.reminded;
   // The context the harness last handed a handler: the one the door speaks through.
   let live: Context | undefined;
@@ -2889,8 +2865,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * own words: only while the stretch running now is that say's ([`ours`]) and no words of
    * the person's wait to go into it. Any other turn is the person's, or holds their words,
    * and is refused `other-turn` with why. Named by no say, it is the person's own stop, said
-   * from Steery (their Pause): whatever turn of this conversation runs stops, and is not
-   * reminded to go on ([`parked`]) until the person's own words start one.
+   * from Steery (their Pause): whatever turn of this conversation runs stops.
    */
   const stop = async (ctx: Context, say: unknown): Promise<Said> => {
     const session = sessionId;
@@ -2899,8 +2874,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     if (!ctx.abort) return { refused: "selection-unsupported", error: `this ${HARNESS} cannot abort` };
     const running = () => turning || ctx.isIdle?.() === false;
-    // Its person's own stop holds the conversation parked whether or not a turn runs.
-    if (say === undefined) parked = true;
     if (!running()) return { ok: { stopped: false, running: background(ctx) } };
     if (say !== undefined && !ours.has(say)) {
       const waiting = says.some((one) => idsOf(one).includes(say) && !one.seen);
@@ -3288,7 +3261,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const stood = HARNESS === "pi" && event.reason === "reload" ? reloading().get(id) : undefined;
     reloading().delete(id);
     if (stood) {
-      ({ asked, parked, waiting, reminded, turning, began, retrying, retry, continued, dialog, untold } = stood);
+      ({ reminded, turning, began, retrying, retry, continued, dialog, untold } = stood);
       says.splice(0, says.length, ...stood.says);
       ours = new Set(stood.ours);
       calls.clear();
@@ -3296,7 +3269,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     begin(ctx);
     moved(event, ctx);
-    moment("SessionStart", document(ctx));
+    moment("SessionStart", document(ctx, startOf(event.reason, event.previousSessionFile)));
     // Only the process's first start finds the ask: nothing it starts may inherit it.
     const file = process.env[COMPACT_ASK];
     delete process.env[COMPACT_ASK];
@@ -3330,7 +3303,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // to: those not yet handed over are refused `ending`, those handed and not seen taken
     // `no-answer`, and Steery's words of that conversation are forgotten. The door opens
     // again for the conversation the session is now.
-    const switched = async (event: Event, ctx: Context) => {
+    const switched = async (event: Event, ctx: Context, reason: unknown) => {
       const was = sessionId;
       moved(event, ctx);
       if (was === undefined || was === ctx.sessionManager.getSessionId()) return;
@@ -3353,9 +3326,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       cut();
       backoff = REDIAL_MIN_MS;
       dial();
+      // The conversation moved to starts a fresh context here, as a start does: a fork or a
+      // branch names the conversation it came from.
+      moment("SessionStart", document(ctx, startOf(reason, event.previousSessionFile)));
     };
-    pi.on("session_switch", switched);
-    pi.on("session_branch", switched);
+    pi.on("session_switch", (event, ctx) => switched(event, ctx, event.reason));
+    pi.on("session_branch", (event, ctx) => switched(event, ctx, "branch"));
   }
   // The person has just sent something: the moment a paragraph reaches the agent. Both
   // harnesses' own notices to their agent arrive as `<system-reminder>` blocks, which the
@@ -3372,7 +3348,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     // An answer that did not come in time leaves the session as it was.
     if (quietOf(answer)) untold = true;
     const line = sayOf(answer);
-    const systemPrompt = skill === undefined || untold || bare() ? undefined : skilled(event.systemPrompt, skill);
+    const systemPrompt =
+      skill === undefined || untold || bare() || led(ctx) ? undefined : skilled(event.systemPrompt, skill);
     if (!line && systemPrompt === undefined) return undefined;
     return {
       ...(systemPrompt === undefined ? {} : { systemPrompt }),
@@ -3380,7 +3357,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         ? {
             message: {
               customType: "steery",
-              content: `<system-reminder reason="steery">\n${line}\n</system-reminder>`,
+              content: enveloped(line),
               display: false,
             },
           }
@@ -3412,11 +3389,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     retrying = false;
     retry = undefined;
     noteState();
-    asked = false;
-    waiting = false;
-    // A park holds until the person's own words start a turn: Steery's words, a reminder
-    // going on, or a background job waking the conversation leave it parked.
-    if (!going && said.theirs) parked = false;
     reminded = false;
     const prompt = typeof event.prompt === "string" ? { prompt: event.prompt } : {};
     return awaited(moment("UserPromptSubmit", document(ctx, prompt)), PROMPT_MS);
@@ -3640,6 +3612,8 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     }
     if (HARNESS === "pi") piCompacted(ctx, event.reason);
     noteState();
+    // A compacted context lost what Steery said at its start: the runtime owes it again.
+    moment("SessionStart", document(ctx, { reason: "compact" }));
   });
   // Every call of a compacted context, whoever compacted it, opens before its summary
   // ([`opened`]), and no call spends a cache breakpoint on its tools ([`unanchored`]).
@@ -3649,37 +3623,43 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   });
   pi.on("before_provider_request", (event) => unanchored(event.payload));
   /**
-   * Steery's words to keep a turn about to end going, from the runtime (`settle`'s
-   * answer, `ok.say`): none where the turn asked its person, its agent parked the
-   * conversation, it waits on a Steery request, it was already kept going once
-   * (`continued`), or the door is not open. The runtime holds the rule and the words; this
-   * copy says what it saw.
+   * Steery's words to keep a turn about to end going, from the runtime (`settle`'s answer,
+   * `ok.say`), or none where the door is not open. From protocol 17 this copy says how the
+   * turn ended and whether it was already kept going once (`continued`); the runtime holds
+   * the rule — whether the turn asked its person, waits on Steery or was parked, failed or
+   * stopped, or is a sub-agent's — and the words, which this copy wraps. Before 17 its
+   * runtime reads a settle of 16, asked only after a turn of the conversation's own that
+   * stopped by itself, and wraps the words.
    */
-  const settle = async (continued: boolean): Promise<string | undefined> => {
+  const settle = async (continued: boolean, outcome: string): Promise<string | undefined> => {
     if (!welcomed) return undefined;
     const id = nextId();
     const said = awaited(id, SETTLE_MS);
     settling.add(id);
-    if (!send({ t: "settle", id, asked, parked, waiting, continued })) moments().waiting.get(id)?.(undefined);
+    const frame = WORDS
+      ? { t: "settle", id, continued, outcome }
+      : { t: "settle", id, asked: false, parked: false, waiting: false, continued };
+    if (!send(frame)) moments().waiting.get(id)?.(undefined);
     const answered = await said;
     settling.delete(id);
-    return sayOf(answered);
+    const words = sayOf(answered);
+    return words && WORDS ? enveloped(words) : words;
   };
-  // The turn is about to end. A turn that asked its person nothing is reminded once, and
-  // the agent decides. A sub-agent is never reminded: its lead asks.
+  // The turn is about to end: this copy says how, and the runtime's words, if any, keep it
+  // going once.
   if (HARNESS === "omp") {
     // omp's own stop hook, which it offers the main session and never a sub-agent. Once
     // is omp's to count: it runs a reminder as a turn of its own, which prepares like any
     // turn the person starts, so only `stop_hook_active` still knows the turn was already
     // reminded. The turn it runs carries on the one that ended ([`continued`]). omp offers
-    // it after a run whose last answer failed too (omp 18.4.12 `AgentSession`); as in pi,
-    // only a run whose last answer stopped on its own is reminded.
+    // it after a run whose last answer failed too (omp 18.4.12 `AgentSession`).
     pi.on("session_stop", async (event, ctx) => {
       live = ctx;
       const last = event.last_assistant_message;
       const how = last && typeof last === "object" && "stopReason" in last ? last.stopReason : undefined;
-      if (how === "error" || how === "aborted" || led(ctx)) return undefined;
-      const reminder = await settle(event.stop_hook_active === true);
+      const outcome = how === "error" ? "failed" : how === "aborted" ? "interrupted" : "finished";
+      if (!WORDS && (outcome !== "finished" || led(ctx))) return undefined;
+      const reminder = await settle(event.stop_hook_active === true, outcome);
       if (!reminder) return undefined;
       keptGoing = true;
       continued = reminder;
@@ -3688,13 +3668,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   } else {
     // pi's own last word before a run settles: a handler may add entries and ask for one
     // more request, which pi makes inside the same run — no new turn the person started,
-    // so `reminded` holds until they start one. Only a run whose last answer stopped on
-    // its own is reminded: one that failed was retried by pi or is reported as failed,
-    // and one the person stopped is theirs.
+    // so `reminded` holds until they start one.
     pi.on("agent_before_settle", async (event, ctx) => {
       live = ctx;
-      if (event.outcome !== "completed" || reminded || led(ctx)) return undefined;
-      const reminder = await settle(false);
+      const outcome =
+        event.outcome === "completed" ? "finished" : event.outcome === "aborted" ? "interrupted" : "failed";
+      if (!WORDS && (outcome !== "finished" || reminded || led(ctx))) return undefined;
+      const reminder = await settle(reminded, outcome);
       if (!reminder) return undefined;
       keptGoing = true;
       reminded = true;
@@ -3704,16 +3684,12 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       };
     });
   }
-  // A call the agent makes: a shell command that raises or reads a request through the
-  // `steery` command line is asking, whoever runs it — the agent, or a script the agent
-  // wrote. Only the agent's own calls are moments: a call made from inside another is said
-  // by the door's `calls`. The moment carries the call as the harness gave it — its tool,
-  // its id and its input — and the driver's `hook/read` reads what call it is.
+  // A call the agent makes. Only the agent's own calls are moments: a call made from inside
+  // another is said by the door's `calls`. The moment carries the call as the harness gave
+  // it — its tool, its id and its input — and the driver's `hook/read` reads what call it is.
   pi.on("tool_call", async (event, ctx) => {
     live = ctx;
-    const { tool } = called(event);
-    const op = ran(commandOf(event.input))?.op;
-    if (op === "requests.create" || op === "requests.get") asked = true;
+    const tool = called(event);
     if (typeof event.parentToolCallId === "string" && event.parentToolCallId) return undefined;
     const id = moment(
       "PreToolUse",
@@ -3736,28 +3712,11 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (HARNESS !== "omp" || !commandOf(event.input)) return undefined;
     const line = sayOf(await awaited(id, CALL_MS));
     if (!line) return undefined;
-    return { additionalContext: `<system-reminder reason="steery">\n${line}\n</system-reminder>` };
+    return { additionalContext: enveloped(line) };
   });
   pi.on("tool_result", async (event, ctx) => {
     live = ctx;
     noteEntries();
-    const { tool, args } = called(event);
-    // Each Steery call says whether the turn now waits ([`waits`]); the last one stands.
-    const command = ran(commandOf(event.input));
-    if (tool || command) waiting = event.isError !== true && !!command && waits(command, event.content);
-    // `sessions_describe` with a `park` parks the conversation, once Steery took it: a
-    // refused one leaves the conversation live.
-    if (
-      event.isError !== true &&
-      tool === "sessions_describe" &&
-      !!args &&
-      typeof args === "object" &&
-      "park" in args &&
-      !!args.park &&
-      typeof args.park === "object"
-    ) {
-      parked = true;
-    }
     if (typeof event.parentToolCallId === "string" && event.parentToolCallId) return undefined;
     // The call that came back, by the id the transcript writes it under, and whether it failed.
     const id = moment(
@@ -3772,7 +3731,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     if (HARNESS !== "omp" || !led(ctx)) return undefined;
     const line = sayOf(await awaited(id, CALL_MS));
     if (!line) return undefined;
-    return { additionalContext: `<system-reminder reason="steery">\n${line}\n</system-reminder>` };
+    return { additionalContext: enveloped(line) };
   });
   // The turn is over. pi's `agent_end` can be followed by a retry, a compaction or queued
   // words, and `agent_settled` is when none is left. omp's run is over at an `agent_end`
@@ -3852,9 +3811,6 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       unhold();
       await letGo();
       return {
-        asked,
-        parked,
-        waiting,
         reminded,
         turning,
         began,

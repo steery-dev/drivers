@@ -77,6 +77,7 @@ pub fn declared(protocol: u32) -> Vec<Hook> {
             says: says.to_vec(),
             waits: (timeout(event) == ASKING).then_some(ASKING),
             env: Vec::new(),
+            room: None,
             // Codex fails closed on a `PermissionRequest` answer with `updatedPermissions`
             // (0.166.0), so a yes covers its one call: Codex keeps neither scope.
             keeps: (*kind == HookKind::Permission && protocol >= steery_sdk::KEEPS)
@@ -155,6 +156,7 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
             && document.get("stop_hook_active").and_then(Value::as_bool) == Some(true),
         // Codex says `other` for every way a session ends: nothing is its person's word.
         person_exited: false,
+        forked_from: None,
         prompt: (kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()

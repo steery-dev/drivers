@@ -48,6 +48,7 @@ pub fn table(protocol: u32) -> Vec<Hook> {
             says: Vec::new(),
             waits: Some(ASKS_WAITS),
             env: Vec::new(),
+            room: None,
             keeps: (protocol >= steery_sdk::KEEPS).then(Vec::new),
         },
         Hook {
@@ -57,6 +58,7 @@ pub fn table(protocol: u32) -> Vec<Hook> {
             says: vec![Says::Context],
             waits: None,
             env: Vec::new(),
+            room: None,
             keeps: None,
         },
     ]
@@ -135,6 +137,7 @@ fn moment(external_id: &str, cwd: Option<PathBuf>) -> Moment {
         outcome: None,
         continued: false,
         person_exited: false,
+        forked_from: None,
         prompt: None,
         context_left: None,
         model: None,

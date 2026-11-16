@@ -1,8 +1,8 @@
 //! `setup/plan`: what sets Claude Code up for Steery. Steery's MCP server among Claude
 //! Code's user-scope servers; Steery's skill in its skills folder; and one hook per event
-//! Steery reads ([`crate::hooks::EVENTS`]) in its `settings.json`, each added beside the
-//! person's own hooks on that event. Where `needs` (protocol 5) and Claude Code is not
-//! signed in, its sign-in ([`crate::sign_in::need`]).
+//! Steery reads under the protocol picked ([`crate::hooks::declared`]) in its
+//! `settings.json`, each added beside the person's own hooks on that event. Where `needs`
+//! (protocol 5) and Claude Code is not signed in, its sign-in ([`crate::sign_in::need`]).
 
 use std::path::Path;
 
@@ -56,15 +56,15 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, protocol: u32) -> Resu
             root: root.to_owned(),
         }),
         refused: None,
-        entries: entries(home, root, &setup),
+        entries: entries(home, root, &setup, protocol),
         notes,
         install: None,
         needs,
     })
 }
 
-/// Every entry, in the order Claude Code reads them.
-fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
+/// Every entry, in the order Claude Code reads them, under the protocol `picked`.
+fn entries(home: &Path, root: &Path, setup: &Setup, picked: u32) -> Vec<Entry> {
     let state = crate::state_file(home, root);
     let mut entries = vec![
         // A per-server `timeout`, in milliseconds, is at once the bound on one call and the
@@ -94,7 +94,7 @@ fn entries(home: &Path, root: &Path, setup: &Setup) -> Vec<Entry> {
     // failed — some events by refusing the call about to run — so a hook whose command
     // cannot run (a machine mid-upgrade, a filled disk) says nothing instead.
     let settings = root.join("settings.json");
-    entries.extend(crate::hooks::EVENTS.iter().map(|event| Entry {
+    entries.extend(crate::hooks::declared(picked).map(|(event, _)| Entry {
         path: settings.clone(),
         format: Format::Json,
         at: Some(format!("/hooks/{}/-", event.name)),
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn claude_code_is_pointed_at_the_local_server_in_its_own_spelling() {
         let home = Path::new("/home/a");
-        let entries = entries(home, &home.join(".claude"), &setup());
+        let entries = entries(home, &home.join(".claude"), &setup(), steery_sdk::WORDS);
         let mcp = &entries[0];
         assert_eq!(mcp.path, home.join(".claude.json"));
         assert_eq!(mcp.at.as_deref(), Some("/mcpServers/steery"));
@@ -247,7 +247,7 @@ mod tests {
             mcp.value,
             json!({"type": "http", "url": "http://127.0.0.1:7777/mcp", "timeout": 120_000})
         );
-        let moved = super::entries(home, Path::new("/srv/claude"), &setup());
+        let moved = super::entries(home, Path::new("/srv/claude"), &setup(), steery_sdk::WORDS);
         assert_eq!(moved[0].path, Path::new("/srv/claude/.claude.json"));
         assert_eq!(
             moved[1].path,
@@ -255,32 +255,37 @@ mod tests {
         );
     }
 
-    /// Every event Steery reads is hooked once, running the command the runtime named
-    /// with the event added, within the bound the runtime is told it has, and unable to
-    /// fail as far as Claude Code can tell.
+    /// Every event Steery reads under the protocol picked is hooked once, running the
+    /// command the runtime named with the event added, within the bound the runtime is
+    /// told it has, and unable to fail as far as Claude Code can tell: from 17 a sub-agent's
+    /// end and a compaction too.
     #[test]
     fn what_setup_writes_is_what_the_command_reads() {
         let root = Path::new("/home/a/.claude");
-        let entries = entries(Path::new("/home/a"), root, &setup());
-        let hooked: Vec<&Entry> = entries
-            .iter()
-            .filter(|entry| entry.carries == [Part::Hooks])
-            .collect();
-        let table = crate::hooks::table();
-        assert_eq!(hooked.len(), table.len());
-        for (entry, hook) in hooked.iter().zip(&table) {
-            assert_eq!(entry.path, root.join("settings.json"));
-            assert_eq!(entry.at, Some(format!("/hooks/{}/-", hook.event)));
-            assert_eq!(entry.value["matcher"], "");
-            let command = &entry.value["hooks"][0];
-            assert_eq!(
-                command["command"],
-                format!(
-                    "/usr/local/bin/steery hook claude-code {} || true",
-                    hook.event
-                )
-            );
-            assert_eq!(command["timeout"], json!(hook.waits));
+        for picked in [steery_sdk::BARE, steery_sdk::WORDS] {
+            let entries = entries(Path::new("/home/a"), root, &setup(), picked);
+            let hooked: Vec<&Entry> = entries
+                .iter()
+                .filter(|entry| entry.carries == [Part::Hooks])
+                .collect();
+            let table = crate::hooks::table(picked);
+            assert_eq!(hooked.len(), table.len());
+            for (entry, hook) in hooked.iter().zip(&table) {
+                assert_eq!(entry.path, root.join("settings.json"));
+                assert_eq!(entry.at, Some(format!("/hooks/{}/-", hook.event)));
+                assert_eq!(entry.value["matcher"], "");
+                let command = &entry.value["hooks"][0];
+                assert_eq!(
+                    command["command"],
+                    format!(
+                        "/usr/local/bin/steery hook claude-code {} || true",
+                        hook.event
+                    )
+                );
+                assert_eq!(command["timeout"], json!(hook.waits));
+            }
+            let compacts = hooked.iter().any(|entry| entry.at.as_deref() == Some("/hooks/PreCompact/-"));
+            assert_eq!(compacts, picked >= steery_sdk::WORDS);
         }
     }
 
@@ -291,7 +296,7 @@ mod tests {
         let home = Path::new("/home/daytona");
         let root = home.join(".claude");
         let trusted = |setup: &Setup| -> Vec<Entry> {
-            entries(home, &root, setup)
+            entries(home, &root, setup, steery_sdk::WORDS)
                 .into_iter()
                 .filter(|entry| entry.carries.is_empty())
                 .collect()

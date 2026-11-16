@@ -99,6 +99,7 @@ pub fn table() -> Vec<Hook> {
             // A `sessionStart`'s `env` reaches later hooks, not the agent's shell: a lead has
             // nowhere to go. Cursor also hands each hook its sign-in token, which no entry names.
             env: Vec::new(),
+            room: None,
             keeps: None,
         })
         .collect()
@@ -157,6 +158,7 @@ fn moment(name: &str, document: &Value) -> Option<Moment> {
         continued: event.kind == HookKind::TurnEnd && loops.is_some_and(|loops| loops > 0),
         // A person who quits at the prompt and a `-p` run that ends both say `completed`.
         person_exited: false,
+        forked_from: None,
         prompt: (event.kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()

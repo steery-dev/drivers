@@ -118,7 +118,7 @@ impl Driver {
                 call_meta: None,
             },
             setup: wire::SetupFacts {
-                reads_skills: true,
+                skill: wire::SkillAt::Listed,
                 cuts_tool_text: false,
                 call_bound: None,
             },
