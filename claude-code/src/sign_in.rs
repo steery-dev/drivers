@@ -166,7 +166,7 @@ impl SignIns {
             }
             crate::gateway::WAY => {
                 self.0.end();
-                crate::gateway::give(&give.values, unsets)
+                crate::gateway::give(&give.values, unsets).await
             }
             CLAUDE_SIGN_IN => self.start().await,
             CLAUDE_SIGN_IN_RETURN => {
@@ -359,7 +359,22 @@ mod tests {
     }
 
     const KEY: &[(&str, &str)] = &[("key", "sk-ant-api03-abc")];
-    const GATEWAY: &[(&str, &str)] = &[("url", "https://gw.example.com"), ("key", "k")];
+
+    /// A gateway on this computer that takes every key, so a way's `done` is the gateway
+    /// way's own and no test reaches a network: its address.
+    fn gateway_taking_keys() -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.read(&mut [0u8; 2048]);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n{}");
+            }
+        });
+        address
+    }
 
     #[tokio::test]
     async fn an_api_key_unsets_the_gateway_from_protocol_15() {
@@ -372,16 +387,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_gateway_unsets_the_variable_of_the_other_header_from_protocol_15() {
+        let url = gateway_taking_keys();
+        let bearer = [("url", url.as_str()), ("key", "k")];
         assert_eq!(
-            unset(crate::gateway::WAY, GATEWAY, true).await,
+            unset(crate::gateway::WAY, &bearer, true).await,
             ["ANTHROPIC_API_KEY", KEY_MARKER]
         );
-        let x_api_key = [GATEWAY, &[("header", "x-api-key")]].concat();
+        let x_api_key = [&bearer[..], &[("header", "x-api-key")]].concat();
         assert_eq!(
             unset(crate::gateway::WAY, &x_api_key, true).await,
             ["ANTHROPIC_AUTH_TOKEN", KEY_MARKER]
         );
-        assert!(unset(crate::gateway::WAY, GATEWAY, false).await.is_empty());
+        assert!(unset(crate::gateway::WAY, &bearer, false).await.is_empty());
         assert!(
             unset(crate::gateway::WAY, &x_api_key, false)
                 .await

@@ -7,7 +7,7 @@
 //! a read that said nothing, given again while the files it stood on stand as they did
 //! ([`quiet`]), the MCP servers a harness's JSON configuration names ([`mcp`]), an
 //! Anthropic API key as a way to give a harness a sign-in ([`anthropic`]), the check of a
-//! company gateway's address ([`gateway`]), a harness's
+//! company gateway's address and the one request that tries its key ([`gateway`]), a harness's
 //! own sign-in run on a terminal of the driver's, given back what its browser returned to
 //! ([`login`]), and the last answer of a sign-in probe, kept for a plan while the probe
 //! gives none ([`signed`]).
