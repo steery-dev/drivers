@@ -61,6 +61,8 @@ names it by path (`../common`). The `common` crate has these modules:
   It reads the transcript along its path in batches. Then it reads the records off the path,
   within the same bound.
 - `login`: runs the harness's own sign-in on a terminal of the driver's (see Signing in).
+- `gateway`: checks a company gateway's address, and tries its key once, in the header that the
+  person named, through `curl` within 8 s (see Claude Code, Needs).
 
 Each driver keeps only two things: how its harness's records name their parent, and what the
 records say.
@@ -639,6 +641,21 @@ The ways are:
      signed in to a plan. Else a `--bg` session would send the plan's token to the gateway.
    - The driver returns no other variable. Claude Code sends an empty `ANTHROPIC_AUTH_TOKEN`
      as an empty `Authorization: Bearer` header, so an empty variable does not unset one.
+   - **The key is tried once before it is given**, on this host, where Claude Code sends it
+     (`steery_driver_common::gateway::check`). The driver sends `GET <url>/v1/models`, which
+     costs no tokens, with the key in the header that the person named (and
+     `anthropic-version: 2023-06-01`), through `curl`, within 8 s. The key goes to `curl` on its
+     standard input, so `ps` never lists it. The gateway answers one of three ways:
+
+     | The gateway | `needs/give` |
+     |---|---|
+     | `401` or `403` | refused (`refused`) with the gateway's own words as the line: `The gateway at <url> refused your key (HTTP 401): Invalid API key. Check the key and the key header.` The runtime asks again with that line, and keeps the key nowhere. The line has the key cut out of it. |
+     | a success | `done`, as before |
+     | no answer in time, a link that fails, no `curl` on the host, or any other status (a `404` where the gateway has no such path, a `503`) | `done`, as before. Its `line` ends `Steery did not check the key: <why>.` A person whose gateway is fine but slow is not stopped. |
+
+     A gateway that answers `401` to a made-up key (`proxy.steery.dev` does, 2026-11-16) now
+     refuses it where the person gives it. Before, the driver checked the address and kept
+     any key.
 
 Claude Code keeps the sign-in on this host. The driver keeps no token. A driver that started
 again has no sign-in that waits. Thus a step at that time is `not-found`.
