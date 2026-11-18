@@ -53,6 +53,7 @@ pub async fn models(home: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch: vec![home::settings(home), home::accounts(home)],
         signed_in: sign_in::signed_in(&binary).await,
+        signed_in_at: None,
     })
 }
 

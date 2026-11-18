@@ -216,6 +216,7 @@ pub async fn models(root: &Path) -> Result<Models, Error> {
             unlisted: None,
             watch,
             signed_in: Some(false),
+            signed_in_at: None,
         });
     };
     if let Some(error) = opened.get("error") {
@@ -238,6 +239,7 @@ pub async fn models(root: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch,
         signed_in: Some(true),
+        signed_in_at: None,
     })
 }
 

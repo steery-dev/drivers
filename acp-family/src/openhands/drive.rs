@@ -124,6 +124,7 @@ pub fn models(place: &Place) -> Models {
     let model = model(place);
     Models {
         signed_in: Some(model.is_some()),
+        signed_in_at: None,
         models: model
             .into_iter()
             .map(|model| Model {

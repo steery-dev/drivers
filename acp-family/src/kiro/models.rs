@@ -37,6 +37,7 @@ pub async fn list(home: &Path, root: &Path) -> Result<Models, Error> {
             unlisted: None,
             watch,
             signed_in: Some(false),
+            signed_in_at: None,
         });
     }
     let opened = tokio::time::timeout(LISTED_WITHIN, open(&binary, home))
@@ -69,6 +70,7 @@ pub async fn list(home: &Path, root: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch,
         signed_in: Some(true),
+        signed_in_at: None,
     })
 }
 

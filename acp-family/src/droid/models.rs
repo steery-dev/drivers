@@ -46,6 +46,7 @@ pub async fn list(home: &Path, root: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch: vec![root.join("settings.json")],
         signed_in: None,
+        signed_in_at: None,
     })
 }
 

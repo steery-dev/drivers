@@ -75,6 +75,7 @@ pub async fn models(binary: Option<PathBuf>, home: &Path, root: &Path) -> Result
             unlisted: None,
             watch,
             signed_in: Some(true),
+            signed_in_at: None,
         });
     }
     if [&printed, &said]
@@ -86,6 +87,7 @@ pub async fn models(binary: Option<PathBuf>, home: &Path, root: &Path) -> Result
             unlisted: None,
             watch,
             signed_in: Some(false),
+            signed_in_at: None,
         });
     }
     let last = said

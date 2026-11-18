@@ -897,6 +897,8 @@ impl Drive {
             unlisted: None,
             watch,
             signed_in,
+            // Codex picks 16 at most (`protocol_bare`): `signed_in_at` is 18's.
+            signed_in_at: None,
         })
     }
 }

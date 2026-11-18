@@ -219,8 +219,8 @@ The runtime then names the need in `setup/plan`'s `ask`. A driver plans it with 
 says a change, and the same ways. Claude Code, Codex, omp and pi do this. A driver that picked
 14 or older ignores `ask`. Where one way outranks another that an earlier `done` gave as
 variables, its `done` names those variables as `unset`. The runtime stops keeping them. Only
-Claude Code names `unset`; see its section. Every other driver only builds against protocol 15
-and speaks 14 at most.
+Claude Code names `unset`; see its section. Every other driver builds against protocol 18 and
+speaks 14 at most.
 
 ## Building
 
@@ -786,7 +786,11 @@ that it outranks, so that the way just given is the one Claude Code uses:
     set, else the user's `settings.json`. An alias is in the list only when every model that it
     can run is allowed. Each model in the list has Claude Code's effort levels. `signed_in`
     comes from `claude auth status`. The driver watches the files that a login rewrites
-    (`.claude.json`, `.credentials.json`).
+    (`.claude.json`, `.credentials.json`). At protocol 18, a `signed_in: true` list also says
+    `signed_in_at`: the later of `.credentials.json`'s change and, on macOS, the `mdat` of the
+    keychain item `Claude Code-credentials` (`security find-generic-password`, which prints no
+    secret without `-w`), with `-` and 8 hex digits of the SHA-256 of `CLAUDE_CONFIG_DIR` added
+    where that is set.
   - `reader`: `claude --print` with no tools, no MCP server, `--safe-mode`, and no session
     kept.
   - `terminal`: `claude --resume <id>`, or `claude attach <job>` while a background session
@@ -965,7 +969,7 @@ is not the person's to trust. A driver on version 4 says the same as a note.
     them that carries the delivery marker.
   - `models`: the app server's `model/list`, the default first. `signed_in` comes from
     `codex login status` (see Signing in). The driver watches `auth.json`, so it sees a login
-    at once.
+    at once. It says no `signed_in_at`: that is protocol 18, and the driver picks 16 at most.
   - `reader`: `codex exec --json --ephemeral` with every MCP server off, no tool or feature
     that it does not need, and a read-only sandbox. `reader/read` takes its last agent
     message.

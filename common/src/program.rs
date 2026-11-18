@@ -85,6 +85,22 @@ pub fn words(picked: u32) -> bool {
     picked >= steery_sdk::WORDS
 }
 
+/// Like [`protocol_words`], for a driver that also says when its harness last signed in
+/// (`steery_sdk::SIGNED_IN_AT`, protocol 18: `models`' `signed_in_at`): 18 where the
+/// runtime offered it, else what [`protocol_words`] gives.
+pub fn protocol_signed_in_at(offered: &[u32]) -> Option<u32> {
+    offered
+        .contains(&steery_sdk::SIGNED_IN_AT)
+        .then_some(steery_sdk::SIGNED_IN_AT)
+        .or_else(|| protocol_words(offered))
+}
+
+/// Whether the protocol `picked` has `models`' `signed_in_at`: 18 or newer. A driver says
+/// none to an older one, whose `Models` rejects the whole list for it.
+pub fn signed_in_at(picked: u32) -> bool {
+    picked >= steery_sdk::SIGNED_IN_AT
+}
+
 /// Whether the person asked to give the need `id` again: the protocol `picked` is 15 or
 /// newer, and `ask` of `setup/plan` names the need. The runtime sends no `ask` to an older
 /// protocol; a driver ignores one it was given.

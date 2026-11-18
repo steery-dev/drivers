@@ -80,6 +80,7 @@ pub async fn models(home: &Path) -> Result<Models, Error> {
     let models = ordered(listed(&shown, &catalog), &catalog, chosen);
     Ok(Models {
         signed_in: Some(!models.is_empty()),
+        signed_in_at: None,
         models,
         unlisted: Some(Unlisted {
             thinking: Vec::new(),

@@ -274,6 +274,7 @@ pub async fn models(kilo: Option<&Path>, store: &Store) -> Result<Models, Error>
         unlisted: None,
         watch,
         signed_in: None,
+        signed_in_at: None,
     })
 }
 

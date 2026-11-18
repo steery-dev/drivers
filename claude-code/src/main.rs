@@ -152,7 +152,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_words(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_signed_in_at(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
@@ -248,7 +248,8 @@ impl Program for ClaudeCode {
             ),
             method::MODELS => {
                 let _: wire::Empty = given(params)?;
-                result(drive::models(&self.place()?.home, self.root()?).await)
+                let place = self.place()?;
+                result(drive::models(&place.home, self.root()?, place.protocol).await)
             }
             method::START => result(drive::start(self.store()?, given(params)?)?),
             method::TURN_READ => result(turn::read(given(params)?)),

@@ -119,6 +119,7 @@ pub async fn list(root: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch: watched(root),
         signed_in: printed.signed_in(),
+        signed_in_at: None,
     })
 }
 

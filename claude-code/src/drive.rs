@@ -744,7 +744,9 @@ pub(crate) async fn signed_in(key: bool) -> Option<bool> {
 /// ([`allowed`]). It says whether Claude Code is logged in ([`signed_in`]), so a login made
 /// in a terminal lifts a sign-in failure on its own (Ali's first run, #product Slack thread
 /// 2026-10-19), and watches the files a login, a model choice and a policy change rewrite.
-pub async fn models(home: &Path, root: &Path) -> Models {
+/// Signed in, under the protocol `picked` 18 or newer, it also says when ([`signed_in_at`]):
+/// a login while `claude auth status` said yes all along (a revoked token) lifts it too.
+pub async fn models(home: &Path, root: &Path, picked: u32) -> Models {
     let managed = managed_files();
     let models = listed(root, &managed);
     let mut watch = vec![
@@ -754,14 +756,93 @@ pub async fn models(home: &Path, root: &Path) -> Models {
         root.join(".credentials.json"),
     ];
     watch.extend(managed);
+    let signed_in = signed_in(true).await;
+    let signed_in_at = match signed_in == Some(true)
+        && steery_driver_common::program::signed_in_at(picked)
+    {
+        true => signed_in_at(root).await,
+        false => None,
+    };
     Models {
         models,
         unlisted: Some(Unlisted {
             thinking: EFFORT.map(String::from).to_vec(),
         }),
         watch,
-        signed_in: signed_in(true).await,
+        signed_in,
+        signed_in_at,
     }
+}
+
+/// When Claude Code last wrote its login's credentials here, in milliseconds since 1970:
+/// the later of `.credentials.json` in its configuration folder `root` changing and, on
+/// macOS, its keychain item's ([`KEYCHAIN`]) `mdat`. None where neither is here.
+async fn signed_in_at(root: &Path) -> Option<u64> {
+    let file = std::fs::metadata(root.join(".credentials.json"))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|at| u64::try_from(at.as_millis()).ok());
+    let keychain = match cfg!(target_os = "macos") {
+        true => keychain_written().await,
+        false => None,
+    };
+    file.max(keychain)
+}
+
+/// The keychain service Claude Code keeps a login's credentials under, before the suffix
+/// [`keychain_service`] adds.
+const KEYCHAIN: &str = "Claude Code-credentials";
+
+/// The service Claude Code (2.1.325, its bundle's `N3`) names its keychain item: [`KEYCHAIN`],
+/// and where `CLAUDE_SECURESTORAGE_CONFIG_DIR`, else `CLAUDE_CONFIG_DIR`, names a folder, `-`
+/// and the first 8 hex digits of that name's SHA-256. Claude Code hashes the name in Unicode
+/// NFC: a folder named otherwise finds no item here.
+fn keychain_service() -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let folder = std::env::var_os("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .or_else(|| std::env::var_os("CLAUDE_CONFIG_DIR"))
+        .unwrap_or_default();
+    let mut service = KEYCHAIN.to_owned();
+    if !folder.is_empty() {
+        service.push('-');
+        for byte in &Sha256::digest(folder.as_encoded_bytes())[..4] {
+            let _ = write!(service, "{byte:02x}");
+        }
+    }
+    service
+}
+
+/// When Claude Code's keychain item was last written: its `mdat`, as `security
+/// find-generic-password` prints the item's attributes, without `-w` or `-g`, so never its
+/// secret: `"mdat"<timedate>=0x… "20260930092224Z\000"`. None where it gave no such line.
+async fn keychain_written() -> Option<u64> {
+    let mut command = steery_driver_common::program::helper(Path::new("/usr/bin/security"));
+    command.args(["find-generic-password", "-s", &keychain_service()]);
+    let answer = match steery_driver_common::program::ask(command).await {
+        Ok(answer) => answer,
+        Err(why) => {
+            eprintln!("security find-generic-password: {why}, so no sign-in time is read");
+            return None;
+        }
+    };
+    let printed = String::from_utf8_lossy(&answer.stdout);
+    let stamp = printed
+        .lines()
+        .find_map(|line| line.trim_start().strip_prefix("\"mdat\"<timedate>="))?
+        .split('"')
+        .nth(1)?;
+    let digits = |at: std::ops::Range<usize>| stamp.get(at)?.parse::<u32>().ok();
+    let at = chrono::NaiveDate::from_ymd_opt(
+        i32::try_from(digits(0..4)?).ok()?,
+        digits(4..6)?,
+        digits(6..8)?,
+    )?
+    .and_hms_opt(digits(8..10)?, digits(10..12)?, digits(12..14)?)?;
+    (stamp.get(14..15) == Some("Z"))
+        .then(|| u64::try_from(at.and_utc().timestamp_millis()).ok())
+        .flatten()
 }
 
 /// The models [`models`] lists, read from the configuration folder `root` and the
