@@ -51,35 +51,22 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Planned {
 async fn found(binary: PathBuf, home: &Path, root: &Path, setup: Setup) -> Planned {
     let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
-    let mut refused = None;
-    let mut entries = Vec::new();
-    let least = release_within(super::MINIMUM).unwrap_or_default();
-    match release {
-        None => notes.push(
+    if release.is_none() {
+        notes.push(
             "`--version` named no release, so the driver says nothing about this build.".into(),
-        ),
-        Some((major, minor, patch)) if (major, minor, patch) < least => {
-            refused = Some(format!(
-                "Antigravity CLI {major}.{minor}.{patch} is older than {}, the oldest that \
-                 Steery reads. Run `agy update`.",
-                super::MINIMUM,
-            ));
-        }
-        Some(_) => {}
-    }
-    if refused.is_none() {
-        entries = self::entries(&super::config(home), root, &setup);
-        notes.push(
-            "Antigravity's app and IDE read the same MCP servers, hooks and skills as its CLI."
-                .into(),
-        );
-        notes.push(
-            "Live reaches an Antigravity window only where it started with \
-             `ANTIGRAVITY_SERVER_CSRF_TOKEN`, as Steery's terminal command starts it. Any other \
-             window's server takes no request from outside it, so `say` is refused `no-door`."
-                .into(),
         );
     }
+    let entries = self::entries(&super::config(home), root, &setup);
+    notes.push(
+        "Antigravity's app and IDE read the same MCP servers, hooks and skills as its CLI."
+            .into(),
+    );
+    notes.push(
+        "Live reaches an Antigravity window only where it started with \
+         `ANTIGRAVITY_SERVER_CSRF_TOKEN`, as Steery's terminal command starts it. Any other \
+         window's server takes no request from outside it, so `say` is refused `no-door`."
+            .into(),
+    );
     Planned {
         found: Some(Found {
             binary,
@@ -88,7 +75,7 @@ async fn found(binary: PathBuf, home: &Path, root: &Path, setup: Setup) -> Plann
             }),
             root: root.to_path_buf(),
         }),
-        refused,
+        refused: None,
         entries,
         notes,
         install: None,

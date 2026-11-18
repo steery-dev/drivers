@@ -10,9 +10,6 @@ use serde_json::{Map, Value, json};
 use steery_driver_common::program::{lacks, others_note, release_within, version};
 use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Setup};
 
-/// The oldest release whose conversations, hooks and `[mcp_servers]` this driver reads.
-const MINIMUM: (u64, u64, u64) = (1, 0, 77);
-
 /// The plan for this machine, with Grok's home `root`. Where `needs` (the protocol picked
 /// has them) and Grok says it is not signed in, the plan asks for a sign-in.
 pub async fn plan(root: &Path, setup: Setup, needs: bool) -> Planned {
@@ -36,43 +33,30 @@ pub async fn plan(root: &Path, setup: Setup, needs: bool) -> Planned {
     };
     let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
-    let mut refused = None;
-    let mut entries = Vec::new();
-    match release {
-        None => notes.push(
-            "`--version` named no release, so the driver says nothing about this build.".into(),
-        ),
-        Some((major, minor, patch)) if (major, minor, patch) < MINIMUM => {
-            let (least_major, least_minor, least_patch) = MINIMUM;
-            refused = Some(format!(
-                "Grok Build {major}.{minor}.{patch} is older than \
-                 {least_major}.{least_minor}.{least_patch}, the oldest that Steery reads. Run \
-                 `grok update`."
-            ));
-        }
-        Some(_) => {}
-    }
-    let mut asked = Vec::new();
-    if refused.is_none() {
-        notes.extend(others_note(
-            "grok",
-            "grok",
-            Some(&root.join("bin")),
-            &binary,
-        ));
-        // A static note, not a read of `[cli] use_leader`: xAI's remote settings and a
-        // sandbox profile also decide leader mode, so config.toml alone cannot say.
+    if release.is_none() {
         notes.push(
-            "Steery reaches an open Grok window only in leader mode: one opened with \
-             `grok --leader`, or every window with `use_leader = true` under `[cli]` in \
-             config.toml. Leader mode is off by default. The windows that Steery opens use \
-             `--leader`."
-                .into(),
+            "`--version` named no release, so the driver says nothing about this build.".into(),
         );
-        entries = self::entries(root, &setup);
-        if needs && super::sign_in::lacking(root).await {
-            asked.push(super::sign_in::need());
-        }
+    }
+    notes.extend(others_note(
+        "grok",
+        "grok",
+        Some(&root.join("bin")),
+        &binary,
+    ));
+    // A static note, not a read of `[cli] use_leader`: xAI's remote settings and a
+    // sandbox profile also decide leader mode, so config.toml alone cannot say.
+    notes.push(
+        "Steery reaches an open Grok window only in leader mode: one opened with \
+         `grok --leader`, or every window with `use_leader = true` under `[cli]` in \
+         config.toml. Leader mode is off by default. The windows that Steery opens use \
+         `--leader`."
+            .into(),
+    );
+    let entries = self::entries(root, &setup);
+    let mut asked = Vec::new();
+    if needs && super::sign_in::lacking(root).await {
+        asked.push(super::sign_in::need());
     }
     Planned {
         found: Some(Found {
@@ -82,7 +66,7 @@ pub async fn plan(root: &Path, setup: Setup, needs: bool) -> Planned {
             }),
             root: root.to_path_buf(),
         }),
-        refused,
+        refused: None,
         entries,
         notes,
         install: None,

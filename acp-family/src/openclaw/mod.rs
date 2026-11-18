@@ -98,7 +98,9 @@ impl Driver {
         wire::HarnessInfo {
             levels: vec![wire::Level::Observe, wire::Level::Drive, wire::Level::Live],
             minimum: Some(wire::Minimum {
-                release: setup::MINIMUM_TEXT.into(),
+                // The oldest release whose store, `mcp.servers` and `models status --check`
+                // this driver reads.
+                release: "2026.11.3".into(),
                 update: Some("openclaw update".into()),
             }),
             sign_in: Some("run `openclaw onboard` in a terminal".into()),
