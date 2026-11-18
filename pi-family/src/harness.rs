@@ -55,13 +55,16 @@ impl Harness {
         }
     }
 
-    /// The oldest release this driver speaks to. omp 18.4.12 is the first that dials
-    /// Steery's door from every process, writes the run's end the plugin reads and
-    /// classifies a context overflow; pi 1.0.0 the first with the extension events and
-    /// `registerMcpServer` the plugin needs.
+    /// The oldest release this driver speaks to: the first that accepts every flag the driver
+    /// passes. omp 18.13.0 is the first that knows `--no-context-files`, which a bare turn
+    /// passes ([`crate::drive`]'s `bared`); an older omp exits 2 on it before it opens a
+    /// session. 18.4.12 was the first that dials Steery's door from every process, writes the
+    /// run's end the plugin reads and classifies a context overflow. pi 1.0.0 is the first
+    /// with the extension events and `registerMcpServer` the plugin needs, and knows every
+    /// flag passed.
     fn minimum(self) -> &'static str {
         match self {
-            Self::Omp => "18.4.12",
+            Self::Omp => "18.13.0",
             Self::Pi => "1.0.0",
         }
     }
