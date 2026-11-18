@@ -13,11 +13,6 @@ use steery_driver_common::program::{
 };
 use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Setup};
 
-/// The oldest release whose store, `mcp.servers` and `models status --check` this driver
-/// reads.
-pub const MINIMUM_TEXT: &str = "2026.11.3";
-const MINIMUM: (u64, u64, u64) = (2026, 11, 3);
-
 /// The `openclaw` that Steery runs: the first on `PATH`, else where OpenClaw's installer
 /// puts it: npm's user prefix `~/.npm-global/bin`, which it sets where the global prefix is
 /// not writable (`install.sh` `fix_npm_permissions`), else the wrapper of its git install,
@@ -62,44 +57,32 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Planne
     };
     let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
-    let mut refused = None;
-    let mut entries = Vec::new();
-    match release {
-        None => notes.push(
+    if release.is_none() {
+        notes.push(
             "`--version` named no release, so the driver says nothing about this build.".into(),
-        ),
-        Some(release) if release < MINIMUM => {
-            let (major, minor, patch) = release;
-            refused = Some(format!(
-                "OpenClaw {major}.{minor}.{patch} is older than {MINIMUM_TEXT}, the oldest that \
-                 Steery reads. Run `openclaw update`."
-            ));
-        }
-        Some(_) => {}
+        );
     }
-    let mut asked = Vec::new();
-    if refused.is_none() {
-        notes.extend(others_note(
-            "openclaw",
-            "openclaw",
-            Some(&installed(home)),
-            &binary,
+    notes.extend(others_note(
+        "openclaw",
+        "openclaw",
+        Some(&installed(home)),
+        &binary,
+    ));
+    let config = root.join("openclaw.json");
+    if let Ok(text) = std::fs::read(&config)
+        && serde_json::from_slice::<serde_json::Value>(&text).is_err()
+    {
+        notes.push(format!(
+            "{} is not plain JSON. OpenClaw reads JSON5 (comments, trailing commas), \
+             the runtime writes JSON only: make the file plain JSON, or add the steery \
+             server under mcp.servers yourself.",
+            config.display()
         ));
-        let config = root.join("openclaw.json");
-        if let Ok(text) = std::fs::read(&config)
-            && serde_json::from_slice::<serde_json::Value>(&text).is_err()
-        {
-            notes.push(format!(
-                "{} is not plain JSON. OpenClaw reads JSON5 (comments, trailing commas), \
-                 the runtime writes JSON only: make the file plain JSON, or add the steery \
-                 server under mcp.servers yourself.",
-                config.display()
-            ));
-        }
-        entries = self::entries(root, &setup);
-        if needs && super::sign_in::lacking(home).await {
-            asked.push(super::sign_in::need());
-        }
+    }
+    let entries = self::entries(root, &setup);
+    let mut asked = Vec::new();
+    if needs && super::sign_in::lacking(home).await {
+        asked.push(super::sign_in::need());
     }
     Planned {
         found: Some(Found {
@@ -109,7 +92,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, needs: bool) -> Planne
             }),
             root: root.to_path_buf(),
         }),
-        refused,
+        refused: None,
         entries,
         notes,
         install: None,

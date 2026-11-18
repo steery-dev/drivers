@@ -45,26 +45,12 @@ pub async fn plan(root: &Path, setup: Setup) -> Planned {
 async fn found(binary: PathBuf, root: &Path, setup: Setup) -> Planned {
     let release = version(&binary).await.as_deref().and_then(release_within);
     let mut notes = Vec::new();
-    let mut refused = None;
-    let mut entries = Vec::new();
-    let least = release_within(super::MINIMUM).unwrap_or_default();
-    match release {
-        None => notes.push(
+    if release.is_none() {
+        notes.push(
             "`--version` named no release, so the driver says nothing about this build.".into(),
-        ),
-        Some((major, minor, patch)) if (major, minor, patch) < least => {
-            refused = Some(format!(
-                "Qwen Code {major}.{minor}.{patch} is older than {}, the oldest that Steery \
-                 reads. Run `npm install -g {}@latest`.",
-                super::MINIMUM,
-                super::PACKAGE,
-            ));
-        }
-        Some(_) => {}
+        );
     }
-    if refused.is_none() {
-        entries = self::entries(root, &setup);
-    }
+    let entries = self::entries(root, &setup);
     Planned {
         found: Some(Found {
             binary,
@@ -73,7 +59,7 @@ async fn found(binary: PathBuf, root: &Path, setup: Setup) -> Planned {
             }),
             root: root.to_path_buf(),
         }),
-        refused,
+        refused: None,
         entries,
         notes,
         install: None,

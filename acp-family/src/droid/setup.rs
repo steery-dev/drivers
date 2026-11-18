@@ -12,7 +12,7 @@ use steery_driver_common::program::{
 };
 use steery_sdk::wire::harness::{Entry, Format, Found, Install, Part, Planned, Setup};
 
-use super::{EXECUTABLE, MINIMUM};
+use super::EXECUTABLE;
 
 /// Factory's own installer. It installs `droid` into `~/.local/bin`.
 const INSTALLER: &str = "curl -fsSL https://app.factory.ai/cli | sh";
@@ -59,20 +59,11 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Planned {
         };
     };
     let release = version(&binary).await.as_deref().and_then(release_within);
-    let least = release_within(MINIMUM).unwrap_or_default();
     let mut notes = Vec::new();
-    let mut refused = None;
-    match release {
-        None => notes.push(
+    if release.is_none() {
+        notes.push(
             "`--version` named no release, so the driver says nothing about this build.".into(),
-        ),
-        Some((major, minor, patch)) if (major, minor, patch) < least => {
-            refused = Some(format!(
-                "Droid {major}.{minor}.{patch} is older than {MINIMUM}, the oldest that Steery \
-                 reads. Run `{EXECUTABLE} update`."
-            ));
-        }
-        Some(_) => {}
+        );
     }
     notes.extend(others_note(
         "Droid",
@@ -80,16 +71,12 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Planned {
         Some(&installer_folder(home)),
         &binary,
     ));
-    let entries = if refused.is_none() {
-        notes.push(
-            "Factory's own models need a sign-in (`droid`, then sign in, or `FACTORY_API_KEY`). \
-             A custom model in Droid's settings runs without one."
-                .into(),
-        );
-        self::entries(root, &setup)
-    } else {
-        Vec::new()
-    };
+    notes.push(
+        "Factory's own models need a sign-in (`droid`, then sign in, or `FACTORY_API_KEY`). \
+         A custom model in Droid's settings runs without one."
+            .into(),
+    );
+    let entries = self::entries(root, &setup);
     Planned {
         found: Some(Found {
             binary,
@@ -98,7 +85,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup) -> Planned {
             }),
             root: root.to_path_buf(),
         }),
-        refused,
+        refused: None,
         entries,
         notes,
         install: None,
