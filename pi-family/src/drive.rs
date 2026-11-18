@@ -466,22 +466,26 @@ fn refused_by(harness: Harness, said: &str) -> Option<&'static str> {
 
 /// omp 18.4.12's own lines: a `--resume` conversation whose folder is gone; `Session
 /// "<id>" not found.` for an id it has no conversation for; `Model "<pick>" not found`;
-/// and no model, a provider it does not know or no sign-in for the model, where the run
-/// exits before the words go in.
+/// and no model or a provider it does not know, where the run exits before the words go
+/// in. No sign-in for a model it knows is `signed-out`, a word beside the SDK's: omp's
+/// `prompt` says `No API key found for <provider>`, its model switches `No API key for
+/// <provider>/<id>` (omp 18.22.2).
 fn omp_refused(said: &str) -> Option<&'static str> {
     const NO_FOLDER: &str = "belongs to a directory that no longer exists";
     const SESSION: &str = "Session \"";
     const MODEL: &str = "Model \"";
     const NOT_FOUND: &str = "\" not found";
-    const NO_MODEL: [&str; 4] = [
+    const NO_MODEL: [&str; 3] = [
         "No models available",
         "Unknown provider \"",
         "No model selected",
-        "No API key found for ",
     ];
+    const NO_SIGN_IN: [&str; 2] = ["No API key found for ", "No API key for "];
     let says = |what: &str| said.contains(what) && said.contains(NOT_FOUND);
     if said.contains(NO_FOLDER) {
         Some(refusal::NO_PLACE)
+    } else if NO_SIGN_IN.iter().any(|line| said.contains(line)) {
+        Some("signed-out")
     } else if says(MODEL) || NO_MODEL.iter().any(|line| said.contains(line)) {
         Some(refusal::MODEL_MISSING)
     } else if says(SESSION) {
@@ -789,6 +793,19 @@ mod tests {
         assert_eq!(
             refused_by(Harness::Omp, "Cannot fork: source session"),
             None
+        );
+        // A model omp knows whose provider has no sign-in, beside no model at all.
+        assert_eq!(
+            refused_by(Harness::Omp, "No API key found for anthropic."),
+            Some("signed-out")
+        );
+        assert_eq!(
+            refused_by(Harness::Omp, "Error: No API key for anthropic/claude-opus-5-5"),
+            Some("signed-out")
+        );
+        assert_eq!(
+            refused_by(Harness::Omp, "No model selected."),
+            Some(refusal::MODEL_MISSING)
         );
         // As omp 18.4.4 says a conversation whose folder is gone.
         assert_eq!(
