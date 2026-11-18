@@ -27,6 +27,7 @@ pub async fn models(root: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch: vec![root.join("settings.json"), root.join("config.json")],
         signed_in,
+        signed_in_at: None,
     })
 }
 

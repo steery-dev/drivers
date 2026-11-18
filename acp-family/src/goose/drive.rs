@@ -187,6 +187,7 @@ pub async fn models(place: &Place) -> Result<Models, Error> {
                 unlisted: None,
                 watch,
                 signed_in: Some(false),
+                signed_in_at: None,
             });
         }
         let said = error["data"]
@@ -203,6 +204,7 @@ pub async fn models(place: &Place) -> Result<Models, Error> {
         unlisted: None,
         watch,
         signed_in: Some(true),
+        signed_in_at: None,
     })
 }
 

@@ -72,6 +72,7 @@ impl Catalog {
             unlisted: None,
             watch: watched(harness, home, root),
             signed_in: None,
+            signed_in_at: None,
         })
     }
 

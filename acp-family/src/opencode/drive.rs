@@ -201,6 +201,7 @@ pub async fn models(opencode: Option<&Path>, place: &Place) -> Result<Models, Er
         watch,
         // Zen's free models need no account, and OpenCode keeps no sign-in of its own.
         signed_in: None,
+        signed_in_at: None,
     })
 }
 

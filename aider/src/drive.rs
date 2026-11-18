@@ -87,6 +87,7 @@ pub async fn models(home: &Path) -> Result<Models, Error> {
         }),
         watch: vec![home::manifests(home)],
         signed_in: None,
+        signed_in_at: None,
     })
 }
 

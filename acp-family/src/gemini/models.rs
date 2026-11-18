@@ -58,6 +58,7 @@ pub async fn list(root: &Path) -> Result<Models, Error> {
             root.join("oauth_creds.json"),
         ],
         signed_in: signed_in(selected, &env, root.join("oauth_creds.json").is_file()),
+        signed_in_at: None,
     })
 }
 

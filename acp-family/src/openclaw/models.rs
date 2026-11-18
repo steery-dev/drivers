@@ -45,6 +45,7 @@ pub async fn list(home: &Path, root: &Path) -> Result<Models, Error> {
         unlisted: None,
         watch: watched(root),
         signed_in: status.ok().and_then(|status| status.signed_in()),
+        signed_in_at: None,
     })
 }
 
