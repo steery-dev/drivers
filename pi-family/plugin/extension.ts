@@ -453,6 +453,12 @@ type Context = {
 /** Why the harness would not take words or a pick: its refusal word, and the line it gives. */
 type Unready = { word: "model-missing" | "signed-out"; error: string };
 
+/** What a `signed-out` line tells its person to do, as the driver's own sign-in says it. */
+function signIn(provider: string): string {
+  const how = HARNESS === "pi" ? "run `pi` in a terminal and type /login in it" : "run `omp login` in a terminal";
+  return `sign ${HARNESS} in to ${provider} on this machine: ${how}`;
+}
+
 /**
  * Why the harness would refuse to start a turn from words given now, or nothing where it
  * would start one or cannot be asked. Each asks this itself before it starts one — a
@@ -469,7 +475,7 @@ async function unstartable(ctx: Context): Promise<Unready | undefined> {
   if (!registry?.hasConfiguredAuth || !registry.getApiKeyAndHeaders) return undefined;
   const signedOut = (why: string): Unready => ({
     word: "signed-out",
-    error: `${HARNESS} has no credentials for ${model.provider}/${model.id}: ${why}`,
+    error: `${HARNESS} has no credentials for ${model.provider}/${model.id}: ${why}; ${signIn(model.provider)}`,
   });
   try {
     if (registry.hasConfiguredAuth(model)) return undefined;
@@ -2822,7 +2828,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
     const set = async (found: Model): Promise<Unready | undefined> => {
       try {
         if ((await pi.setModel?.(found)) === true) return undefined;
-        return { word: "signed-out", error: still(`has no credentials for ${found.provider}/${found.id}`) };
+        return {
+          word: "signed-out",
+          error: `${HARNESS} has no credentials for ${found.provider}/${found.id}: ${signIn(found.provider)}`,
+        };
       } catch (error) {
         return { word: "model-missing", error: still(`could not set the model ${found.provider}/${found.id}: ${String(error)}`) };
       }
