@@ -450,26 +450,42 @@ type Context = {
   };
 };
 
+/** Why the harness would not take words or a pick: its refusal word, and the line it gives. */
+type Unready = { word: "model-missing" | "signed-out"; error: string };
+
 /**
  * Why the harness would refuse to start a turn from words given now, or nothing where it
  * would start one or cannot be asked. Each asks this itself before it starts one — a
  * model, and credentials its provider can find — and drops the words where either is
  * missing: pi after its `input` event, out of sight of whoever handed them over (pi 1.0.0
  * `AgentSession.prompt`), omp by throwing from the call that handed them, before it takes
- * them (omp 18.4.12 `AgentSession.prompt`).
+ * them (omp 18.4.12 `AgentSession.prompt`). No model is `model-missing`; a model whose
+ * provider has no credentials is `signed-out`.
  */
-async function unstartable(ctx: Context): Promise<string | undefined> {
+async function unstartable(ctx: Context): Promise<Unready | undefined> {
   const model = ctx.model;
-  if (!model) return `${HARNESS} has no model selected`;
+  if (!model) return { word: "model-missing", error: `${HARNESS} has no model selected` };
   const registry = ctx.modelRegistry;
   if (!registry?.hasConfiguredAuth || !registry.getApiKeyAndHeaders) return undefined;
+  const signedOut = (why: string): Unready => ({
+    word: "signed-out",
+    error: `${HARNESS} has no credentials for ${model.provider}/${model.id}: ${why}`,
+  });
   try {
     if (registry.hasConfiguredAuth(model)) return undefined;
     const auth = await registry.getApiKeyAndHeaders(model);
-    return auth.ok ? undefined : `${HARNESS} has no credentials for ${model.provider}/${model.id}: ${auth.error ?? "none found"}`;
+    return auth.ok ? undefined : signedOut(auth.error ?? "none found");
   } catch (error) {
-    return `${HARNESS} has no credentials for ${model.provider}/${model.id}: ${String(error)}`;
+    return signedOut(String(error));
   }
+}
+
+/**
+ * Why the harness threw before it took words handed to it: asked again the way it asks
+ * ([`unstartable`]), else `model-missing` with its own line.
+ */
+async function unstarted(ctx: Context, error: unknown): Promise<Unready> {
+  return (await unstartable(ctx)) ?? { word: "model-missing", error: String(error) };
 }
 
 /**
@@ -567,6 +583,7 @@ type Api = {
  * `refused` with one of the op's refusal words — `no-answer` (words handed to the harness
  * and not yet seen held, so on their way in; a turn still running after a stop or a force),
  * `refused` (the harness threw, let held words go unseen, or the copy takes no such ask), `model-missing`,
+ * `signed-out` (the model's provider has no credentials),
  * `selection-unsupported` (a harness call this copy lacks), `harness-busy`, `other-turn`
  * when a stop names a say whose turn is not the one running, or `ending` when the
  * conversation stopped here, or this copy moved to another, before anything was handed
@@ -1677,10 +1694,10 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
   /**
    * The harness let `say`'s words go without taking them: nothing of them is in. `word`
    * says why: `not-taken` where its turn ended and its queue let them go, which the runtime
-   * hands again once; `model-missing` where it threw before it took them, which goes back to
-   * the person.
+   * hands again once; `model-missing` or `signed-out` where it threw before it took them
+   * ([`unstarted`]), which goes back to the person.
    */
-  const lost = (say: Say, word: "not-taken" | "model-missing", error: string) => {
+  const lost = (say: Say, word: "not-taken" | Unready["word"], error: string) => {
     if (says.includes(say)) says.splice(says.indexOf(say), 1);
     settleSay(say, { refused: word, error });
   };
@@ -2575,8 +2592,9 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
    * Idle, both harnesses ask for a model and its credentials before they start a turn, and
    * drop the words where either is missing: pi out of sight, omp by throwing before it
    * takes them. So the door asks first, the way they ask ([`unstartable`]), and words they
-   * would drop are refused `model-missing` with nothing handed over; omp throwing anyway
-   * before it took them is refused the same.
+   * would drop are refused `model-missing`, or `signed-out` where only credentials are
+   * missing, with nothing handed over; omp throwing anyway before it took them is refused
+   * the same ([`unstarted`]).
    *
    * Not held within [`HELD_WITHIN_MS`] they are `no-answer` where handed (on their way in,
    * still tracked) and `harness-busy` where not. A one-shot run's words still waiting as the
@@ -2665,7 +2683,7 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       if (!running || alone) {
         const unready = await unstartable(ctx);
         if (unready) {
-          one.answer({ refused: "model-missing", error: unready });
+          one.answer({ refused: unready.word, error: unready.error });
           return;
         }
         if (!pending.includes(one)) return;
@@ -2703,15 +2721,17 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         if (sent instanceof Promise) {
           // omp's call settles once the turn its words started ends. Idle, it throws before
           // it takes them where it finds no model or credentials after all: nothing went in.
-          sent.catch((error: unknown) => {
+          sent.catch(async (error: unknown) => {
             if (say.taken_at !== undefined) return;
             if (running) {
               if (pending.includes(one)) one.answer({ refused: "no-answer", error: String(error) });
               return;
             }
-            if (!pending.includes(one)) return lost(say, "model-missing", String(error));
+            const why = await unstarted(ctx, error);
+            if (say.taken_at !== undefined) return;
+            if (!pending.includes(one)) return lost(say, why.word, why.error);
             if (says.includes(say)) says.splice(says.indexOf(say), 1);
-            one.answer({ refused: "model-missing", error: String(error) });
+            one.answer({ refused: why.word, error: why.error });
           });
         }
       } catch (error) {
@@ -2793,12 +2813,18 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         (slash > 0 ? ctx.modelRegistry?.find?.(spec.slice(0, slash), spec.slice(slash + 1)) : undefined)
       );
     };
-    /** Whether the harness set it: pi says no, or throws, where it finds no credentials. */
-    const set = async (found: Model): Promise<boolean> => {
+    /**
+     * What keeps the harness from setting it, or nothing where it set it. Both say no where
+     * its provider has no credentials (pi 1.0.0 `hasConfiguredAuth`, omp 18.22.2
+     * `getApiKey`); a throw is any other failure to set it, credentials checked again among
+     * them, so it stays `model-missing`.
+     */
+    const set = async (found: Model): Promise<Unready | undefined> => {
       try {
-        return (await pi.setModel?.(found)) === true;
-      } catch {
-        return false;
+        if ((await pi.setModel?.(found)) === true) return undefined;
+        return { word: "signed-out", error: still(`has no credentials for ${found.provider}/${found.id}`) };
+      } catch (error) {
+        return { word: "model-missing", error: still(`could not set the model ${found.provider}/${found.id}: ${String(error)}`) };
       }
     };
     if (model !== undefined) {
@@ -2811,13 +2837,13 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
         found = lookup(model);
       }
       if (!found) return { refused: "model-missing", error: still(`does not know the model ${model}`) };
-      let switched = await set(found);
-      if (!switched && inSession(session) && (await again())) {
+      let unset = await set(found);
+      if (unset && inSession(session) && (await again())) {
         if (!inSession(session)) return moved(false);
-        switched = await set(lookup(model) ?? found);
+        unset = await set(lookup(model) ?? found);
       }
-      if (!inSession(session)) return moved(switched);
-      if (!switched) return { refused: "model-missing", error: still(`has no credentials for ${model}`) };
+      if (!inSession(session)) return moved(!unset);
+      if (unset) return { refused: unset.word, error: unset.error };
     }
     if (thinking !== undefined) {
       if (!pi.setThinkingLevel) {
@@ -2944,12 +2970,15 @@ export default function steery(pi: Api, carried: Carried = {}): Running {
       try {
         const sent = pi.sendUserMessage(one.words);
         if (sent instanceof Promise) {
-          sent.catch((error: unknown) => {
-            if (one.taken_at === undefined) lost(one, "model-missing", String(error));
+          sent.catch(async (error: unknown) => {
+            if (one.taken_at !== undefined) return;
+            const why = await unstarted(ctx, error);
+            if (one.taken_at === undefined) lost(one, why.word, why.error);
           });
         }
       } catch (error) {
-        lost(one, "model-missing", String(error));
+        const why = await unstarted(ctx, error);
+        lost(one, why.word, why.error);
       }
     }
     noteState();
