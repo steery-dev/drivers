@@ -921,9 +921,9 @@ is not the person's to trust. A driver on version 4 says the same as a note.
   - a `decision` with its `behavior` (and the standing permission chosen) on
     `PermissionRequest`
 
-  At protocol 17, each hook that says `context` declares `room: 8000`, and none says
+  At protocol 17, each hook that says `context` declares `room: 2500`, and none says
   `notice`. Codex keeps 2,500 tokens of a paragraph, at 4 bytes a token, and saves a longer one
-  to a file with a head and tail in its place.
+  to a file with a head and tail in its place. A character takes up to 4 bytes.
 - **Drive.**
   - `held`: a native owner, where one takes the thread's words. The owner is the window of the
     Codex app that owns the thread. Or it is a running app server of its home that has the
@@ -971,10 +971,11 @@ is not the person's to trust. A driver on version 4 says the same as a note.
   - `receipt/mark`, `receipt/find`: the thread's turns before the words, and the one turn after
     them that carries the delivery marker.
   - `models`: the app server's `model/list`, the default first. `signed_in` comes from
-    `codex login status` (see Signing in). The driver watches `auth.json`, so it sees a login
-    at once. At protocol 18, a `signed_in: true` list also says `signed_in_at`: the later of
-    `auth.json`'s change and, on macOS, the `mdat` of the keychain item `Codex Auth`, account
-    `cli|` and 16 hex digits of the SHA-256 of Codex's home (its `keyring` and `auto` stores).
+    `codex login status` (see Signing in). The driver watches `auth.json` and
+    `secrets/codex_auth.age`, so it sees a login at once. At protocol 18, a `signed_in: true`
+    list also says `signed_in_at`: the latest of those files' changes and, on macOS, the `mdat`
+    of the keychain item `Codex Auth`, account `cli|` and 16 hex digits of the SHA-256 of
+    Codex's home (its `keyring` and `auto` stores).
   - `reader`: `codex exec --json --ephemeral` with every MCP server off, no tool or feature
     that it does not need, and a read-only sandbox. `reader/read` takes its last agent
     message.
