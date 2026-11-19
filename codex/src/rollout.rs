@@ -123,7 +123,7 @@ impl Head {
     }
 
     /// The thread this one was forked from.
-    fn parent(&self) -> Option<&str> {
+    pub(crate) fn parent(&self) -> Option<&str> {
         let own = self.id.as_deref();
         self.forked_from
             .as_deref()
@@ -131,7 +131,9 @@ impl Head {
             .filter(|parent| !parent.is_empty() && Some(*parent) != own)
     }
 
-    fn sub_agent(&self) -> bool {
+    /// A thread of a conversation it is not the first of: a sub-agent's, or one Codex runs for
+    /// itself (`/review`, its guardian reviewer, a compaction), which share their lead's.
+    pub(crate) fn sub_agent(&self) -> bool {
         self.session_id
             .as_ref()
             .zip(self.id.as_ref())
@@ -835,6 +837,22 @@ fn opening(file: &Path) -> Opening {
         whole,
         settled,
     }
+}
+
+/// What a rollout's first record, its `session_meta`, says; none before it is written whole.
+pub(crate) fn meta_of(file: &Path) -> Option<Head> {
+    let mut reader = BufReader::new(File::open(file).ok()?);
+    let mut line = Vec::new();
+    if capped(&mut reader, &mut line, RECORD).ok()? != Line::Whole {
+        return None;
+    }
+    let record = serde_json::from_slice::<Value>(&line).ok()?;
+    if text(&record, "type") != Some("session_meta") {
+        return None;
+    }
+    let mut found = Head::default();
+    meta(record.get("payload")?, &mut found);
+    Some(found)
 }
 
 fn meta(payload: &Value, found: &mut Head) {

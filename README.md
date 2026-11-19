@@ -914,7 +914,12 @@ is not the person's to trust. A driver on version 4 says the same as a note.
   move it. Then the plan writes the same trust again at the hook's new place. The plan asks
   Codex's own `hooks/list` where the hook now stands, and never computes it here.
 - **Hooks** (`hook/read`, `hook/answer`). Codex's documents become Moments. The driver keeps the
-  model that each document names as state. An answer becomes what Codex parses:
+  model that each document names as state. A moment's sub-agent is the document's `agent_id`.
+  A document with none comes from the thread in its rollout's `session_meta`. Where that thread
+  is not the conversation's first, it is a sub-agent too: a thread that Codex runs for itself
+  (`/review`, its guardian reviewer, a compaction) runs the same hooks under its lead's
+  `session_id`. At protocol 17, a `SessionStart` whose `source` is `fork` names the fork's
+  parent (`forked_from`): its rollout's `forked_from_id`. An answer becomes what Codex parses:
   - `additionalContext` on `SessionStart` and `UserPromptSubmit`
   - `decision: "block"` at `Stop`
   - a `permissionDecision` on `PreToolUse`
