@@ -35,7 +35,16 @@ pub const ENDING: u32 = 3;
 /// Codex waits on the hook, and one handed back is refused in a Steery-driven turn.
 pub const ASKING: u32 = (i32::MAX / 1000) as u32;
 
-/// Every moment of Codex's Steery reads, its kind, and what it can say there.
+/// The characters of one paragraph Codex keeps whole. It counts 4 bytes a token and keeps a
+/// hook's `additionalContext`, and a `Stop` reason, to 2,500 tokens; a longer one it saves to
+/// a file and replaces with a head and tail and the file's path (codex-rs
+/// `hooks/src/output_spill.rs`, `utils/string/src/truncate.rs`). 8,000 characters leave
+/// 2,000 bytes for the few characters of Steery's that take more than one.
+const ROOM: u32 = 8_000;
+
+/// Every moment of Codex's Steery reads, its kind, and what it can say there under a protocol
+/// older than 17 ([`steery_sdk::WORDS`]); from 17 none says `notice`, which the runtime no
+/// longer gives.
 const EVENTS: [(&str, HookKind, &[Says]); 8] = [
     (
         "SessionStart",
@@ -68,16 +77,21 @@ pub fn timeout(event: &str) -> u32 {
 
 /// The hooks as `initialize` declares them under the `protocol` picked.
 pub fn declared(protocol: u32) -> Vec<Hook> {
+    let words = steery_driver_common::program::words(protocol);
     EVENTS
         .iter()
         .map(|(event, kind, says)| Hook {
             event: (*event).into(),
             kind: *kind,
             via: Via::Command,
-            says: says.to_vec(),
+            says: says
+                .iter()
+                .copied()
+                .filter(|say| !(words && *say == Says::Notice))
+                .collect(),
             waits: (timeout(event) == ASKING).then_some(ASKING),
             env: Vec::new(),
-            room: None,
+            room: (words && says.contains(&Says::Context)).then_some(ROOM),
             // Codex fails closed on a `PermissionRequest` answer with `updatedPermissions`
             // (0.166.0), so a yes covers its one call: Codex keeps neither scope.
             keeps: (*kind == HookKind::Permission && protocol >= steery_sdk::KEEPS)
