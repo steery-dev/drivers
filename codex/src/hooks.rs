@@ -36,11 +36,12 @@ pub const ENDING: u32 = 3;
 pub const ASKING: u32 = (i32::MAX / 1000) as u32;
 
 /// The characters of one paragraph Codex keeps whole. It counts 4 bytes a token and keeps a
-/// hook's `additionalContext`, and a `Stop` reason, to 2,500 tokens; a longer one it saves to
-/// a file and replaces with a head and tail and the file's path (codex-rs
-/// `hooks/src/output_spill.rs`, `utils/string/src/truncate.rs`). 8,000 characters leave
-/// 2,000 bytes for the few characters of Steery's that take more than one.
-const ROOM: u32 = 8_000;
+/// hook's `additionalContext`, and a `Stop` reason, to 2,500 tokens: 10,000 bytes. A longer
+/// one it saves to a file and replaces with a head and tail and the file's path (codex-rs
+/// `hooks/src/output_spill.rs`, `utils/string/src/truncate.rs`). A character is up to 4
+/// bytes, and Steery's paragraphs hold 3-byte ones (`─`, `→`): only 2,500 characters always
+/// fit. A part past them the runtime says as the command that prints it.
+const ROOM: u32 = 2_500;
 
 /// Every moment of Codex's Steery reads, its kind, and what it can say there under a protocol
 /// older than 17 ([`steery_sdk::WORDS`]); from 17 none says `notice`, which the runtime no

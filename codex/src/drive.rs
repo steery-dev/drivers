@@ -892,9 +892,10 @@ impl Drive {
                 Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time")
             })?
             .map_err(|line| Error::refused(refusal::REFUSED, line))?;
-        let mut watch: Vec<PathBuf> = ["config.toml", "auth.json", "models_cache.json"]
+        let mut watch: Vec<PathBuf> = ["config.toml", "models_cache.json"]
             .iter()
             .map(|name| root.join(name))
+            .chain(CREDENTIALS.iter().map(|file| root.join(file)))
             .collect();
         watch.extend(
             ["/etc/codex/config.toml", "/etc/codex/managed_config.toml"].map(PathBuf::from),
@@ -909,11 +910,16 @@ impl Drive {
     }
 }
 
-/// When Codex last wrote its login's credentials in its home `root`: the later of `auth.json`
-/// changing (`cli_auth_credentials_store = "file"`, its default) and, on macOS, the `mdat` of
-/// its keychain item (`"keyring"` or `"auto"`). Codex names that item service `Codex Auth`,
-/// account `cli|` and the first 16 hex digits of the SHA-256 of `root`'s canonical path
-/// (codex-rs `login/src/auth/storage.rs`, `compute_store_key`).
+/// The files in Codex's home a login writes: `auth.json` (`cli_auth_credentials_store =
+/// "file"`, its default), and its encrypted store (`"keyring"` with the feature
+/// `secret_auth_storage`; codex-rs `secrets/src/local.rs`).
+const CREDENTIALS: [&str; 2] = ["auth.json", "secrets/codex_auth.age"];
+
+/// When Codex last wrote its login's credentials in its home `root`: the latest of
+/// [`CREDENTIALS`] changing and, on macOS, the `mdat` of its keychain item (`"keyring"` or
+/// `"auto"`). Codex names that item service `Codex Auth`, account `cli|` and the first 16 hex
+/// digits of the SHA-256 of `root`'s canonical path (codex-rs `login/src/auth/storage.rs`,
+/// `compute_store_key`).
 async fn signed_in_at(root: &Path) -> Option<u64> {
     use sha2::{Digest, Sha256};
     use std::fmt::Write;
@@ -923,9 +929,12 @@ async fn signed_in_at(root: &Path) -> Option<u64> {
     for byte in &Sha256::digest(canonical.to_string_lossy().as_bytes())[..8] {
         let _ = write!(account, "{byte:02x}");
     }
-    let file = credentials::file_written(&root.join("auth.json"));
+    let files = CREDENTIALS
+        .iter()
+        .filter_map(|file| credentials::file_written(&root.join(file)))
+        .max();
     let keychain = credentials::keychain_written("Codex Auth", Some(&account)).await;
-    file.max(keychain)
+    files.max(keychain)
 }
 
 /// Whether Codex is signed in here, as `codex login status` says it: exit 0 signed in; exit
