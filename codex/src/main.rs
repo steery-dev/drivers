@@ -194,7 +194,10 @@ impl Program for Codex {
                     "Codex has no plugin door that sends its records",
                 ))
             }
-            method::HOOK_READ => result(hooks::read(steery_sdk::params(params)?)?),
+            method::HOOK_READ => {
+                let picked = self.protocol.get().copied().unwrap_or_default();
+                result(hooks::read(steery_sdk::params(params)?, picked)?)
+            }
             method::HOOK_ANSWER => result(hooks::answer(steery_sdk::params(params)?)?),
             method::MCP_LIST => result(
                 mcp::list(

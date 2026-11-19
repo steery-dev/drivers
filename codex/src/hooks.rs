@@ -7,7 +7,10 @@
 //! `prompt`, `tool_name`, `tool_input`, `tool_response`, `tool_use_id`,
 //! `stop_hook_active`. Codex sends no `permission_suggestions`, so a permission moment
 //! offers none. A sub-agent's moments come under its
-//! lead's `session_id` with its own `agent_id`.
+//! lead's `session_id` with its own `agent_id`. A thread Codex runs for itself (`/review`, its
+//! guardian reviewer, a compaction) runs the same hooks under its lead's `session_id` with no
+//! `agent_id`: its rollout's `session_meta` names its own thread, which makes it a sub-agent
+//! too. A fork's `SessionStart` says `source: "fork"`; its rollout names the parent.
 //!
 //! It reads a paragraph back for its agent on `SessionStart` and `UserPromptSubmit`
 //! (`hookSpecificOutput.additionalContext`) and keeps a turn going at `Stop` only on
@@ -23,7 +26,7 @@ use steery_sdk::wire::harness::{
     TurnState, Via,
 };
 
-use crate::calls;
+use crate::{calls, rollout};
 
 /// How long Codex waits for a hook that writes one small file.
 pub const QUICK: u32 = 5;
@@ -121,8 +124,9 @@ fn text<'a>(document: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-/// `hook/read`: the moment a document is, or none where it is no moment Steery carries.
-pub fn read(read: HookRead) -> Result<HookMoment, Error> {
+/// `hook/read`: the moment a document is, or none where it is no moment Steery carries, under
+/// the protocol `picked`.
+pub fn read(read: HookRead, picked: u32) -> Result<HookMoment, Error> {
     let Some(kind) = kind_of(&read.event) else {
         return Ok(HookMoment { moment: None });
     };
@@ -150,12 +154,25 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
         ))
     })
     .flatten();
+    let agent = text(&document, "agent_id");
+    let fork = steery_driver_common::program::words(picked)
+        && kind == HookKind::SessionStart
+        && text(&document, "source") == Some("fork");
+    // Only a document that names no agent, or a fork's start, needs its rollout's first record.
+    let head = (agent.is_none() || fork)
+        .then(|| rollout::meta_of(&absolute("transcript_path")?))
+        .flatten();
+    let sub_agent = match agent {
+        Some(agent) => Some(agent.to_owned()),
+        None => head
+            .as_ref()
+            .filter(|head| head.sub_agent() && head.session_id.as_deref() == Some(external_id))
+            .and_then(|head| head.id.clone()),
+    };
     let moment = Moment {
         event: read.event.clone(),
         external_id: external_id.to_owned(),
-        sub_agent: text(&document, "agent_id")
-            .filter(|agent| *agent != external_id)
-            .map(str::to_owned),
+        sub_agent: sub_agent.filter(|agent| agent != external_id),
         at: None,
         cwd: absolute("cwd"),
         // Codex keeps every rollout under its own home, which `sessions/list` reads.
@@ -171,7 +188,9 @@ pub fn read(read: HookRead) -> Result<HookMoment, Error> {
             && document.get("stop_hook_active").and_then(Value::as_bool) == Some(true),
         // Codex says `other` for every way a session ends: nothing is its person's word.
         person_exited: false,
-        forked_from: None,
+        forked_from: fork
+            .then(|| head.as_ref()?.parent().map(str::to_owned))
+            .flatten(),
         prompt: (kind == HookKind::Prompt)
             .then(|| document.get("prompt").and_then(Value::as_str))
             .flatten()
@@ -263,11 +282,14 @@ mod tests {
     use steery_sdk::wire::harness::Always;
 
     fn moment(event: &str, document: Value) -> Option<Moment> {
-        read(HookRead {
-            event: event.into(),
-            document: document.to_string(),
-            env: BTreeMap::new(),
-        })
+        read(
+            HookRead {
+                event: event.into(),
+                document: document.to_string(),
+                env: BTreeMap::new(),
+            },
+            steery_sdk::SIGNED_IN_AT,
+        )
         .unwrap()
         .moment
     }
