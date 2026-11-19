@@ -865,8 +865,9 @@ impl Drive {
     }
 
     /// `models`: what Codex's own app server lists (`model/list`), the default first, and
-    /// whether Codex is signed in ([`signed_in`]).
-    pub async fn models(&self) -> Result<Models, Error> {
+    /// whether Codex is signed in ([`signed_in`]); signed in, under the protocol `picked` 18
+    /// or newer, also when ([`signed_in_at`]).
+    pub async fn models(&self, picked: u32) -> Result<Models, Error> {
         let codex = binary()?;
         let root = self.store.root();
         let ask = tokio::time::timeout(std::time::Duration::from_secs(25), async {
@@ -880,6 +881,12 @@ impl Drive {
             listed
         });
         let (listed, signed_in) = tokio::join!(ask, signed_in(&codex, root));
+        let signed_in_at = match signed_in == Some(true)
+            && steery_driver_common::program::signed_in_at(picked)
+        {
+            true => signed_in_at(root).await,
+            false => None,
+        };
         let listed = listed
             .map_err(|_| {
                 Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time")
@@ -897,10 +904,28 @@ impl Drive {
             unlisted: None,
             watch,
             signed_in,
-            // Codex picks 16 at most (`protocol_bare`): `signed_in_at` is 18's.
-            signed_in_at: None,
+            signed_in_at,
         })
     }
+}
+
+/// When Codex last wrote its login's credentials in its home `root`: the later of `auth.json`
+/// changing (`cli_auth_credentials_store = "file"`, its default) and, on macOS, the `mdat` of
+/// its keychain item (`"keyring"` or `"auto"`). Codex names that item service `Codex Auth`,
+/// account `cli|` and the first 16 hex digits of the SHA-256 of `root`'s canonical path
+/// (codex-rs `login/src/auth/storage.rs`, `compute_store_key`).
+async fn signed_in_at(root: &Path) -> Option<u64> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    use steery_driver_common::credentials;
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut account = "cli|".to_owned();
+    for byte in &Sha256::digest(canonical.to_string_lossy().as_bytes())[..8] {
+        let _ = write!(account, "{byte:02x}");
+    }
+    let file = credentials::file_written(&root.join("auth.json"));
+    let keychain = credentials::keychain_written("Codex Auth", Some(&account)).await;
+    file.max(keychain)
 }
 
 /// Whether Codex is signed in here, as `codex login status` says it: exit 0 signed in; exit

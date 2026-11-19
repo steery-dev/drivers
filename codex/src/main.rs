@@ -130,7 +130,7 @@ impl Codex {
 
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_bare(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_signed_in_at(&params.protocol)
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         self.changes.picked(protocol);
@@ -208,7 +208,8 @@ impl Program for Codex {
             method::IDLE => result(self.drive()?.idle(steery_sdk::params(params)?).await?),
             method::MODELS => {
                 let _: wire::Empty = steery_sdk::params(params)?;
-                result(self.drive()?.models().await?)
+                let picked = self.protocol.get().copied().unwrap_or_default();
+                result(self.drive()?.models(picked).await?)
             }
             method::START => result(self.drive()?.start(steery_sdk::params(params)?)?),
             method::TURN_READ => result(drive::turn_line(steery_sdk::params(params)?)),

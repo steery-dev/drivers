@@ -774,19 +774,13 @@ pub async fn models(home: &Path, root: &Path, picked: u32) -> Models {
     }
 }
 
-/// When Claude Code last wrote its login's credentials here, in milliseconds since 1970:
-/// the later of `.credentials.json` in its configuration folder `root` changing and, on
-/// macOS, its keychain item's ([`KEYCHAIN`]) `mdat`. None where neither is here.
+/// When Claude Code last wrote its login's credentials here: the later of `.credentials.json`
+/// in its configuration folder `root` changing and, on macOS, its keychain item's
+/// ([`keychain_service`]) `mdat`. None where neither is here.
 async fn signed_in_at(root: &Path) -> Option<u64> {
-    let file = std::fs::metadata(root.join(".credentials.json"))
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        .and_then(|at| u64::try_from(at.as_millis()).ok());
-    let keychain = match cfg!(target_os = "macos") {
-        true => keychain_written().await,
-        false => None,
-    };
+    use steery_driver_common::credentials;
+    let file = credentials::file_written(&root.join(".credentials.json"));
+    let keychain = credentials::keychain_written(&keychain_service(), None).await;
     file.max(keychain)
 }
 
@@ -812,37 +806,6 @@ fn keychain_service() -> String {
         }
     }
     service
-}
-
-/// When Claude Code's keychain item was last written: its `mdat`, as `security
-/// find-generic-password` prints the item's attributes, without `-w` or `-g`, so never its
-/// secret: `"mdat"<timedate>=0x… "20260930092224Z\000"`. None where it gave no such line.
-async fn keychain_written() -> Option<u64> {
-    let mut command = steery_driver_common::program::helper(Path::new("/usr/bin/security"));
-    command.args(["find-generic-password", "-s", &keychain_service()]);
-    let answer = match steery_driver_common::program::ask(command).await {
-        Ok(answer) => answer,
-        Err(why) => {
-            eprintln!("security find-generic-password: {why}, so no sign-in time is read");
-            return None;
-        }
-    };
-    let printed = String::from_utf8_lossy(&answer.stdout);
-    let stamp = printed
-        .lines()
-        .find_map(|line| line.trim_start().strip_prefix("\"mdat\"<timedate>="))?
-        .split('"')
-        .nth(1)?;
-    let digits = |at: std::ops::Range<usize>| stamp.get(at)?.parse::<u32>().ok();
-    let at = chrono::NaiveDate::from_ymd_opt(
-        i32::try_from(digits(0..4)?).ok()?,
-        digits(4..6)?,
-        digits(6..8)?,
-    )?
-    .and_hms_opt(digits(8..10)?, digits(10..12)?, digits(12..14)?)?;
-    (stamp.get(14..15) == Some("Z"))
-        .then(|| u64::try_from(at.and_utc().timestamp_millis()).ok())
-        .flatten()
 }
 
 /// The models [`models`] lists, read from the configuration folder `root` and the

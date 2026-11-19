@@ -14,6 +14,8 @@ chrono = { version = "0.4", default-features = false, features = ["std", "now"] 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 quick-xml = { version = "0.38", features = ["serialize"] }
+# The account of Codex's keychain item: a hash of its home's path (`drive::signed_in_at`).
+sha2 = "0.10"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 toml = "1"
