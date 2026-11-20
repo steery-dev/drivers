@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use steery_driver_common::login::{self, Login, Waiting};
 use steery_driver_common::program::{ask, helper};
-use steery_driver_common::signed::Known;
+use steery_driver_common::signed::{Known, sure};
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -47,13 +47,13 @@ const KEY_WITHIN: Duration = Duration::from_secs(20);
 /// uses it.
 static SIGNED: Known = Known::new();
 
-/// Whether Amp is signed out here: no `AMP_API_KEY`, and Amp says so ([`signed_in`]). Where
-/// Amp says nothing, the last answer it gave.
+/// Whether Amp is signed out here: no `AMP_API_KEY`, and Amp says so twice ([`signed_in`],
+/// [`sure`]). Where Amp says nothing, the last answer it gave.
 pub async fn signed_out(binary: &std::path::Path) -> bool {
     if std::env::var_os(KEY).is_some_and(|key| !key.is_empty()) {
         return false;
     }
-    lacks(&SIGNED, signed_in(binary).await)
+    lacks(&SIGNED, sure(|| signed_in(binary)).await)
 }
 
 /// Whether the plan names the sign-in need, with the probe's answer `now`.

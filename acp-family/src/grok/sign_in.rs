@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use steery_driver_common::login::{self, Login, Waiting};
 use steery_driver_common::program::helper;
-use steery_driver_common::signed::Known;
+use steery_driver_common::signed::{Known, sure};
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -41,19 +41,22 @@ const LINK_WITHIN: Duration = Duration::from_secs(15);
 /// it.
 static SIGNED: Known = Known::new();
 
-/// Whether Grok in its home `root` is here and says it is not signed in. Where `grok models`
-/// says nothing, the last answer it gave.
+/// Whether Grok in its home `root` is here and says it is not signed in, twice ([`sure`]).
+/// Where `grok models` says nothing, the last answer it gave.
 pub async fn lacking(root: &Path) -> bool {
     let Some(binary) = super::binary(root) else {
         return false;
     };
-    let now = match models::printed(&binary, root, &[]).await {
-        Ok(printed) => printed.signed_in(),
-        Err(why) => {
-            eprintln!("grok sign-in probe: {why}");
-            None
+    let now = sure(|| async {
+        match models::printed(&binary, root, &[]).await {
+            Ok(printed) => printed.signed_in(),
+            Err(why) => {
+                eprintln!("grok sign-in probe: {why}");
+                None
+            }
         }
-    };
+    })
+    .await;
     lacks(&SIGNED, now)
 }
 
