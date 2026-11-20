@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use steery_driver_common::program::{ask, helper};
-use steery_driver_common::signed::Known;
+use steery_driver_common::signed::{Known, sure};
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 
@@ -77,19 +77,22 @@ pub(super) async fn status(binary: &Path, env: &[(&str, &str)]) -> Result<Status
 /// answer uses it.
 static SIGNED: Known = Known::new();
 
-/// Whether OpenClaw is here and says a model in use lacks its sign-in. Where `models status`
-/// says nothing, the last answer it gave.
+/// Whether OpenClaw is here and says a model in use lacks its sign-in, twice ([`sure`]).
+/// Where `models status` says nothing, the last answer it gave.
 pub async fn lacking(home: &Path) -> bool {
     let Some(binary) = super::setup::binary(home) else {
         return false;
     };
-    let now = match status(&binary, &[]).await {
-        Ok(status) => status.signed_in(),
-        Err(why) => {
-            eprintln!("openclaw sign-in probe: {why}");
-            None
+    let now = sure(|| async {
+        match status(&binary, &[]).await {
+            Ok(status) => status.signed_in(),
+            Err(why) => {
+                eprintln!("openclaw sign-in probe: {why}");
+                None
+            }
         }
-    };
+    })
+    .await;
     lacks(&SIGNED, now)
 }
 

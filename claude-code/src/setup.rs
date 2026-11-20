@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde_json::json;
 use steery_driver_common::program::{release_within, version};
-use steery_driver_common::signed::Known;
+use steery_driver_common::signed::{Known, sure};
 use steery_sdk::Error;
 use steery_sdk::wire::harness::{Entry, Format, Found, Need, Part, Planned, Setup};
 
@@ -37,7 +37,7 @@ pub async fn plan(home: &Path, root: &Path, setup: Setup, protocol: u32) -> Resu
     let needs = match protocol >= steery_driver_common::program::NEEDS {
         true => asked(
             &SIGNED,
-            crate::drive::signed_in(true).await,
+            sure(|| crate::drive::signed_in(true)).await,
             asking(protocol, &setup),
         ),
         false => Vec::new(),

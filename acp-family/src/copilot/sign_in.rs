@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use steery_driver_common::login::{self, Login, Waiting};
 use steery_driver_common::program::helper;
-use steery_driver_common::signed::Known;
+use steery_driver_common::signed::{Known, sure};
 use steery_sdk::wire::harness::{Field, Give, Given, Need, NeedLink, Way};
 use steery_sdk::{Error, refusal};
 use tokio::io::AsyncWriteExt;
@@ -36,10 +36,10 @@ const TOKEN_WITHIN: Duration = Duration::from_secs(30);
 /// uses it.
 static SIGNED: Known = Known::new();
 
-/// Whether the plan names the sign-in need: Copilot's server says it is not signed in, or
-/// says nothing and said so last.
+/// Whether the plan names the sign-in need: Copilot's server says twice that it is not
+/// signed in ([`sure`]), or says nothing and said so last.
 pub async fn lacking(binary: &Path) -> bool {
-    lacks(&SIGNED, server::signed_in(binary).await)
+    lacks(&SIGNED, sure(|| server::signed_in(binary)).await)
 }
 
 /// Whether the steady answer says Copilot is not signed in, with the probe's answer `now`.
