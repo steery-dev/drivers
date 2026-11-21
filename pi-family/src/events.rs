@@ -217,9 +217,11 @@ const CUT: &str = "[Some lines truncated to";
 fn said_error(harness: Harness, message: &Value, said: &str) -> Option<String> {
     let details = message.get("details");
     let words = if harness == Harness::Omp {
-        shell_output(details)
-            .or_else(|| raw_words(details))
-            .or_else(|| omp_words(message, said))
+        if text(message, "toolName") == Some("bash") {
+            Some(mended(&shell_words(said), shell_output(details).as_deref()))
+        } else {
+            raw_words(details).or_else(|| omp_words(message, said))
+        }
     } else {
         Some(said.to_owned())
     };
@@ -228,7 +230,34 @@ fn said_error(harness: Harness, message: &Value, said: &str) -> Option<String> {
         .filter(|words| !words.is_empty())
 }
 
-/// What a shell call wrote, whole, in the order that omp's trace saw it.
+/// The end omp gives a line of a result it cut at 768 bytes.
+const CUT_LINE: char = '…';
+
+/// A shell call's result text with each line that omp cut made whole again from what its
+/// trace kept of the run. The trace keeps only the newest of what the run wrote, so it
+/// mends the text and never stands in for it: a line it no longer holds stays as it was
+/// cut, and every line omp kept whole stays where it was.
+fn mended(said: &str, trace: Option<&str>) -> String {
+    let Some(trace) = trace else {
+        return said.to_owned();
+    };
+    said.lines()
+        .map(|line| {
+            line.strip_suffix(CUT_LINE)
+                .filter(|kept| !kept.is_empty())
+                .and_then(|kept| {
+                    trace
+                        .lines()
+                        .find(|whole| whole.len() > kept.len() && whole.starts_with(kept))
+                })
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What a shell call wrote, in the order that omp's trace saw it: the newest of it only,
+/// where the run wrote more than the trace keeps.
 fn shell_output(details: Option<&Value>) -> Option<String> {
     let mut output: Vec<(u64, &str)> = details?
         .pointer("/trace/history")?
@@ -258,9 +287,6 @@ fn raw_words(details: Option<&Value>) -> Option<String> {
 
 /// The text of a failed omp result without omp's own wrapping.
 fn omp_words(message: &Value, said: &str) -> Option<String> {
-    if said.contains(CUT) {
-        return None;
-    }
     let tool = text(message, "toolName").unwrap_or_default();
     if tool == "bash" {
         return Some(shell_words(said));
@@ -278,24 +304,25 @@ fn omp_words(message: &Value, said: &str) -> Option<String> {
         Some((before, _)) if refused => before,
         _ => said,
     };
-    Some(said.to_owned())
+    // A cut in what is kept leaves it no longer whole; a cut only in the echo, gone above,
+    // does not.
+    (!said.contains(CUT)).then(|| said.to_owned())
 }
 
 /// A shell call's text without omp's notes after it: its time and its status, and the
 /// placeholder for no output. A call that wrote nothing is left with its status.
 fn shell_words(said: &str) -> String {
     let mut lines: Vec<&str> = said.trim_end().lines().collect();
-    let status = lines
-        .last()
-        .filter(|line| line.starts_with("Command exited with code "))
-        .copied();
-    if status.is_some() {
-        lines.pop();
-    }
-    while lines.last().is_some_and(|line| line.trim().is_empty()) {
-        lines.pop();
-    }
-    if lines.last().is_some_and(|line| line.starts_with("Wall time: ")) {
+    let mut status = None;
+    // omp's notes come after the output, in whichever order it wrote them: its status, its
+    // time, and its mark of cut lines.
+    while let Some(&last) = lines.last() {
+        if last.starts_with("Command exited with code ") {
+            status = status.or(Some(last));
+        } else if !(last.trim().is_empty() || last.starts_with("Wall time: ") || last.starts_with(CUT))
+        {
+            break;
+        }
         lines.pop();
     }
     let body = lines.join("\n");
@@ -1714,6 +1741,19 @@ mod tests {
             error(&refused("bash", &said, details)),
             Some(format!("{long}\nerror: no"))
         );
+        // The trace keeps only the newest of a long run: a line of the result it no longer
+        // holds stays, and only the cut lines it holds are made whole.
+        let first = r#"{"error":"invalid","why":"no","next":"fix it","steery":"7.1.0"}"#;
+        let said = format!(
+            "{first}\n…40000 lines…\n{cut}\n\nCommand exited with code 4\n\n[Some lines truncated to 768 bytes. Use artifact://9:raw:3-3 to read line 3 whole]"
+        );
+        let newest = json!({"trace": {"history": [
+            {"seq": 900, "kind": "Output", "fd": 1, "text": format!("crate-13233\n{long}\n")},
+        ]}});
+        assert_eq!(
+            error(&refused("bash", &said, newest)),
+            Some(format!("{first}\n…40000 lines…\n{long}"))
+        );
     }
 
     #[test]
@@ -1729,7 +1769,11 @@ mod tests {
             Some("Command exited with code 1".to_owned())
         );
         let cut = "a…\n\n\nCommand exited with code 3\n\n[Some lines truncated to 768 bytes. Use artifact://1:raw:1-1 to read line 1 whole]";
-        assert_eq!(error(&refused("bash", cut, json!({}))), None, "cut and no whole copy");
+        assert_eq!(
+            error(&refused("bash", cut, json!({}))),
+            Some("a…".to_owned()),
+            "a line cut with no whole copy stays as omp cut it"
+        );
     }
 
     #[test]
@@ -1763,6 +1807,14 @@ mod tests {
             error(&refused("mcp__t", direct, json!({"isError": true, "error": "x"}))),
             Some("Validation failed for tool \"t\":\n  - work: is required".to_owned())
         );
+        // A long argument omp cut in its echo leaves what is kept whole, and the echo out.
+        let cut = format!(
+            "{}{}…\n\n[Some lines truncated to 768 bytes. Use artifact://3:raw:5-5 to read line 5 whole]",
+            &said[..said.find("\n\nReceived arguments:").unwrap() + 22],
+            "x".repeat(760)
+        );
+        let device = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
+        assert_eq!(error(&refused("write", &cut, device)), Some(kept.to_owned()));
     }
 
     #[test]

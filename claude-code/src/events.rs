@@ -1119,13 +1119,25 @@ fn interrupted(said: &str) -> bool {
 /// [`None`], and so is a result that has none.
 fn failure_words(said: &str) -> Option<String> {
     const REFUSED: &str = "The user doesn't want to proceed with this tool use.";
+    const REJECTED: &str =
+        "The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).";
     const LINE: &str = "STOP what you are doing and wait for the user to tell you how to proceed.";
     let said = said.trim();
-    if said.starts_with(REFUSED) {
-        // What a person said follows the line, so the line ends where Claude Code's own
-        // words do; a line of another make says only its first sentence.
-        let ends = said.find(LINE).map_or(REFUSED.len(), |at| at + LINE.len());
-        return Some(said[..ends].to_owned());
+    if let Some(rest) = said.strip_prefix(REFUSED) {
+        // Claude Code's own sentences, each only where it comes next in their order; what a
+        // person said follows them, and a sentence of theirs is never read as one of these.
+        let mut kept = REFUSED.to_owned();
+        let mut rest = rest;
+        for sentence in [REJECTED, LINE] {
+            let Some(after) = rest.strip_prefix(' ').and_then(|rest| rest.strip_prefix(sentence))
+            else {
+                break;
+            };
+            kept.push(' ');
+            kept.push_str(sentence);
+            rest = after;
+        }
+        return Some(kept);
     }
     let wrapped = said
         .strip_prefix("<tool_use_error>")?
@@ -2124,6 +2136,13 @@ mod tests {
         assert_eq!(failure_words(&format!("{line}{note}")), Some(line.to_owned()));
         let said = format!("{line} To tell you how to proceed, the user said:\nuse sed, you fool");
         assert_eq!(failure_words(&said), Some(line.to_owned()));
+        // Claude Code's own form with words: the person's words follow its second sentence,
+        // and a sentence of theirs that reads like Claude Code's own is still theirs.
+        let rejected = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file).";
+        let words = format!(
+            "{rejected} To tell you how to proceed, the user said:\nno. STOP what you are doing and wait for the user to tell you how to proceed."
+        );
+        assert_eq!(failure_words(&words), Some(rejected.to_owned()));
         let unknown = "The user doesn't want to proceed with this tool use. They wrote: no";
         assert_eq!(
             failure_words(unknown),
