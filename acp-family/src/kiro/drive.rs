@@ -92,10 +92,11 @@ pub fn start(
     )
 }
 
-/// `held`: the live process whose lease holds the conversation, else nobody.
-pub fn held(store: &Store, held: &Held) -> Result<HeldBy, Error> {
-    store.folder(&held.external_id)?;
-    Ok(HeldBy::Holder(match store.holder(&held.external_id) {
+/// `held`: the live process whose lease holds the conversation, else nobody. The lease
+/// counts even where the conversation's own files do not read yet, as before its first
+/// prompt.
+pub fn held(store: &Store, held: &Held) -> HeldBy {
+    HeldBy::Holder(match store.holder(&held.external_id) {
         Some((pid, process_start)) => Holder::Person {
             door: None,
             stop: HolderStop::Process {
@@ -108,20 +109,23 @@ pub fn held(store: &Store, held: &Held) -> Result<HeldBy, Error> {
         None => Holder::Nobody {
             proof: "no live process holds Kiro's lease on it (session-leases)".into(),
         },
-    }))
+    })
 }
 
-/// `idle`: the last turn in the conversation's file where it ended.
-pub fn idle(store: &Store, held: Held) -> Result<Sampled, Error> {
-    let read = store.read(Read {
-        external_id: held.external_id,
-        sub_agent: None,
-        cursor: None,
-        tail: None,
-    })?;
-    Ok(Sampled {
-        sample: shared::sample(&read.events),
-    })
+/// `idle`: the last turn in the conversation's file where it ended; nothing where no file
+/// reads.
+pub fn idle(store: &Store, held: Held) -> Sampled {
+    Sampled {
+        sample: store
+            .read(Read {
+                external_id: held.external_id,
+                sub_agent: None,
+                cursor: None,
+                tail: None,
+            })
+            .ok()
+            .and_then(|read| shared::sample(&read.events)),
+    }
 }
 
 /// `receipt/mark`: how many records the conversation has.

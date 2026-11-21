@@ -142,17 +142,20 @@ pub fn held(store: &Store, held: Held) -> HeldBy {
     })
 }
 
-/// `idle`: the last turn in the conversation's file where it ended.
-pub fn idle(store: &Store, held: Held) -> Result<Sampled, Error> {
-    let read = store.read(Read {
-        external_id: held.external_id,
-        sub_agent: None,
-        cursor: None,
-        tail: None,
-    })?;
-    Ok(Sampled {
-        sample: shared::sample(&read.events),
-    })
+/// `idle`: the last turn in the conversation's file where it ended; nothing where no file
+/// reads.
+pub fn idle(store: &Store, held: Held) -> Sampled {
+    Sampled {
+        sample: store
+            .read(Read {
+                external_id: held.external_id,
+                sub_agent: None,
+                cursor: None,
+                tail: None,
+            })
+            .ok()
+            .and_then(|read| shared::sample(&read.events)),
+    }
 }
 
 /// `stop`: Droid has no graceful stop of its own for a headless turn or a window; the

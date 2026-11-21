@@ -22,14 +22,17 @@ const IDLE_TAIL: u64 = 256 * 1024;
 const CLOCKS: u64 = 1_000;
 
 /// `held`: the live process that Copilot's own in-use lock names, `inuse.<pid>.lock` in
-/// the conversation's folder, which every Copilot that opens it writes (1.0.108). A process
-/// killed without its cleanup leaves its lock behind, so a lock counts only while its
-/// process runs and started before it. Where none does, the runtime looks.
-pub fn held(store: &Store, held: Held) -> Result<HeldBy, Error> {
-    let transcript = store.transcript(&held.external_id)?;
-    let folder = transcript.parent().unwrap_or(Path::new("/"));
-    if let Some((pid, process_start)) = locked(folder) {
-        return Ok(HeldBy::Holder(Holder::Person {
+/// the conversation's folder, which every Copilot that opens it writes (1.0.108). The lock
+/// counts even where the folder holds no transcript. A process killed without its cleanup
+/// leaves its lock behind, so a lock counts only while its process runs and started before
+/// it. Where none does, the runtime looks: at the transcript, or at strays alone where no
+/// transcript is here.
+pub fn held(store: &Store, held: Held) -> HeldBy {
+    if let Some((pid, process_start)) = store
+        .conversation(&held.external_id)
+        .and_then(|folder| locked(&folder))
+    {
+        return HeldBy::Holder(Holder::Person {
             door: None,
             stop: HolderStop::Process {
                 pid,
@@ -37,15 +40,15 @@ pub fn held(store: &Store, held: Held) -> Result<HeldBy, Error> {
                 certain: true,
                 how: "in Copilot".into(),
             },
-        }));
+        });
     }
-    Ok(HeldBy::Look(Looked {
+    HeldBy::Look(Looked {
         look: Look {
-            transcripts: vec![transcript],
+            transcripts: store.transcript(&held.external_id).ok().into_iter().collect(),
             strays: true,
             beyond: Vec::new(),
         },
-    }))
+    })
 }
 
 /// The live process that an in-use lock in `folder` names, and when it started.
@@ -81,17 +84,19 @@ fn millis(time: SystemTime) -> u64 {
 }
 
 /// `idle`: the last turn in the transcript, where it ended; nothing where it did not, as a
-/// run that died leaves a turn open forever.
-pub fn idle(store: &Store, held: Held) -> Result<Sampled, Error> {
-    let read = store.read(Read {
-        external_id: held.external_id,
-        sub_agent: None,
-        cursor: None,
-        tail: Some(IDLE_TAIL),
-    })?;
-    Ok(Sampled {
-        sample: sample(&read.events),
-    })
+/// run that died leaves a turn open forever, nor where no transcript reads.
+pub fn idle(store: &Store, held: Held) -> Sampled {
+    Sampled {
+        sample: store
+            .read(Read {
+                external_id: held.external_id,
+                sub_agent: None,
+                cursor: None,
+                tail: Some(IDLE_TAIL),
+            })
+            .ok()
+            .and_then(|read| sample(&read.events)),
+    }
 }
 
 /// The sample of the last turn in `events`, where it ended.
