@@ -163,8 +163,7 @@ fn failed(code: Option<i32>, said: &str, within: Duration) -> String {
             let line = said
                 .lines()
                 .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .next_back()
+                .rfind(|line| !line.is_empty())
                 .map_or("", |line| {
                     line.strip_prefix("curl: ").map_or(line, |line| {
                         line.split_once(") ").map_or(line, |(_, rest)| rest)
