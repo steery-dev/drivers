@@ -309,13 +309,13 @@ fn refusal_of(line: &str) -> Option<&'static str> {
 
 /// `held`: the process that holds SQLite's lock on the chat's store. Cursor opens the store
 /// for as long as it has the chat open, a turn of `-p` or a person's terminal. Where none
-/// does, the runtime looks.
-pub fn held(store: &Store, held: Held) -> Result<HeldBy, Error> {
-    let transcript = store.transcript(&held.external_id)?;
-    if let Some(pid) = store::holder(&transcript)
+/// does, the runtime looks: at the store, or at strays alone where no chat has the id here.
+pub fn held(store: &Store, held: Held) -> HeldBy {
+    let transcript = store.transcript(&held.external_id).ok();
+    if let Some(pid) = transcript.as_deref().and_then(store::holder)
         && let Some(process_start) = kernel::started(pid)
     {
-        return Ok(HeldBy::Holder(Holder::Person {
+        return HeldBy::Holder(Holder::Person {
             door: None,
             stop: HolderStop::Process {
                 pid,
@@ -323,29 +323,31 @@ pub fn held(store: &Store, held: Held) -> Result<HeldBy, Error> {
                 certain: true,
                 how: "in Cursor".into(),
             },
-        }));
+        });
     }
-    Ok(HeldBy::Look(Looked {
+    HeldBy::Look(Looked {
         look: Look {
-            transcripts: vec![transcript],
+            transcripts: transcript.into_iter().collect(),
             strays: true,
             beyond: Vec::new(),
         },
-    }))
+    })
 }
 
 /// `idle`: how the chat's last turn ended, where it did. It stands while nobody holds the
-/// store.
-pub fn idle(store: &Store, held: Held) -> Result<Sampled, Error> {
-    let read = store.read(Read {
-        external_id: held.external_id,
-        sub_agent: None,
-        cursor: None,
-        tail: Some(IDLE_TAIL),
-    })?;
-    Ok(Sampled {
-        sample: shared::sample(&read.events),
-    })
+/// store. A chat this driver cannot read gives no sample: unknown is never idle.
+pub fn idle(store: &Store, held: Held) -> Sampled {
+    Sampled {
+        sample: store
+            .read(Read {
+                external_id: held.external_id,
+                sub_agent: None,
+                cursor: None,
+                tail: Some(IDLE_TAIL),
+            })
+            .ok()
+            .and_then(|read| shared::sample(&read.events)),
+    }
 }
 
 /// `stop`: Cursor has no way to end a turn from outside its process; the runtime's signals

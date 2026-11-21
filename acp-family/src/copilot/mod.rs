@@ -188,12 +188,12 @@ impl Program for Driver {
                 let held: harness::Held = given(params)?;
                 match self.live.held(self.store()?, &held.external_id).await {
                     Some(holder) => result(harness::HeldBy::Holder(holder)),
-                    None => result(drive::held(self.store()?, held)?),
+                    None => result(drive::held(self.store()?, held)),
                 }
             }
             method::SAY => result(self.live.say(self.store()?, given(params)?).await?),
             method::PICK => result(self.live.pick(self.store()?, given(params)?).await?),
-            method::IDLE => result(drive::idle(self.store()?, given(params)?)?),
+            method::IDLE => result(drive::idle(self.store()?, given(params)?)),
             method::MODELS => result(models::models(self.store()?.root()).await?),
             method::START => result(turn::start(self.store()?, given(params)?)?),
             method::TURN_READ => result(self.turns.read(self.store()?, given(params)?)?),

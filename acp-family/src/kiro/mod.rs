@@ -208,8 +208,8 @@ impl Program for Driver {
                 drive::LABEL,
                 steery_sdk::params(params)?,
             )),
-            method::HELD => result(drive::held(&place.store, &steery_sdk::params(params)?)?),
-            method::IDLE => result(drive::idle(&place.store, steery_sdk::params(params)?)?),
+            method::HELD => result(drive::held(&place.store, &steery_sdk::params(params)?)),
+            method::IDLE => result(drive::idle(&place.store, steery_sdk::params(params)?)),
             method::STOP => result(crate::turn::drive::stop(
                 drive::LABEL,
                 &steery_sdk::params(params)?,

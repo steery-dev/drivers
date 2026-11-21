@@ -171,7 +171,7 @@ impl Program for Driver {
             ),
             method::TURN_READ => result(turn::read(steery_sdk::params(params)?)),
             method::HELD => result(drive::held(&place.store, steery_sdk::params(params)?)),
-            method::IDLE => result(drive::idle(&place.store, steery_sdk::params(params)?)?),
+            method::IDLE => result(drive::idle(&place.store, steery_sdk::params(params)?)),
             method::STOP => result(drive::stop(&steery_sdk::params(params)?)?),
             method::RECEIPT_MARK => result(drive::mark(steery_sdk::params(params)?)?),
             method::RECEIPT_FIND => result(drive::find(steery_sdk::params(params)?)?),
