@@ -76,7 +76,7 @@ impl Store {
 
     /// The folder of the conversation `id`, where a person typed into it.
     pub fn folder(&self, id: &str) -> Result<(PathBuf, Head), Error> {
-        if id.is_empty() || id.contains(['/', '\\']) || id.starts_with('.') {
+        if !plain(id) {
             return Err(not_found(id));
         }
         self.folders()
@@ -138,8 +138,12 @@ impl Store {
     }
 
     /// The pid of the live process whose lease holds the conversation `id`, and when it
-    /// started. A pid that started after the lease was taken is another process.
+    /// started. A pid that started after the lease was taken is another process. An id
+    /// that is not one plain file name names no lease.
     pub fn holder(&self, id: &str) -> Option<(u32, u64)> {
+        if !plain(id) {
+            return None;
+        }
         let lease =
             std::fs::read(self.root.join("session-leases").join(format!("{id}.lease"))).ok()?;
         let lease: Value = serde_json::from_slice(&lease).ok()?;
@@ -378,4 +382,9 @@ fn not_found(id: &str) -> Error {
         refusal::NOT_FOUND,
         format!("Kiro keeps no conversation `{id}` that a person typed into"),
     )
+}
+
+/// Whether `id` can name one of Kiro's conversations: a plain name, never a path.
+fn plain(id: &str) -> bool {
+    !id.is_empty() && !id.contains(['/', '\\']) && !id.starts_with('.')
 }

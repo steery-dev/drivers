@@ -147,15 +147,19 @@ impl Store {
         ))
     }
 
+    /// The folder Copilot keeps the conversation `id` in, where `id` is a plain name. The
+    /// folder may not be here, or may hold no transcript yet.
+    pub fn conversation(&self, id: &str) -> Option<PathBuf> {
+        let plain = !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0']);
+        plain.then(|| self.folder().join(id))
+    }
+
     /// The transcript of the conversation `id`, where Copilot keeps it here.
     pub fn transcript(&self, id: &str) -> Result<PathBuf, Error> {
-        let plain = !id.is_empty() && id != "." && id != ".." && !id.contains(['/', '\\', '\0']);
-        let transcript = self.folder().join(id).join("events.jsonl");
-        if plain && transcript.is_file() {
-            Ok(transcript)
-        } else {
-            Err(not_found(id))
-        }
+        self.conversation(id)
+            .map(|folder| folder.join("events.jsonl"))
+            .filter(|transcript| transcript.is_file())
+            .ok_or_else(|| not_found(id))
     }
 
     /// The shells that calls left running in the conversation `id`, which a turn's output

@@ -92,14 +92,10 @@ pub fn start(
     )
 }
 
-/// `held`: the live process whose lease holds the conversation, else nobody. Kiro's own
-/// folders prove nobody where none keeps the conversation.
+/// `held`: the live process whose lease holds the conversation, else nobody. The lease
+/// counts even where the conversation's own files do not read yet, as before its first
+/// prompt.
 pub fn held(store: &Store, held: &Held) -> HeldBy {
-    if store.folder(&held.external_id).is_err() {
-        return HeldBy::Holder(Holder::Nobody {
-            proof: "Kiro keeps no conversation with this id here".into(),
-        });
-    }
     HeldBy::Holder(match store.holder(&held.external_id) {
         Some((pid, process_start)) => Holder::Person {
             door: None,
