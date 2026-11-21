@@ -130,7 +130,10 @@ impl Codex {
 
 impl Program for Codex {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_signed_in_at(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_call_error(
+            &params.protocol,
+            steery_driver_common::program::protocol_signed_in_at,
+        )
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         self.changes.picked(protocol);
@@ -181,9 +184,13 @@ impl Program for Codex {
             }
             method::SESSIONS_READ => {
                 let mut read = self.drive()?.store.read(steery_sdk::params(params)?)?;
-                // A runtime older than `waited` rejects a field it does not know.
-                if self.protocol.get().is_none_or(|picked| *picked < WAITED) {
+                // A runtime older than `waited` or `error` rejects a field it does not know.
+                let picked = self.protocol.get().copied();
+                if picked.is_none_or(|picked| picked < WAITED) {
                     events::without_waited(&mut read.events);
+                }
+                if picked.is_none_or(|picked| !steery_driver_common::program::call_error(picked)) {
+                    events::without_error(&mut read.events);
                 }
                 result(read)
             }
@@ -215,7 +222,14 @@ impl Program for Codex {
                 result(self.drive()?.models(picked).await?)
             }
             method::START => result(self.drive()?.start(steery_sdk::params(params)?)?),
-            method::TURN_READ => result(drive::turn_line(steery_sdk::params(params)?)),
+            method::TURN_READ => {
+                let mut line = drive::turn_line(steery_sdk::params(params)?);
+                let picked = self.protocol.get().copied();
+                if picked.is_none_or(|picked| !steery_driver_common::program::call_error(picked)) {
+                    events::without_error(&mut line.events);
+                }
+                result(line)
+            }
             method::STOP => result(self.drive()?.stop(steery_sdk::params(params)?).await?),
             method::RECEIPT_MARK => result(self.drive()?.mark(steery_sdk::params(params)?).await?),
             method::RECEIPT_FIND => result(self.drive()?.find(steery_sdk::params(params)?).await?),

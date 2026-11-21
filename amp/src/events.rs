@@ -343,6 +343,7 @@ fn result(at: u64, block: &Value, events: &mut Vec<Event>) {
         chars: said.chars().count() as u64,
         tail: last_lines(&said),
         waited: Vec::new(),
+        error: None,
     });
     if !said.is_empty() {
         events.push(Event::Words {

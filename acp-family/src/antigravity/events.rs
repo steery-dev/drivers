@@ -377,6 +377,7 @@ impl Fold {
             chars: text.chars().count() as u64,
             tail: tail(&text),
             waited: Vec::new(),
+            error: None,
         });
         self.state.last = Last::Other;
     }

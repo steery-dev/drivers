@@ -101,6 +101,26 @@ pub fn signed_in_at(picked: u32) -> bool {
     picked >= steery_sdk::SIGNED_IN_AT
 }
 
+/// Like `otherwise` (a driver's own pick: [`protocol_words`] or [`protocol_signed_in_at`]),
+/// for a driver that also says a failed call's own words (`steery_sdk::CALL_ERROR`,
+/// protocol 19: `call_ended`'s `error`): 19 where the runtime offered it, else what
+/// `otherwise` gives.
+pub fn protocol_call_error(
+    offered: &[u32],
+    otherwise: fn(&[u32]) -> Option<u32>,
+) -> Option<u32> {
+    offered
+        .contains(&steery_sdk::CALL_ERROR)
+        .then_some(steery_sdk::CALL_ERROR)
+        .or_else(|| otherwise(offered))
+}
+
+/// Whether the protocol `picked` has `call_ended`'s `error`: 19 or newer. A driver says
+/// none to an older one, whose `call_ended` rejects the field.
+pub fn call_error(picked: u32) -> bool {
+    picked >= steery_sdk::CALL_ERROR
+}
+
 /// Whether the person asked to give the need `id` again: the protocol `picked` is 15 or
 /// newer, and `ask` of `setup/plan` names the need. The runtime sends no `ask` to an older
 /// protocol; a driver ignores one it was given.
@@ -294,6 +314,11 @@ mod tests {
         assert_eq!(protocol_words(&[4, 14, 15, 16]), Some(16));
         assert_eq!(protocol_words(&[3]), None);
         assert!(words(17) && !words(16));
+        assert_eq!(protocol_call_error(&[4, 14, 18, 19], protocol_signed_in_at), Some(19));
+        assert_eq!(protocol_call_error(&[4, 14, 18], protocol_signed_in_at), Some(18));
+        assert_eq!(protocol_call_error(&[4, 17, 18, 19], protocol_words), Some(19));
+        assert_eq!(protocol_call_error(&[4, 17, 18], protocol_words), Some(17));
+        assert!(call_error(19) && !call_error(18));
     }
 
     #[test]

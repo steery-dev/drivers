@@ -198,6 +198,140 @@ pub fn unwaited(events: &mut [Event]) {
     }
 }
 
+/// What a protocol older than `CALL_ERROR` is told of a call's end: not the failure's words.
+pub fn unerrored(events: &mut [Event]) {
+    for event in events {
+        if let Event::CallEnded { error, .. } = event {
+            *error = None;
+        }
+    }
+}
+
+/// omp's note after the results whose lines it cut.
+const CUT: &str = "[Some lines truncated to";
+
+/// The words of a failed result as its tool said them, without what omp wrote round them:
+/// from where omp kept them whole (a shell's trace, an MCP tool's raw content), else from
+/// the result's text without omp's prefix, its echo of the arguments, and its notes on a
+/// shell's time and status. None where the words are cut and no whole copy is kept.
+fn said_error(harness: Harness, message: &Value, said: &str) -> Option<String> {
+    let details = message.get("details");
+    let words = if harness == Harness::Omp {
+        if text(message, "toolName") == Some("bash") {
+            Some(mended(&shell_words(said), shell_output(details).as_deref()))
+        } else {
+            raw_words(details).or_else(|| omp_words(message, said))
+        }
+    } else {
+        Some(said.to_owned())
+    };
+    words
+        .map(|words| words.trim().to_owned())
+        .filter(|words| !words.is_empty())
+}
+
+/// The end omp gives a line of a result it cut at 768 bytes.
+const CUT_LINE: char = '…';
+
+/// A shell call's result text with each line that omp cut made whole again from what its
+/// trace kept of the run. The trace keeps only the newest of what the run wrote, so it
+/// mends the text and never stands in for it: a line it no longer holds stays as it was
+/// cut, and every line omp kept whole stays where it was.
+fn mended(said: &str, trace: Option<&str>) -> String {
+    let Some(trace) = trace else {
+        return said.to_owned();
+    };
+    said.lines()
+        .map(|line| {
+            line.strip_suffix(CUT_LINE)
+                .filter(|kept| !kept.is_empty())
+                .and_then(|kept| {
+                    trace
+                        .lines()
+                        .find(|whole| whole.len() > kept.len() && whole.starts_with(kept))
+                })
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What a shell call wrote, in the order that omp's trace saw it: the newest of it only,
+/// where the run wrote more than the trace keeps.
+fn shell_output(details: Option<&Value>) -> Option<String> {
+    let mut output: Vec<(u64, &str)> = details?
+        .pointer("/trace/history")?
+        .as_array()?
+        .iter()
+        .filter(|entry| text(entry, "kind") == Some("Output"))
+        .filter_map(|entry| Some((entry.get("seq")?.as_u64()?, text(entry, "text")?)))
+        .collect();
+    output.sort_by_key(|(seq, _)| *seq);
+    let output: String = output.into_iter().map(|(_, text)| text).collect();
+    (!output.trim().is_empty()).then_some(output)
+}
+
+/// What an MCP tool answered, as it answered it, where omp kept it with its own error: for
+/// a call through an `xd://` device (`details.xdev.inner`) or one made directly.
+fn raw_words(details: Option<&Value>) -> Option<String> {
+    let details = details?;
+    [details.pointer("/xdev/inner"), Some(details)]
+        .into_iter()
+        .flatten()
+        .filter(|kept| kept.get("isError").and_then(Value::as_bool) == Some(true))
+        .find_map(|kept| {
+            let words = texts(kept.get("rawContent"));
+            (!words.trim().is_empty()).then_some(words)
+        })
+}
+
+/// The text of a failed omp result without omp's own wrapping.
+fn omp_words(message: &Value, said: &str) -> Option<String> {
+    let tool = text(message, "toolName").unwrap_or_default();
+    if tool == "bash" {
+        return Some(shell_words(said));
+    }
+    let device = message.pointer("/details/xdev").is_some();
+    let said = if device || tool.starts_with("mcp__") {
+        said.strip_prefix("Error: ").unwrap_or(said)
+    } else {
+        said
+    };
+    // Where omp refused the arguments, it echoed them back and then the tool's docs.
+    let refused = said.starts_with("Invalid args for xd://")
+        || said.starts_with("Validation failed for tool ");
+    let said = match said.split_once("\n\nReceived arguments:") {
+        Some((before, _)) if refused => before,
+        _ => said,
+    };
+    // A cut in what is kept leaves it no longer whole; a cut only in the echo, gone above,
+    // does not.
+    (!said.contains(CUT)).then(|| said.to_owned())
+}
+
+/// A shell call's text without omp's notes after it: its time and its status, and the
+/// placeholder for no output. A call that wrote nothing is left with its status.
+fn shell_words(said: &str) -> String {
+    let mut lines: Vec<&str> = said.trim_end().lines().collect();
+    let mut status = None;
+    // omp's notes come after the output, in whichever order it wrote them: its status, its
+    // time, and its mark of cut lines.
+    while let Some(&last) = lines.last() {
+        if last.starts_with("Command exited with code ") {
+            status = status.or(Some(last));
+        } else if !(last.trim().is_empty() || last.starts_with("Wall time: ") || last.starts_with(CUT))
+        {
+            break;
+        }
+        lines.pop();
+    }
+    let body = lines.join("\n");
+    match body.trim() {
+        "" | "(no output)" => status.unwrap_or_default().to_owned(),
+        _ => body,
+    }
+}
+
 /// One whole record on the conversation's path, and where it starts: `None` where it is
 /// no JSON.
 pub use steery_driver_common::tree::Record;
@@ -587,13 +721,19 @@ impl State<'_> {
         let lines: Vec<&str> = said.lines().collect();
         let tail = lines[lines.len().saturating_sub(8)..].join("\n");
         let waited = self.waited(call, text(message, "toolName"), message.get("details"));
+        let ok = message.get("isError").and_then(Value::as_bool) != Some(true);
         self.out.push(Event::CallEnded {
             at,
             id: call.to_owned(),
-            ok: message.get("isError").and_then(Value::as_bool) != Some(true),
+            ok,
             chars: said.chars().count() as u64,
             tail: (!tail.trim().is_empty()).then_some(tail),
             waited,
+            error: if ok {
+                None
+            } else {
+                said_error(self.reading.harness, message, &said)
+            },
         });
         self.started(at, call, text(message, "toolName"), message.get("details"));
         if !said.trim().is_empty() {
@@ -1571,5 +1711,148 @@ mod tests {
         let end = read(&store, "f1", None, Some(&on.cursor));
         assert_eq!(waited(&end.events, "k7"), named(&["k6"]));
         assert_eq!(waited(&end.events, "k8"), named(&[]));
+    }
+
+    /// A failed result as omp wrote it.
+    fn refused(tool: &str, said: &str, details: Value) -> Value {
+        json!({"role": "toolResult", "toolCallId": "k", "toolName": tool, "isError": true,
+            "content": [{"type": "text", "text": said}], "details": details})
+    }
+
+    fn error(message: &Value) -> Option<String> {
+        let said = texts(message.get("content"));
+        said_error(Harness::Omp, message, &said)
+    }
+
+    #[test]
+    fn a_failed_shell_call_says_what_its_trace_kept_whole() {
+        let long = "x".repeat(900);
+        let cut = format!("{}…", "x".repeat(767));
+        let said = format!(
+            "{cut}\nerror: no\n\n\nWall time: 3.48 seconds\n\nCommand exited with code 1\n\n[Some lines truncated to 768 bytes. Use artifact://9:raw:1-1 to read line 1 whole]"
+        );
+        // Out of order, on two streams.
+        let details = json!({"exitCode": 1, "trace": {"history": [
+            {"seq": 40, "kind": "Output", "fd": 2, "text": "error: no\n"},
+            {"seq": 7, "kind": "CmdStart"},
+            {"seq": 20, "kind": "Output", "fd": 1, "text": format!("{long}\n")},
+        ]}});
+        assert_eq!(
+            error(&refused("bash", &said, details)),
+            Some(format!("{long}\nerror: no"))
+        );
+        // The trace keeps only the newest of a long run: a line of the result it no longer
+        // holds stays, and only the cut lines it holds are made whole.
+        let first = r#"{"error":"invalid","why":"no","next":"fix it","steery":"7.1.0"}"#;
+        let said = format!(
+            "{first}\n…40000 lines…\n{cut}\n\nCommand exited with code 4\n\n[Some lines truncated to 768 bytes. Use artifact://9:raw:3-3 to read line 3 whole]"
+        );
+        let newest = json!({"trace": {"history": [
+            {"seq": 900, "kind": "Output", "fd": 1, "text": format!("crate-13233\n{long}\n")},
+        ]}});
+        assert_eq!(
+            error(&refused("bash", &said, newest)),
+            Some(format!("{first}\n…40000 lines…\n{long}"))
+        );
+    }
+
+    #[test]
+    fn a_failed_shell_call_without_a_trace_loses_omps_notes_or_is_cut() {
+        let said = "boom\n\n\nWall time: 1.50 seconds\n\nCommand exited with code 2";
+        assert_eq!(
+            error(&refused("bash", said, json!({}))),
+            Some("boom".to_owned())
+        );
+        let silent = "(no output)\n\nCommand exited with code 1";
+        assert_eq!(
+            error(&refused("bash", silent, json!({}))),
+            Some("Command exited with code 1".to_owned())
+        );
+        let cut = "a…\n\n\nCommand exited with code 3\n\n[Some lines truncated to 768 bytes. Use artifact://1:raw:1-1 to read line 1 whole]";
+        assert_eq!(
+            error(&refused("bash", cut, json!({}))),
+            Some("a…".to_owned()),
+            "a line cut with no whole copy stays as omp cut it"
+        );
+    }
+
+    #[test]
+    fn a_failed_mcp_call_through_a_device_says_the_tools_words() {
+        let raw = "HTTP 400: value is longer than 120 characters at /text (invalid)";
+        let details = json!({"xdev": {"tool": "mcp__steery_sessions_describe", "inner": {
+            "isError": true, "mcpToolName": "sessions_describe",
+            "rawContent": [{"type": "text", "text": raw}]}}});
+        // The device's text is cut, the raw content is not.
+        let said = format!("Error: {}…\n\n[Some lines truncated to 768 bytes. Use artifact://3:raw:1-1]", &raw[..20]);
+        assert_eq!(error(&refused("write", &said, details)), Some(raw.to_owned()));
+        let said = format!("Error: {raw}");
+        let bare = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
+        assert_eq!(error(&refused("write", &said, bare)), Some(raw.to_owned()));
+        let direct = json!({"serverName": "steery", "isError": true,
+            "rawContent": [{"type": "text", "text": raw}]});
+        assert_eq!(
+            error(&refused("mcp__steery_sessions_describe", &said, direct)),
+            Some(raw.to_owned())
+        );
+    }
+
+    #[test]
+    fn refused_arguments_keep_the_validation_lines_and_drop_the_echo() {
+        let said = "Invalid args for xd://mcp__steery_sessions_describe: Validation failed for tool \"mcp__steery_sessions_describe\":\n  - work: must be one of the allowed enum values\n\nReceived arguments:\n{\n  \"original\": {}\n}\n\n# mcp__steery_sessions_describe — docs";
+        let kept = "Invalid args for xd://mcp__steery_sessions_describe: Validation failed for tool \"mcp__steery_sessions_describe\":\n  - work: must be one of the allowed enum values";
+        let device = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
+        assert_eq!(error(&refused("write", said, device)), Some(kept.to_owned()));
+        let direct = "Validation failed for tool \"t\":\n  - work: is required\n\nReceived arguments:\n{}";
+        assert_eq!(
+            error(&refused("mcp__t", direct, json!({"isError": true, "error": "x"}))),
+            Some("Validation failed for tool \"t\":\n  - work: is required".to_owned())
+        );
+        // A long argument omp cut in its echo leaves what is kept whole, and the echo out.
+        let cut = format!(
+            "{}{}…\n\n[Some lines truncated to 768 bytes. Use artifact://3:raw:5-5 to read line 5 whole]",
+            &said[..said.find("\n\nReceived arguments:").unwrap() + 22],
+            "x".repeat(760)
+        );
+        let device = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
+        assert_eq!(error(&refused("write", &cut, device)), Some(kept.to_owned()));
+    }
+
+    #[test]
+    fn other_failures_say_their_text_and_pi_says_it_as_it_is() {
+        let said = "Path '/x' not found";
+        assert_eq!(error(&refused("read", said, json!({}))), Some(said.to_owned()));
+        let message = refused("bash", "Error: cannot index\n", json!({}));
+        assert_eq!(
+            said_error(Harness::Pi, &message, "Error: cannot index\n"),
+            Some("Error: cannot index".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_failed_call_ends_with_its_error_only_where_it_failed_and_the_protocol_has_it() {
+        let home = Home::new("call-error");
+        let fail = json!({"type": "message", "id": "c", "parentId": "a", "timestamp": "2026-10-01T13:19:37Z",
+            "message": refused("read", "Path '/x' not found", json!({}))}).to_string();
+        let fine = json!({"type": "message", "id": "d", "parentId": "c", "timestamp": "2026-10-01T13:19:38Z",
+            "message": {"role": "toolResult", "toolCallId": "k2", "toolName": "read",
+                "content": [{"type": "text", "text": "fine"}]}}).to_string();
+        home.write(FILED, &[SESSION, ASKED, fail.as_str(), fine.as_str()]);
+        let store = home.store(Harness::Omp, None);
+        let mut said = read(&store, "f1", None, None).events;
+        let errors = |events: &[Event]| -> Vec<(bool, Option<String>)> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::CallEnded { ok, error, .. } => Some((*ok, error.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            errors(&said),
+            vec![(false, Some("Path '/x' not found".to_owned())), (true, None)]
+        );
+        unerrored(&mut said);
+        assert_eq!(errors(&said), vec![(false, None), (true, None)]);
     }
 }

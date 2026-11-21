@@ -224,6 +224,7 @@ mod tests {
             chars: 0,
             tail: None,
             waited: Vec::new(),
+            error: None,
         }
     }
 

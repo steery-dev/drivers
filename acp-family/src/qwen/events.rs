@@ -441,6 +441,7 @@ pub(super) fn ended(at: u64, id: String, ok: bool, output: String) -> Vec<Event>
         chars: output.chars().count() as u64,
         tail: tail(&output),
         waited: Vec::new(),
+        error: None,
     }];
     if !output.trim().is_empty() {
         events.push(Event::Words {

@@ -64,6 +64,15 @@ pub struct State {
     /// Calls begun naming a background session, until answered: `(call, starter)`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     waiting: Vec<(String, String)>,
+    /// MCP calls that their tool refused or failed, as Codex's own event says, until their
+    /// output is read: Codex does not keep a call's `success` in its output. The tool's
+    /// words, empty where the event has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    refused: BTreeMap<String, String>,
+    /// The calls last ended as succeeded, with the length of their result, at most
+    /// [`SESSIONS`]: an event that comes after the output corrects them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ended: Vec<(String, u64)>,
     /// A compaction read, held until Codex counts the context it left: the `token_count`
     /// it sends once the history is replaced, after the `world_state`, `turn_context` and
     /// `thread_settings_applied` it writes with it. Said then, at any other record, or at
@@ -334,9 +343,54 @@ impl State {
                     });
                 }
             }
+            // How an MCP call ended, in a legacy rollout (`result` is `{"Ok": CallToolResult}`
+            // or `{"Err": message}`) and in a paginated one (the completed item).
+            Some("mcp_tool_call_end") => {
+                if let Some(call) = text(payload, "call_id")
+                    && let Some(error) = payload.get("result").and_then(mcp_failed)
+                {
+                    self.mcp_failed(call, error, at, out);
+                }
+            }
+            Some("item_completed") => {
+                if let Some(item) = payload.get("item")
+                    && matches!(text(item, "type"), Some("McpToolCall" | "mcpToolCall"))
+                    && let Some(call) = text(item, "id")
+                    && let Some(error) = mcp_item_failed(item)
+                {
+                    self.mcp_failed(call, error, at, out);
+                }
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// An MCP call that its tool refused or failed, with the tool's words if it said any:
+    /// the call fails where its output was read already, else where it is.
+    fn mcp_failed(&mut self, call: &str, error: Option<String>, at: u64, out: &mut Vec<Event>) {
+        match self.ended.iter().position(|(id, _)| id == call) {
+            Some(index) => {
+                let (_, chars) = self.ended.remove(index);
+                out.push(Event::CallEnded {
+                    at,
+                    id: call.to_owned(),
+                    ok: false,
+                    chars,
+                    tail: None,
+                    waited: Vec::new(),
+                    error,
+                });
+            }
+            None => {
+                if self.refused.len() >= SESSIONS
+                    && let Some(oldest) = self.refused.keys().next().cloned()
+                {
+                    self.refused.remove(&oldest);
+                }
+                self.refused.insert(call.to_owned(), error.unwrap_or_default());
+            }
+        }
     }
 
     fn item(
@@ -484,13 +538,23 @@ impl State {
                     Some(_) => {}
                     None => self.sessions.retain(|(_, starter)| !waited.contains(starter)),
                 }
+                let refusal = self.refused.remove(call_id);
+                let ok = refusal.is_none() && succeeded(payload.get("output"), &output);
+                let chars = output.chars().count() as u64;
+                if ok {
+                    if self.ended.len() >= SESSIONS {
+                        self.ended.remove(0);
+                    }
+                    self.ended.push((call_id.to_owned(), chars));
+                }
                 out.push(Event::CallEnded {
                     at,
                     id: call_id.to_owned(),
-                    ok: succeeded(payload.get("output"), &output),
-                    chars: output.chars().count() as u64,
+                    ok,
+                    chars,
                     tail: tail(&output),
                     waited,
+                    error: refusal.filter(|error| !error.is_empty()),
                 });
                 if !output.trim().is_empty() {
                     out.push(Event::Words {
@@ -521,6 +585,7 @@ impl State {
                     chars: 0,
                     tail: None,
                     waited: Vec::new(),
+                    error: None,
                 });
             }
             _ => {}
@@ -864,6 +929,58 @@ fn keep(list: &mut Vec<(String, String)>, key: String, value: String) {
         list.remove(0);
     }
     list.push((key, value));
+}
+
+/// Codex's own words before the tool's, in the failure of an MCP call that did not get to its
+/// server.
+const TOOL_CALL_ERROR: &str = "tool call error: ";
+
+/// The failure of an MCP call as its tool said it: `message`, or the text of the result's
+/// `content` where there is none; none where it says nothing.
+pub fn mcp_error(message: Option<&str>, content: Option<&Value>) -> Option<String> {
+    let said = message.map_or_else(|| output_text(content), str::to_owned);
+    let said = said.trim();
+    let said = said.strip_prefix(TOOL_CALL_ERROR).unwrap_or(said).trim();
+    (!said.is_empty()).then(|| said.to_owned())
+}
+
+/// Whether a `CallToolResult` says it is an error (`isError`; `is_error` in older rollouts).
+fn flagged(result: &Value) -> bool {
+    result
+        .get("isError")
+        .or_else(|| result.get("is_error"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// How an MCP call ended as `mcp_tool_call_end` says, by its `result`: none where it
+/// succeeded; else its failure's words, if it has any.
+fn mcp_failed(result: &Value) -> Option<Option<String>> {
+    if let Some(message) = result.get("Err") {
+        return Some(mcp_error(message.as_str(), None));
+    }
+    let result = result.get("Ok")?;
+    flagged(result).then(|| mcp_error(None, result.get("content")))
+}
+
+/// How an MCP call ended as its completed item says (`status`, `result`, `error`): none where
+/// it succeeded; else its failure's words, if it has any.
+pub fn mcp_item_failed(item: &Value) -> Option<Option<String>> {
+    let message = item.pointer("/error/message").and_then(Value::as_str);
+    let result = item.get("result").filter(|result| !result.is_null());
+    let failed = message.is_some()
+        || result.is_some_and(flagged)
+        || text(item, "status") == Some("failed");
+    failed.then(|| mcp_error(message, result.and_then(|result| result.get("content"))))
+}
+
+/// Events as a protocol older than `call_ended`'s `error` reads them: no failure's words.
+pub fn without_error(events: &mut [Event]) {
+    for event in events {
+        if let Event::CallEnded { error, .. } = event {
+            *error = None;
+        }
+    }
 }
 
 /// Events as a protocol older than `waited` reads them: no call waited on any.
@@ -1420,5 +1537,112 @@ mod tests {
             record: &record,
         };
         assert_eq!(state.read(&place, &mut Vec::new()), Err(UNCOUNTED));
+    }
+
+    /// A call's end, as the events of the records say it: `(ok, error)` of each.
+    fn ends(events: &[Event]) -> Vec<(String, bool, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                Event::CallEnded { id, ok, error, .. } => Some((id.clone(), *ok, error.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn mcp_call() -> [Value; 1] {
+        [json!({"timestamp":"2026-10-09T09:40:02Z","type":"response_item","payload":{"type":"function_call","name":"sessions_describe","namespace":"mcp__steery__","call_id":"m1","arguments":"{}"}})]
+    }
+
+    fn output(text: &str) -> Value {
+        json!({"timestamp":"2026-10-09T09:40:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"m1","output":text}})
+    }
+
+    fn ended(payload: Value) -> Value {
+        json!({"timestamp":"2026-10-09T09:40:03Z","type":"event_msg","payload":payload})
+    }
+
+    /// Codex does not write a call's `success`, so what refused an MCP call is its own event:
+    /// a legacy rollout's `mcp_tool_call_end`, in either order with the output.
+    #[test]
+    fn a_refused_mcp_call_fails_with_its_tools_words_in_a_legacy_rollout() {
+        let refused = ended(json!({"type":"mcp_tool_call_end","call_id":"m1","invocation":{"server":"steery","tool":"sessions_describe"},
+            "result":{"Ok":{"content":[{"type":"text","text":"HTTP 400: value is longer than 120 characters (invalid)"}],"isError":true}}}));
+        let mut before = mcp_call().to_vec();
+        before.extend([refused.clone(), output("HTTP 400: value is longer than 120 characters (invalid)")]);
+        assert_eq!(
+            ends(&read(&before)),
+            [("m1".to_owned(), false, Some("HTTP 400: value is longer than 120 characters (invalid)".to_owned()))]
+        );
+        // The output first: the call ended as it read, and the event corrects it.
+        let mut after = mcp_call().to_vec();
+        after.extend([output("HTTP 400: value is longer than 120 characters (invalid)"), refused]);
+        assert_eq!(
+            ends(&read(&after)),
+            [
+                ("m1".to_owned(), true, None),
+                ("m1".to_owned(), false, Some("HTTP 400: value is longer than 120 characters (invalid)".to_owned())),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_mcp_call_that_did_not_reach_its_server_says_the_error_without_codexs_prefix() {
+        let mut records = mcp_call().to_vec();
+        records.extend([
+            ended(json!({"type":"mcp_tool_call_end","call_id":"m1","result":{"Err":"tool call error: transport closed"}})),
+            output("tool call error: transport closed"),
+        ]);
+        assert_eq!(
+            ends(&read(&records)),
+            [("m1".to_owned(), false, Some("transport closed".to_owned()))]
+        );
+        let mut fine = mcp_call().to_vec();
+        fine.extend([
+            ended(json!({"type":"mcp_tool_call_end","call_id":"m1","result":{"Ok":{"content":[{"type":"text","text":"done"}]}}})),
+            output("done"),
+        ]);
+        assert_eq!(ends(&read(&fine)), [("m1".to_owned(), true, None)]);
+    }
+
+    /// A paginated rollout keeps the call as an `item_completed` of an MCP tool call.
+    #[test]
+    fn a_failed_mcp_item_fails_its_call_in_a_paginated_rollout() {
+        let item = |status: &str, error: Value, result: Value| {
+            ended(json!({"type":"item_completed","thread_id":"x","turn_id":"t","item":{"type":"McpToolCall","id":"m1",
+                "server":"steery","tool":"sessions_describe","arguments":{},"status":status,"result":result,"error":error}}))
+        };
+        let mut failed = mcp_call().to_vec();
+        failed.extend([
+            item("failed", json!({"message":"refused: not allowed"}), Value::Null),
+            output("refused: not allowed"),
+        ]);
+        assert_eq!(
+            ends(&read(&failed)),
+            [("m1".to_owned(), false, Some("refused: not allowed".to_owned()))]
+        );
+        let mut flagged = mcp_call().to_vec();
+        flagged.extend([
+            item("completed", Value::Null, json!({"content":[{"type":"text","text":"bad input"}],"isError":true})),
+            output("bad input"),
+        ]);
+        assert_eq!(
+            ends(&read(&flagged)),
+            [("m1".to_owned(), false, Some("bad input".to_owned()))]
+        );
+        let mut fine = mcp_call().to_vec();
+        fine.extend([item("completed", Value::Null, json!({"content":[]})), output("ok")]);
+        assert_eq!(ends(&read(&fine)), [("m1".to_owned(), true, None)]);
+    }
+
+    #[test]
+    fn an_older_protocol_is_told_no_error() {
+        let mut events = read(&[
+            mcp_call()[0].clone(),
+            ended(json!({"type":"mcp_tool_call_end","call_id":"m1","result":{"Err":"no"}})),
+            output("no"),
+        ]);
+        without_error(&mut events);
+        assert_eq!(ends(&events), [("m1".to_owned(), false, None)]);
     }
 }

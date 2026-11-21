@@ -256,6 +256,7 @@ pub(crate) fn call_ended(at: u64, id: &str, ok: bool, text: &str) -> Event {
         chars: text.chars().count() as u64,
         tail: (!tail.is_empty()).then_some(tail),
         waited: Vec::new(),
+        error: None,
     }
 }
 

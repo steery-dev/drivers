@@ -285,6 +285,7 @@ impl Fold<'_> {
             chars: text.chars().count() as u64,
             tail: tail(&text),
             waited: Vec::new(),
+            error: None,
         });
         if let Some(child) = child {
             // A sub-agent sent to the background ends its call while it still runs.
@@ -350,6 +351,7 @@ impl Fold<'_> {
                 chars: 0,
                 tail: None,
                 waited: Vec::new(),
+                error: None,
             });
         }
     }
@@ -449,6 +451,7 @@ impl Fold<'_> {
             chars: text.chars().count() as u64,
             tail: tail(&text),
             waited: Vec::new(),
+            error: None,
         });
         if !text.trim().is_empty() {
             self.events.push(Event::Words {

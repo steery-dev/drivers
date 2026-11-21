@@ -152,7 +152,10 @@ pub(crate) async fn blocking<T: Send + 'static>(
 
 impl Program for ClaudeCode {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_signed_in_at(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_call_error(
+            &params.protocol,
+            steery_driver_common::program::protocol_signed_in_at,
+        )
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
@@ -213,11 +216,17 @@ impl Program for ClaudeCode {
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),
             method::SESSIONS_READ => {
                 let mut read = self.store()?.read(given(params)?)?;
-                // A runtime on a protocol older than `waited` rejects the field.
-                if self.place()?.protocol < steery_driver_common::program::WAITED {
-                    for event in &mut read.events {
-                        if let steery_sdk::wire::harness::Event::CallEnded { waited, .. } = event {
+                // A runtime on an older protocol rejects a field it does not know.
+                let protocol = self.place()?.protocol;
+                for event in &mut read.events {
+                    if let steery_sdk::wire::harness::Event::CallEnded { waited, error, .. } =
+                        event
+                    {
+                        if protocol < steery_driver_common::program::WAITED {
                             waited.clear();
+                        }
+                        if !steery_driver_common::program::call_error(protocol) {
+                            *error = None;
                         }
                     }
                 }

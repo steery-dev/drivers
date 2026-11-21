@@ -313,6 +313,7 @@ fn call(
         chars: result.chars().count() as u64,
         tail: (!tail.trim().is_empty()).then_some(tail),
         waited: Vec::new(),
+        error: None,
     });
     if tool == "task"
         && let Some(sub) = state.pointer("/metadata/sessionId").and_then(Value::as_str)

@@ -586,6 +586,7 @@ fn ended(at: u64, id: Option<String>, update: &Value) -> Vec<Event> {
         chars: text.chars().count() as u64,
         tail: tail(&text),
         waited: Vec::new(),
+        error: None,
     }];
     if let Some(id) = id
         && !text.trim().is_empty()

@@ -371,6 +371,7 @@ impl Fold<'_> {
             chars: content.chars().count() as u64,
             tail: (!tail.trim().is_empty()).then_some(tail),
             waited: Vec::new(),
+            error: None,
         });
         self.words(at, id, Voice::Tool, &content, Some(call.clone()));
         // `sessions_spawn` answers with the key of the session it started

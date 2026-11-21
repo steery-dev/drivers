@@ -496,6 +496,7 @@ impl State<'_> {
             chars: said.chars().count() as u64,
             tail: (!tail.trim().is_empty()).then_some(tail),
             waited,
+            error: None,
         });
         if !said.is_empty() {
             self.words(
