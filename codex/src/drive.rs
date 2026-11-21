@@ -1846,4 +1846,42 @@ mod tests {
             assert!(page_of(&page).is_err(), "{page}");
         }
     }
+
+    /// An MCP call the app server says failed, with no result and its error's message, ends
+    /// failed with that message; one that returned a result flagged as an error says its text.
+    #[test]
+    fn a_failed_mcp_item_ends_its_call_failed_with_the_errors_message() {
+        let ends = |item: &str| {
+            let completed = format!(
+                r#"{{"method":"item/completed","params":{{"item":{item}}},"emittedAtMs":1792488776399}}"#
+            );
+            line(Stream::Stdout, &completed, None)
+                .events
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::CallEnded { id, ok, error, .. } => Some((id, ok, error)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let head = r#""type":"mcpToolCall","id":"m1","server":"steery","tool":"sessions_describe","arguments":{}"#;
+        assert_eq!(
+            ends(&format!(
+                r#"{{{head},"status":"failed","result":null,"error":{{"message":"unknown tool"}}}}"#
+            )),
+            [("m1".to_owned(), false, Some("unknown tool".to_owned()))]
+        );
+        assert_eq!(
+            ends(&format!(
+                r#"{{{head},"status":"completed","result":{{"content":[{{"type":"text","text":"bad input"}}],"isError":true}}}}"#
+            )),
+            [("m1".to_owned(), false, Some("bad input".to_owned()))]
+        );
+        assert_eq!(
+            ends(&format!(
+                r#"{{{head},"status":"completed","result":{{"content":[{{"type":"text","text":"fine"}}]}}}}"#
+            )),
+            [("m1".to_owned(), true, None)]
+        );
+    }
 }

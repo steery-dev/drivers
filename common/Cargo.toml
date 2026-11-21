@@ -6,7 +6,7 @@ license = "MIT"
 description = "What Steery's drivers share: finding and asking a harness's executable, reading a transcript's records within bounds, following a file only appended to, what the kernel says of other processes, a transcript that is a tree of records, a delivery's receipt in a transcript, a read that said nothing answered again while its files stand as they did, the MCP servers a harness's JSON configuration names, a harness's own sign-in run on a terminal of the driver's, and when a harness last wrote its login's credentials."
 
 [dependencies]
-steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v18.0.0" }
+steery-sdk = { git = "https://github.com/steery-dev/sdk", rev = "352cc03" }
 # A keychain item's `mdat`, a UTC date and time ([`credentials`]).
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 libc = "0.2"

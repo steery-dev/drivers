@@ -81,11 +81,27 @@ impl Driver {
             .as_ref()
             .map_err(|why| Error::refused(refusal::REFUSED, why.clone()))
     }
+
+    /// A runtime on an older protocol rejects a field it does not know: `events` say no
+    /// `waited` before [`WAITED`] and no `error` before `CALL_ERROR`.
+    fn older(&self, events: &mut [wire::harness::Event]) -> Result<(), Error> {
+        let protocol = self.place()?.protocol;
+        if protocol < WAITED {
+            events::unwaited(events);
+        }
+        if !steery_driver_common::program::call_error(protocol) {
+            events::unerrored(events);
+        }
+        Ok(())
+    }
 }
 
 impl Program for Driver {
     fn initialize(&self, params: &wire::InitializeParams) -> Result<wire::Initialized, Error> {
-        let protocol = steery_driver_common::program::protocol_words(&params.protocol)
+        let protocol = steery_driver_common::program::protocol_call_error(
+            &params.protocol,
+            steery_driver_common::program::protocol_words,
+        )
             .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
@@ -174,17 +190,12 @@ impl Program for Driver {
             method::SESSIONS_LOCATE => result(self.store()?.locate(steery_sdk::params(params)?)?),
             method::SESSIONS_READ => {
                 let mut read = self.store()?.read(steery_sdk::params(params)?)?;
-                // A runtime on an older protocol rejects a field it does not know.
-                if self.place()?.protocol < WAITED {
-                    events::unwaited(&mut read.events);
-                }
+                self.older(&mut read.events)?;
                 result(read)
             }
             method::SESSIONS_FOLD => {
                 let mut fold = self.store()?.fold(steery_sdk::params(params)?)?;
-                if self.place()?.protocol < WAITED {
-                    events::unwaited(&mut fold.events);
-                }
+                self.older(&mut fold.events)?;
                 result(fold)
             }
             method::HOOK_READ => result(hooks::read(

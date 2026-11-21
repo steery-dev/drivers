@@ -273,18 +273,22 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
             if called(item).is_none() {
                 return;
             }
-            let (ok, output) = match text(item, "type") {
-                Some("mcpToolCall") => (
-                    text(item, "status") == Some("completed")
-                        && item.get("error").is_none_or(Value::is_null),
-                    events::output_text(item.get("result").filter(|result| !result.is_null())),
-                ),
+            let (ok, output, error) = match text(item, "type") {
+                Some("mcpToolCall") => {
+                    let failed = events::mcp_item_failed(item);
+                    (
+                        text(item, "status") == Some("completed") && failed.is_none(),
+                        events::output_text(item.get("result").filter(|result| !result.is_null())),
+                        failed.flatten(),
+                    )
+                }
                 _ => (
                     match item.get("exitCode").and_then(Value::as_i64) {
                         Some(code) => code == 0,
                         None => text(item, "status") == Some("completed"),
                     },
                     text(item, "aggregatedOutput").unwrap_or_default().to_owned(),
+                    None,
                 ),
             };
             out.push(Event::CallEnded {
@@ -294,6 +298,7 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
                 chars: output.chars().count() as u64,
                 tail: events::tail(&output),
                 waited: Vec::new(),
+                error: error.filter(|_| !ok),
             });
             words(Voice::Tool, output, Some(id.to_owned()), out);
         }

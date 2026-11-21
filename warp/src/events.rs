@@ -159,6 +159,7 @@ impl Fold {
             chars: outcome.text.chars().count() as u64,
             tail: tail(&outcome.text),
             waited: Vec::new(),
+            error: None,
         });
         if !outcome.text.trim().is_empty() {
             self.events.push(Event::Words {

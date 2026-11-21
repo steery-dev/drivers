@@ -551,6 +551,7 @@ impl State<'_> {
             chars: said.chars().count() as u64,
             tail: (!tail.trim().is_empty()).then_some(tail),
             waited,
+            error: if failed { failure_words(&said) } else { None },
         });
         let answered = if failed {
             Some(if interrupted(&said) {
@@ -1111,6 +1112,26 @@ pub fn agent_file(agents: &Path, agent: &str) -> PathBuf {
 fn interrupted(said: &str) -> bool {
     said.trim_start()
         .starts_with("[Request interrupted by user")
+}
+
+/// The words that Claude Code's marker of a person's refusal and its own `tool_use_error`
+/// wrapping carry. A failure of a tool says its own words as they are: that is
+/// [`None`], and so is a result that has none.
+fn failure_words(said: &str) -> Option<String> {
+    const REFUSED: &str = "The user doesn't want to proceed with this tool use.";
+    const LINE: &str = "STOP what you are doing and wait for the user to tell you how to proceed.";
+    let said = said.trim();
+    if said.starts_with(REFUSED) {
+        // What a person said follows the line, so the line ends where Claude Code's own
+        // words do; a line of another make says only its first sentence.
+        let ends = said.find(LINE).map_or(REFUSED.len(), |at| at + LINE.len());
+        return Some(said[..ends].to_owned());
+    }
+    let wrapped = said
+        .strip_prefix("<tool_use_error>")?
+        .strip_suffix("</tool_use_error>")?
+        .trim();
+    (!wrapped.is_empty()).then(|| wrapped.to_owned())
 }
 
 /// The content blocks of a message: none where it is a string.
@@ -2093,5 +2114,49 @@ mod tests {
                 &compacted("5e1b7c40", Compactor::Harness { reason: None }, 120_000, None),
             ]
         );
+    }
+
+    #[test]
+    fn a_refusal_says_claude_codes_line_and_never_the_persons_words() {
+        let line = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+        let note = "\n\nNote: The user's next message may contain a correction or preference.";
+        assert_eq!(failure_words(line), Some(line.to_owned()));
+        assert_eq!(failure_words(&format!("{line}{note}")), Some(line.to_owned()));
+        let said = format!("{line} To tell you how to proceed, the user said:\nuse sed, you fool");
+        assert_eq!(failure_words(&said), Some(line.to_owned()));
+        let unknown = "The user doesn't want to proceed with this tool use. They wrote: no";
+        assert_eq!(
+            failure_words(unknown),
+            Some("The user doesn't want to proceed with this tool use.".to_owned())
+        );
+    }
+
+    #[test]
+    fn claude_codes_own_errors_lose_their_tags_and_the_rest_says_nothing() {
+        assert_eq!(
+            failure_words("<tool_use_error>File has not been read yet. Read it first.</tool_use_error>"),
+            Some("File has not been read yet. Read it first.".to_owned())
+        );
+        for said in ["failed to query traces — please retry", "Exit code 1\nboom", ""] {
+            assert_eq!(failure_words(said), None, "{said}");
+        }
+    }
+
+    #[test]
+    fn a_failed_call_ends_with_its_error_from_the_failed_result_only() {
+        let line = "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.";
+        let result = |failed: bool, said: &str| {
+            events(&[json!({"uuid":"a1","type":"user","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","is_error":failed,"content":said}]}})])
+        };
+        let refused = format!("{line} To tell you how to proceed, the user said:\nno");
+        assert!(result(true, &refused).iter().any(|event| matches!(
+            event,
+            Event::CallEnded { ok: false, error: Some(error), .. } if error == line
+        )));
+        assert!(result(false, line).iter().any(|event| matches!(
+            event,
+            Event::CallEnded { ok: true, error: None, .. }
+        )));
     }
 }
