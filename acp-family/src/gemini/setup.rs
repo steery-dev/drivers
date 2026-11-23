@@ -220,12 +220,15 @@ mod tests {
 
     #[tokio::test]
     async fn gemini_is_pointed_at_steery_in_its_own_spelling() {
-        // Gemini CLI 0.67.0 as npm installs it.
-        let Some(gemini) = on_path("gemini") else {
-            eprintln!("skipped: no gemini on PATH");
-            return;
-        };
-        let root = std::env::temp_dir().join("steery-gemini-plan/.gemini");
+        // A stand-in that answers `--version` as Gemini CLI 0.67.0 does, so the plan reads
+        // no Gemini of this machine's own.
+        let place = std::env::temp_dir().join(format!("steery-gemini-plan-{}", std::process::id()));
+        let gemini = place.join("gemini");
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::write(&gemini, "#!/bin/sh\necho 0.67.0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gemini, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = place.join(".gemini");
         let setup = Setup {
             mcp_url: "http://127.0.0.1:7777/mcp".into(),
             skill: "# Steery".into(),
@@ -301,5 +304,6 @@ mod tests {
         assert_eq!(trust.at.as_deref(), Some("/~1home~1daytona~1work"));
         assert_eq!(trust.value, json!("TRUST_FOLDER"));
         assert!(entries.next().is_none());
+        let _ = std::fs::remove_dir_all(&place);
     }
 }
