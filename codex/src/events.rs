@@ -368,7 +368,7 @@ impl State {
                         .filter(|_| call.starts_with(SCRIPTED))
                         .cloned();
                     match script {
-                        Some(script) => scripted(item, call, &script, at, out),
+                        Some(script) => scripted(payload, item, call, &script, at, out),
                         None => {
                             if let Some(error) = mcp_item_failed(item) {
                                 self.mcp_failed(call, error, at, out);
@@ -969,7 +969,19 @@ const TOOL_CALL_ERROR: &str = "tool call error: ";
 /// The failure of an MCP call as its tool said it: `message`, or the text of the result's
 /// `content` where there is none; none where it says nothing.
 pub fn mcp_error(message: Option<&str>, content: Option<&Value>) -> Option<String> {
-    let said = message.map_or_else(|| output_text(content), str::to_owned);
+    // Codex can write the tool's whole `CallToolResult` as the message: its words are its
+    // content's.
+    let said = match message {
+        Some(message) => serde_json::from_str::<Value>(message)
+            .ok()
+            .and_then(|result| {
+                result
+                    .get("content")
+                    .map(|content| output_text(Some(content)))
+            })
+            .unwrap_or_else(|| message.to_owned()),
+        None => output_text(content),
+    };
     let said = said.trim();
     let said = said.strip_prefix(TOOL_CALL_ERROR).unwrap_or(said).trim();
     (!said.is_empty()).then(|| said.to_owned())
@@ -1001,19 +1013,20 @@ const SCRIPT: &str = "exec";
 const SCRIPTED: &str = "exec-";
 
 /// An MCP tool a code-mode script called, as its completed item says: a call of its own
-/// inside the script's (`parent`), begun and ended when the item says, failed with the
-/// tool's words where the tool refused or failed. The script's own outcome is Codex's.
-fn scripted(item: &Value, id: &str, script: &str, at: u64, out: &mut Vec<Event>) {
+/// inside the script's (`parent`), begun and ended when the record says (`started_at_ms`,
+/// `completed_at_ms` beside the item), failed with the tool's words where the tool refused
+/// or failed. The script's own outcome is Codex's.
+fn scripted(record: &Value, item: &Value, id: &str, script: &str, at: u64, out: &mut Vec<Event>) {
     let server = text(item, "server").unwrap_or_default();
     let tool = text(item, "tool").unwrap_or_default();
     let input = item.get("arguments").cloned().unwrap_or(Value::Null);
     let mut call = calls::call(id, &format!("mcp__{server}__{tool}"), input);
     call.parent = Some(script.to_owned());
-    let began = item
+    let began = record
         .get("started_at_ms")
         .and_then(Value::as_u64)
         .unwrap_or(at);
-    let ended = item
+    let ended = record
         .get("completed_at_ms")
         .and_then(Value::as_u64)
         .unwrap_or(at);
@@ -1720,16 +1733,17 @@ mod tests {
     }
 
     /// Codex 0.171's code mode calls MCP tools from an `exec` script: the rollout files each
-    /// as an item of its own (`exec-<uuid>`) between the script and its output, as a real
-    /// run of 2026-11-24 wrote them.
+    /// as an item of its own (`exec-<uuid>`) between the script and its output, its times
+    /// beside it on the record, as real runs of 2026-11-24 wrote them.
     #[test]
     fn a_tool_a_script_called_is_a_call_inside_it_with_its_own_failure() {
         let script = json!({"timestamp":"2026-11-24T02:18:59Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_s","input":"const r = await tools.mcp__steery__sessions_query({});"}});
         let item = |id: &str, status: &str, error: Value, result: Value| {
             ended(
-                json!({"type":"item_completed","thread_id":"x","turn_id":"t","started_at_ms":1,"completed_at_ms":2,
+                json!({"type":"item_completed","thread_id":"x","turn_id":"t",
+                "started_at_ms":1_779_000_000_000_u64,"completed_at_ms":1_779_000_000_250_u64,
                 "item":{"type":"McpToolCall","id":id,"server":"steery","tool":"sessions_query","arguments":{"steps":[]},
-                "status":status,"result":result,"error":error,"started_at_ms":1_779_000_000_000_u64,"completed_at_ms":1_779_000_000_250_u64}}),
+                "status":status,"result":result,"error":error,"duration":{"secs":0,"nanos":250_000_000}}}),
             )
         };
         let answered = json!({"timestamp":"2026-11-24T02:19:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_s",
@@ -1748,6 +1762,13 @@ mod tests {
                 Value::Null,
                 json!({"content":[{"type":"text","text":"[]"}],"isError":false}),
             ),
+            // Codex can write the tool's whole result as its error message.
+            item(
+                "exec-w",
+                "failed",
+                json!({"message": r#"{"content":[{"type":"text","text":"{\"error\":\"workspace_required\"}"}],"isError":true}"#}),
+                json!({"content":[{"type":"text","text":"{\"error\":\"workspace_required\"}"}],"isError":true}),
+            ),
             answered.clone(),
         ]);
         assert_eq!(
@@ -1761,6 +1782,11 @@ mod tests {
                     )
                 ),
                 ("exec-2".to_owned(), true, None),
+                (
+                    "exec-w".to_owned(),
+                    false,
+                    Some(r#"{"error":"workspace_required"}"#.to_owned())
+                ),
                 ("call_s".to_owned(), true, None),
             ],
             "each tool the script called ends on its own; the script ends as Codex said"
@@ -1774,8 +1800,17 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(nested.len(), 2);
+        assert_eq!(nested.len(), 3);
         assert_eq!(nested[0].0, 1_779_000_000_000);
+        let ended_at = events.iter().find_map(|event| match event {
+            Event::CallEnded { at, id, .. } if id == "exec-1" => Some(*at),
+            _ => None,
+        });
+        assert_eq!(
+            ended_at,
+            Some(1_779_000_000_250),
+            "it ends when the record says"
+        );
         assert_eq!(nested[0].1, "mcp__steery__sessions_query");
         assert_eq!(nested[0].2.as_deref(), Some("call_s"));
         assert_eq!(nested[0].3, steery_sdk::wire::harness::Group::Steery);

@@ -238,11 +238,16 @@ fn said_error(harness: Harness, file: &Path, message: &Value, said: &str) -> Opt
 /// and the error goes in a frame of at most 16 MiB with the rest of a read.
 const KEPT_OUTPUT: u64 = 1 << 20;
 
+/// How many folders up from a transcript the lead's folder can be: a sub-agent's, a
+/// sub-agent's own sub-agent's (`<lead>/<group>/<name>.jsonl`), and one more.
+const FOLDERS_UP: usize = 3;
+
 /// What a shell call wrote, whole, where omp kept it in an artifact because it shortened
 /// the result: cut lines, a middle left out of a long output, or a filter's shorter form
 /// (`details.meta`). The artifact `<id>.bash.log` (`<id>.bash-original.log` before a filter)
-/// sits in the folder named for the session's transcript, which its sub-agents' transcripts
-/// sit in. None where omp kept no artifact or it is gone; at most [`KEPT_OUTPUT`].
+/// sits in the folder named for the lead's transcript, which its sub-agents' transcripts sit
+/// in, theirs a folder deeper. None where omp kept no artifact or it is gone; at most
+/// [`KEPT_OUTPUT`].
 fn kept_output(file: &Path, details: Option<&Value>) -> Option<String> {
     let meta = details?.get("meta")?;
     let id = [
@@ -255,13 +260,10 @@ fn kept_output(file: &Path, details: Option<&Value>) -> Option<String> {
     if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return None;
     }
-    let folders = [
-        Some(file.with_extension("")),
-        file.parent().map(Path::to_path_buf),
-    ];
-    folders
-        .into_iter()
-        .flatten()
+    let lead = file.with_extension("");
+    // The lead's own folder, then each folder up from a sub-agent's transcript.
+    std::iter::once(lead.as_path())
+        .chain(file.ancestors().skip(1).take(FOLDERS_UP))
         .flat_map(|folder| {
             ["bash-original", "bash"].map(|kind| folder.join(format!("{id}.{kind}.log")))
         })
@@ -1854,6 +1856,12 @@ mod tests {
         assert!(
             error.contains(refusal),
             "a sub-agent reads the lead's artifact"
+        );
+        let deeper = session.join("Group").join("Group.Checker.jsonl");
+        let error = said_error(Harness::Omp, &deeper, &message, said).expect("an error");
+        assert!(
+            error.contains(refusal),
+            "so does a sub-agent's own sub-agent"
         );
         // A filter's shorter form reads the original it kept.
         std::fs::write(session.join("31.bash-original.log"), "raw\nboom\n").expect("original");
