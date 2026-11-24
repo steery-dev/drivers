@@ -23,8 +23,8 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use serde_json::{Value, json};
 use steery_sdk::wire::harness::{Count, Event, TurnState, Voice};
 
-use crate::events::{self, number, text};
 use crate::calls;
+use crate::events::{self, number, text};
 
 /// How many turns' state is kept: one per run the runtime reads, the newest.
 const TURNS: usize = 64;
@@ -74,7 +74,10 @@ impl Heard {
     fn line(&mut self, line: &Value, out: &mut Vec<Event>) -> Option<String> {
         let Some(method) = text(line, "method") else {
             // The response that opened the thread says what it runs on.
-            if let Some(result) = line.get("result").filter(|result| result.get("thread").is_some()) {
+            if let Some(result) = line
+                .get("result")
+                .filter(|result| result.get("thread").is_some())
+            {
                 let set = |field: &mut Option<String>, key: &str| {
                     if let Some(value) = text(result, key).filter(|value| !value.is_empty()) {
                         *field = Some(value.to_owned());
@@ -104,7 +107,10 @@ impl Heard {
             "turn/started" => {
                 out.push(Event::TurnBegan {
                     at,
-                    turn: params.pointer("/turn/id").and_then(Value::as_str).map(str::to_owned),
+                    turn: params
+                        .pointer("/turn/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
                 });
                 self.settings(at, out);
             }
@@ -121,7 +127,9 @@ impl Heard {
                     self.provider = Some(provider.to_owned());
                 }
                 if settings.get("effort").is_some() {
-                    self.effort = text(settings, "effort").filter(|e| !e.is_empty()).map(str::to_owned);
+                    self.effort = text(settings, "effort")
+                        .filter(|e| !e.is_empty())
+                        .map(str::to_owned);
                 }
                 self.settings(at, out);
             }
@@ -220,7 +228,11 @@ fn called(item: &Value) -> Option<steery_sdk::wire::harness::Call> {
     match text(item, "type")? {
         "commandExecution" if text(item, "source") == Some("unifiedExecStartup") => {
             let command = text(item, "command")?;
-            Some(calls::call(id, "exec_command", json!({"cmd": script(command)})))
+            Some(calls::call(
+                id,
+                "exec_command",
+                json!({"cmd": script(command)}),
+            ))
         }
         "mcpToolCall" => {
             let server = text(item, "server")?;
@@ -242,7 +254,9 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
         if !said.trim().is_empty() {
             out.push(Event::Words {
                 at,
-                id: call.as_ref().map_or_else(|| id.to_owned(), |call| format!("{call}:out")),
+                id: call
+                    .as_ref()
+                    .map_or_else(|| id.to_owned(), |call| format!("{call}:out")),
                 voice,
                 text: said,
                 message: None,
@@ -253,7 +267,12 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
     };
     match text(item, "type") {
         Some("agentMessage") => {
-            words(Voice::Agent, text(item, "text").unwrap_or_default().to_owned(), None, out);
+            words(
+                Voice::Agent,
+                text(item, "text").unwrap_or_default().to_owned(),
+                None,
+                out,
+            );
         }
         Some("reasoning") => {
             let parts = |key: &str| -> Vec<&str> {
@@ -266,7 +285,11 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
                     .collect()
             };
             let summary = parts("summary");
-            let thought = if summary.is_empty() { parts("content") } else { summary };
+            let thought = if summary.is_empty() {
+                parts("content")
+            } else {
+                summary
+            };
             words(Voice::Thought, thought.join("\n\n"), None, out);
         }
         _ => {
@@ -287,7 +310,9 @@ fn completed(item: &Value, at: u64, out: &mut Vec<Event>) {
                         Some(code) => code == 0,
                         None => text(item, "status") == Some("completed"),
                     },
-                    text(item, "aggregatedOutput").unwrap_or_default().to_owned(),
+                    text(item, "aggregatedOutput")
+                        .unwrap_or_default()
+                        .to_owned(),
                     None,
                 ),
             };

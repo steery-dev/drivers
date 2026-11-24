@@ -252,7 +252,10 @@ impl Store {
         if head.sub_agent() || headless(head) {
             return Err(Error::refused(
                 refusal::NOT_FOUND,
-                format!("{} is not a conversation that a person is in", locate.external_id),
+                format!(
+                    "{} is not a conversation that a person is in",
+                    locate.external_id
+                ),
             ));
         }
         let mut session = session(&locate.external_id, filed).ok_or_else(|| {

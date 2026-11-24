@@ -284,7 +284,9 @@ mod tests {
                 );
                 assert_eq!(command["timeout"], json!(hook.waits));
             }
-            let compacts = hooked.iter().any(|entry| entry.at.as_deref() == Some("/hooks/PreCompact/-"));
+            let compacts = hooked
+                .iter()
+                .any(|entry| entry.at.as_deref() == Some("/hooks/PreCompact/-"));
             assert_eq!(compacts, picked >= steery_sdk::WORDS);
         }
     }

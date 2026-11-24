@@ -7,7 +7,9 @@ use std::path::Path;
 
 /// When `file` last changed; none where it is not here.
 pub fn file_written(file: &Path) -> Option<u64> {
-    let at = std::fs::metadata(file).and_then(|meta| meta.modified()).ok()?;
+    let at = std::fs::metadata(file)
+        .and_then(|meta| meta.modified())
+        .ok()?;
     let since = at.duration_since(std::time::UNIX_EPOCH).ok()?;
     u64::try_from(since.as_millis()).ok()
 }

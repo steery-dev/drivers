@@ -101,7 +101,10 @@ mod tests {
     async fn not_signed_in_stands_only_when_said_twice() {
         assert_eq!(made_sure(&[Some(false), Some(true)]).await, (Some(true), 2));
         assert_eq!(made_sure(&[Some(false), None]).await, (None, 2));
-        assert_eq!(made_sure(&[Some(false), Some(false)]).await, (Some(false), 2));
+        assert_eq!(
+            made_sure(&[Some(false), Some(false)]).await,
+            (Some(false), 2)
+        );
         assert_eq!(made_sure(&[Some(true)]).await, (Some(true), 1));
         assert_eq!(made_sure(&[None]).await, (None, 1));
         // A wrong "not signed in" whose second probe gives no answer leaves a plan that

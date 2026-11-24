@@ -98,8 +98,7 @@ pub fn declared(protocol: u32) -> Vec<Hook> {
             room: (words && says.contains(&Says::Context)).then_some(ROOM),
             // Codex fails closed on a `PermissionRequest` answer with `updatedPermissions`
             // (0.166.0), so a yes covers its one call: Codex keeps neither scope.
-            keeps: (*kind == HookKind::Permission && protocol >= steery_sdk::KEEPS)
-                .then(Vec::new),
+            keeps: (*kind == HookKind::Permission && protocol >= steery_sdk::KEEPS).then(Vec::new),
         })
         .collect()
 }

@@ -388,7 +388,8 @@ impl State {
                 {
                     self.refused.remove(&oldest);
                 }
-                self.refused.insert(call.to_owned(), error.unwrap_or_default());
+                self.refused
+                    .insert(call.to_owned(), error.unwrap_or_default());
             }
         }
     }
@@ -536,7 +537,9 @@ impl State {
                     }
                     // Still running: the session stays its starter's.
                     Some(_) => {}
-                    None => self.sessions.retain(|(_, starter)| !waited.contains(starter)),
+                    None => self
+                        .sessions
+                        .retain(|(_, starter)| !waited.contains(starter)),
                 }
                 let refusal = self.refused.remove(call_id);
                 let ok = refusal.is_none() && succeeded(payload.get("output"), &output);
@@ -843,7 +846,10 @@ fn compacted(place: &Place<'_>, payload: &Value) -> Event {
         at: place.at,
         id: text(payload, "window_id")
             .filter(|id| !id.is_empty())
-            .map_or_else(|| format!("{}:{}", place.segment, place.offset), str::to_owned),
+            .map_or_else(
+                || format!("{}:{}", place.segment, place.offset),
+                str::to_owned,
+            ),
         by: Compactor::Harness { reason: None },
         tokens_before: payload
             .pointer("/latest_token_usage_record/usage/total_tokens")
@@ -908,7 +914,9 @@ fn succeeded(output: Option<&Value>, text: &str) -> bool {
 /// ID 9055`, among its last lines.
 fn background_session(output: &str) -> Option<String> {
     output.lines().rev().take(8).find_map(|line| {
-        let id = line.trim().strip_prefix("Process running with session ID ")?;
+        let id = line
+            .trim()
+            .strip_prefix("Process running with session ID ")?;
         let id = id.trim();
         (!id.is_empty()).then(|| id.to_owned())
     })
@@ -968,9 +976,8 @@ fn mcp_failed(result: &Value) -> Option<Option<String>> {
 pub fn mcp_item_failed(item: &Value) -> Option<Option<String>> {
     let message = item.pointer("/error/message").and_then(Value::as_str);
     let result = item.get("result").filter(|result| !result.is_null());
-    let failed = message.is_some()
-        || result.is_some_and(flagged)
-        || text(item, "status") == Some("failed");
+    let failed =
+        message.is_some() || result.is_some_and(flagged) || text(item, "status") == Some("failed");
     failed.then(|| mcp_error(message, result.and_then(|result| result.get("content"))))
 }
 
@@ -1259,19 +1266,28 @@ mod tests {
     /// `write_stdin` calls that name that `session_id` waited on it, until it exits.
     #[test]
     fn a_poll_of_a_background_session_waited_on_the_call_that_started_it() {
-        let call = |id: &str, name: &str, arguments: &str| {
-            json!({"timestamp":"2026-10-09T09:40:02Z","type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":arguments}})
-        };
-        let output = |id: &str, text: &str| {
-            json!({"timestamp":"2026-10-09T09:40:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":text}})
-        };
+        let call = |id: &str, name: &str, arguments: &str| json!({"timestamp":"2026-10-09T09:40:02Z","type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":arguments}});
+        let output = |id: &str, text: &str| json!({"timestamp":"2026-10-09T09:40:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":text}});
         let events = read(&[
             call("c1", "exec_command", r#"{"cmd":"deploy/ship.sh"}"#),
-            output("c1", "Wall time: 1.0 seconds\nProcess running with session ID 9055\nOutput:\nbuilding"),
-            call("c2", "write_stdin", r#"{"session_id":9055,"chars":"","yield_time_ms":30000}"#),
-            output("c2", "Wall time: 30.0 seconds\nProcess running with session ID 9055\nOutput:\nstill"),
+            output(
+                "c1",
+                "Wall time: 1.0 seconds\nProcess running with session ID 9055\nOutput:\nbuilding",
+            ),
+            call(
+                "c2",
+                "write_stdin",
+                r#"{"session_id":9055,"chars":"","yield_time_ms":30000}"#,
+            ),
+            output(
+                "c2",
+                "Wall time: 30.0 seconds\nProcess running with session ID 9055\nOutput:\nstill",
+            ),
             call("c3", "write_stdin", r#"{"session_id":9055,"chars":""}"#),
-            output("c3", "Wall time: 5.0 seconds\nProcess exited with code 0\nOutput:\ndone"),
+            output(
+                "c3",
+                "Wall time: 5.0 seconds\nProcess exited with code 0\nOutput:\ndone",
+            ),
             call("c4", "write_stdin", r#"{"session_id":9055,"chars":""}"#),
             output("c4", "write_stdin failed: Unknown process id 9055"),
         ]);
@@ -1285,7 +1301,12 @@ mod tests {
         let starter = ["c1".to_owned()];
         assert_eq!(
             waited,
-            [("c1", &[][..]), ("c2", &starter[..]), ("c3", &starter[..]), ("c4", &[][..])]
+            [
+                ("c1", &[][..]),
+                ("c2", &starter[..]),
+                ("c3", &starter[..]),
+                ("c4", &[][..])
+            ]
         );
     }
 
@@ -1551,7 +1572,9 @@ mod tests {
     }
 
     fn mcp_call() -> [Value; 1] {
-        [json!({"timestamp":"2026-10-09T09:40:02Z","type":"response_item","payload":{"type":"function_call","name":"sessions_describe","namespace":"mcp__steery__","call_id":"m1","arguments":"{}"}})]
+        [
+            json!({"timestamp":"2026-10-09T09:40:02Z","type":"response_item","payload":{"type":"function_call","name":"sessions_describe","namespace":"mcp__steery__","call_id":"m1","arguments":"{}"}}),
+        ]
     }
 
     fn output(text: &str) -> Value {
@@ -1566,22 +1589,38 @@ mod tests {
     /// a legacy rollout's `mcp_tool_call_end`, in either order with the output.
     #[test]
     fn a_refused_mcp_call_fails_with_its_tools_words_in_a_legacy_rollout() {
-        let refused = ended(json!({"type":"mcp_tool_call_end","call_id":"m1","invocation":{"server":"steery","tool":"sessions_describe"},
-            "result":{"Ok":{"content":[{"type":"text","text":"HTTP 400: value is longer than 120 characters (invalid)"}],"isError":true}}}));
+        let refused = ended(
+            json!({"type":"mcp_tool_call_end","call_id":"m1","invocation":{"server":"steery","tool":"sessions_describe"},
+            "result":{"Ok":{"content":[{"type":"text","text":"HTTP 400: value is longer than 120 characters (invalid)"}],"isError":true}}}),
+        );
         let mut before = mcp_call().to_vec();
-        before.extend([refused.clone(), output("HTTP 400: value is longer than 120 characters (invalid)")]);
+        before.extend([
+            refused.clone(),
+            output("HTTP 400: value is longer than 120 characters (invalid)"),
+        ]);
         assert_eq!(
             ends(&read(&before)),
-            [("m1".to_owned(), false, Some("HTTP 400: value is longer than 120 characters (invalid)".to_owned()))]
+            [(
+                "m1".to_owned(),
+                false,
+                Some("HTTP 400: value is longer than 120 characters (invalid)".to_owned())
+            )]
         );
         // The output first: the call ended as it read, and the event corrects it.
         let mut after = mcp_call().to_vec();
-        after.extend([output("HTTP 400: value is longer than 120 characters (invalid)"), refused]);
+        after.extend([
+            output("HTTP 400: value is longer than 120 characters (invalid)"),
+            refused,
+        ]);
         assert_eq!(
             ends(&read(&after)),
             [
                 ("m1".to_owned(), true, None),
-                ("m1".to_owned(), false, Some("HTTP 400: value is longer than 120 characters (invalid)".to_owned())),
+                (
+                    "m1".to_owned(),
+                    false,
+                    Some("HTTP 400: value is longer than 120 characters (invalid)".to_owned())
+                ),
             ]
         );
     }
@@ -1609,21 +1648,35 @@ mod tests {
     #[test]
     fn a_failed_mcp_item_fails_its_call_in_a_paginated_rollout() {
         let item = |status: &str, error: Value, result: Value| {
-            ended(json!({"type":"item_completed","thread_id":"x","turn_id":"t","item":{"type":"McpToolCall","id":"m1",
-                "server":"steery","tool":"sessions_describe","arguments":{},"status":status,"result":result,"error":error}}))
+            ended(
+                json!({"type":"item_completed","thread_id":"x","turn_id":"t","item":{"type":"McpToolCall","id":"m1",
+                "server":"steery","tool":"sessions_describe","arguments":{},"status":status,"result":result,"error":error}}),
+            )
         };
         let mut failed = mcp_call().to_vec();
         failed.extend([
-            item("failed", json!({"message":"refused: not allowed"}), Value::Null),
+            item(
+                "failed",
+                json!({"message":"refused: not allowed"}),
+                Value::Null,
+            ),
             output("refused: not allowed"),
         ]);
         assert_eq!(
             ends(&read(&failed)),
-            [("m1".to_owned(), false, Some("refused: not allowed".to_owned()))]
+            [(
+                "m1".to_owned(),
+                false,
+                Some("refused: not allowed".to_owned())
+            )]
         );
         let mut flagged = mcp_call().to_vec();
         flagged.extend([
-            item("completed", Value::Null, json!({"content":[{"type":"text","text":"bad input"}],"isError":true})),
+            item(
+                "completed",
+                Value::Null,
+                json!({"content":[{"type":"text","text":"bad input"}],"isError":true}),
+            ),
             output("bad input"),
         ]);
         assert_eq!(
@@ -1631,7 +1684,10 @@ mod tests {
             [("m1".to_owned(), false, Some("bad input".to_owned()))]
         );
         let mut fine = mcp_call().to_vec();
-        fine.extend([item("completed", Value::Null, json!({"content":[]})), output("ok")]);
+        fine.extend([
+            item("completed", Value::Null, json!({"content":[]})),
+            output("ok"),
+        ]);
         assert_eq!(ends(&read(&fine)), [("m1".to_owned(), true, None)]);
     }
 

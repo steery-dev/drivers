@@ -881,12 +881,11 @@ impl Drive {
             listed
         });
         let (listed, signed_in) = tokio::join!(ask, signed_in(&codex, root));
-        let signed_in_at = match signed_in == Some(true)
-            && steery_driver_common::program::signed_in_at(picked)
-        {
-            true => signed_in_at(root).await,
-            false => None,
-        };
+        let signed_in_at =
+            match signed_in == Some(true) && steery_driver_common::program::signed_in_at(picked) {
+                true => signed_in_at(root).await,
+                false => None,
+            };
         let listed = listed
             .map_err(|_| {
                 Error::refused(refusal::NO_ANSWER, "Codex did not list its models in time")

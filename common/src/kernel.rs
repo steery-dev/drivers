@@ -27,9 +27,8 @@ pub fn started(pid: u32) -> Option<u64> {
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
     let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
     // SAFETY: the buffer is one `proc_bsdinfo`, and `size` is its size.
-    let read = unsafe {
-        libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
-    };
+    let read =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
     if read != size || info.pbi_status == libc::SZOMB {
         return None;
     }

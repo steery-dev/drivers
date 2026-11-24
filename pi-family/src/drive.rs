@@ -800,7 +800,10 @@ mod tests {
             Some("signed-out")
         );
         assert_eq!(
-            refused_by(Harness::Omp, "Error: No API key for anthropic/claude-opus-5-5"),
+            refused_by(
+                Harness::Omp,
+                "Error: No API key for anthropic/claude-opus-5-5"
+            ),
             Some("signed-out")
         );
         assert_eq!(

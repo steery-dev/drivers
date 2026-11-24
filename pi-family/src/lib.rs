@@ -102,7 +102,7 @@ impl Program for Driver {
             &params.protocol,
             steery_driver_common::program::protocol_words,
         )
-            .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
+        .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let harness = self.harness;
         let _ = self.place.set(Place {
             protocol,

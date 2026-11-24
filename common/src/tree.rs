@@ -545,7 +545,10 @@ impl Walk<'_> {
             .enumerate()
             .position(|(at, node)| !said[at] && (on_path[at] || node.start >= through))
             .unwrap_or(self.tree.nodes.len());
-        self.tree.names[..unread].iter().rev().find_map(|name| name.as_deref())
+        self.tree.names[..unread]
+            .iter()
+            .rev()
+            .find_map(|name| name.as_deref())
     }
 
     /// Where the record named `id` is in the tree, where the file holds one.
