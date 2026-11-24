@@ -214,11 +214,14 @@ const CUT: &str = "[Some lines truncated to";
 /// from where omp kept them whole (a shell's trace, an MCP tool's raw content), else from
 /// the result's text without omp's prefix, its echo of the arguments, and its notes on a
 /// shell's time and status. None where the words are cut and no whole copy is kept.
-fn said_error(harness: Harness, message: &Value, said: &str) -> Option<String> {
+fn said_error(harness: Harness, file: &Path, message: &Value, said: &str) -> Option<String> {
     let details = message.get("details");
     let words = if harness == Harness::Omp {
         if text(message, "toolName") == Some("bash") {
-            Some(mended(&shell_words(said), shell_output(details).as_deref()))
+            Some(match kept_output(file, details) {
+                Some(whole) => shell_words(&whole),
+                None => mended(&shell_words(said), shell_output(details).as_deref()),
+            })
         } else {
             raw_words(details).or_else(|| omp_words(message, said))
         }
@@ -228,6 +231,65 @@ fn said_error(harness: Harness, message: &Value, said: &str) -> Option<String> {
     words
         .map(|words| words.trim().to_owned())
         .filter(|words| !words.is_empty())
+}
+
+/// The most of a shell call's whole output that its error carries: a longer one keeps its
+/// first and last halves of this, in whole lines. A Steery failure line sits anywhere in it,
+/// and the error goes in a frame of at most 16 MiB with the rest of a read.
+const KEPT_OUTPUT: u64 = 1 << 20;
+
+/// What a shell call wrote, whole, where omp kept it in an artifact because it shortened
+/// the result: cut lines, a middle left out of a long output, or a filter's shorter form
+/// (`details.meta`). The artifact `<id>.bash.log` (`<id>.bash-original.log` before a filter)
+/// sits in the folder named for the session's transcript, which its sub-agents' transcripts
+/// sit in. None where omp kept no artifact or it is gone; at most [`KEPT_OUTPUT`].
+fn kept_output(file: &Path, details: Option<&Value>) -> Option<String> {
+    let meta = details?.get("meta")?;
+    let id = [
+        "/minimized/artifactId",
+        "/truncation/artifactId",
+        "/limits/columnTruncated/artifactId",
+    ]
+    .iter()
+    .find_map(|at| meta.pointer(at).and_then(Value::as_str))?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let folders = [
+        Some(file.with_extension("")),
+        file.parent().map(Path::to_path_buf),
+    ];
+    folders
+        .into_iter()
+        .flatten()
+        .flat_map(|folder| {
+            ["bash-original", "bash"].map(|kind| folder.join(format!("{id}.{kind}.log")))
+        })
+        .find_map(|artifact| ends(&artifact, KEPT_OUTPUT))
+}
+
+/// A file's text, whole where it is at most `most` bytes, else its first and last halves of
+/// `most` in whole lines with a line `…` between them.
+fn ends(path: &Path, most: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    if size <= most {
+        let mut bytes = Vec::with_capacity(size as usize);
+        file.read_to_end(&mut bytes).ok()?;
+        return Some(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    let half = most / 2;
+    let mut head = vec![0; half as usize];
+    file.read_exact(&mut head).ok()?;
+    let mut tail = vec![0; half as usize];
+    file.seek(SeekFrom::Start(size - half)).ok()?;
+    file.read_exact(&mut tail).ok()?;
+    let head = String::from_utf8_lossy(&head);
+    let tail = String::from_utf8_lossy(&tail);
+    let head = head.rsplit_once('\n').map_or("", |(whole, _)| whole);
+    let tail = tail.split_once('\n').map_or("", |(_, whole)| whole);
+    Some(format!("{head}\n…\n{tail}"))
 }
 
 /// The end omp gives a line of a result it cut at 768 bytes.
@@ -734,7 +796,7 @@ impl State<'_> {
             error: if ok {
                 None
             } else {
-                said_error(self.reading.harness, message, &said)
+                said_error(self.reading.harness, &self.reading.file, message, &said)
             },
         });
         self.started(at, call, text(message, "toolName"), message.get("details"));
@@ -1723,7 +1785,12 @@ mod tests {
 
     fn error(message: &Value) -> Option<String> {
         let said = texts(message.get("content"));
-        said_error(Harness::Omp, message, &said)
+        said_error(
+            Harness::Omp,
+            Path::new("/nonexistent/t.jsonl"),
+            message,
+            &said,
+        )
     }
 
     #[test]
@@ -1756,6 +1823,72 @@ mod tests {
             error(&refused("bash", &said, newest)),
             Some(format!("{first}\n…40000 lines…\n{long}"))
         );
+    }
+
+    #[test]
+    fn a_failed_shell_call_reads_the_whole_output_omp_kept_aside() {
+        let root = std::env::temp_dir().join(format!("pi-kept-{}", std::process::id()));
+        let session = root.join("2026-11-24T00-00-00-000Z_s");
+        std::fs::create_dir_all(&session).expect("a session folder");
+        let refusal = r#"{"error":"invalid","why":"no","next":"fix it","steery":"7.1.0"}"#;
+        let whole: String = (1..=20_000)
+            .map(|n| format!("{n}\n"))
+            .chain([format!("{refusal}\n")])
+            .chain((1..=20_000).map(|n| format!("{n}\n")))
+            .collect();
+        std::fs::write(session.join("30.bash.log"), &whole).expect("the artifact");
+        // omp kept the two ends of the result; the refusal was in the middle it left out.
+        let said = "1\n2\n…\n19999\n20000\n\nCommand exited with code 1";
+        let message = refused(
+            "bash",
+            said,
+            json!({"meta": {"truncation": {"direction": "middle", "artifactId": "30"}}}),
+        );
+        let lead = root.join("2026-11-24T00-00-00-000Z_s.jsonl");
+        let error = said_error(Harness::Omp, &lead, &message, said).expect("an error");
+        assert!(error.contains(refusal), "the lead reads its own artifact");
+        assert_eq!(error.lines().count(), 40_001);
+        // A sub-agent's transcript sits in the lead's folder, with the lead's artifacts.
+        let sub = session.join("Checker.jsonl");
+        let error = said_error(Harness::Omp, &sub, &message, said).expect("an error");
+        assert!(
+            error.contains(refusal),
+            "a sub-agent reads the lead's artifact"
+        );
+        // A filter's shorter form reads the original it kept.
+        std::fs::write(session.join("31.bash-original.log"), "raw\nboom\n").expect("original");
+        let message = refused(
+            "bash",
+            "boom",
+            json!({"meta": {"minimized": {"artifactId": "31"}}}),
+        );
+        assert_eq!(
+            said_error(Harness::Omp, &lead, &message, "boom").as_deref(),
+            Some("raw\nboom")
+        );
+        // An id that is no file name reads nothing, and the text stands.
+        let message = refused(
+            "bash",
+            "boom",
+            json!({"meta": {"truncation": {"artifactId": "../x"}}}),
+        );
+        assert_eq!(
+            said_error(Harness::Omp, &lead, &message, "boom").as_deref(),
+            Some("boom")
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_long_output_keeps_its_two_ends_in_whole_lines() {
+        let path = std::env::temp_dir().join(format!("pi-ends-{}.log", std::process::id()));
+        std::fs::write(&path, "aaaa\nbbbb\ncccc\ndddd\neeee\n").expect("a file");
+        assert_eq!(
+            ends(&path, 100).as_deref(),
+            Some("aaaa\nbbbb\ncccc\ndddd\neeee\n")
+        );
+        assert_eq!(ends(&path, 14).as_deref(), Some("aaaa\n…\neeee\n"));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -1845,7 +1978,12 @@ mod tests {
         );
         let message = refused("bash", "Error: cannot index\n", json!({}));
         assert_eq!(
-            said_error(Harness::Pi, &message, "Error: cannot index\n"),
+            said_error(
+                Harness::Pi,
+                Path::new("/nonexistent/t.jsonl"),
+                &message,
+                "Error: cannot index\n"
+            ),
             Some("Error: cannot index".to_owned())
         );
     }

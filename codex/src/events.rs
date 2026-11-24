@@ -73,6 +73,11 @@ pub struct State {
     /// [`SESSIONS`]: an event that comes after the output corrects them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     ended: Vec<(String, u64)>,
+    /// Code-mode scripts not yet answered, oldest first and at most [`SESSIONS`]: the
+    /// `exec` calls that run tools from a script. Codex files each tool the script calls as
+    /// its own completed item, and the newest script open is the call it runs inside.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    scripts: Vec<String>,
     /// A compaction read, held until Codex counts the context it left: the `token_count`
     /// it sends once the history is replaced, after the `world_state`, `turn_context` and
     /// `thread_settings_applied` it writes with it. Said then, at any other record, or at
@@ -356,9 +361,20 @@ impl State {
                 if let Some(item) = payload.get("item")
                     && matches!(text(item, "type"), Some("McpToolCall" | "mcpToolCall"))
                     && let Some(call) = text(item, "id")
-                    && let Some(error) = mcp_item_failed(item)
                 {
-                    self.mcp_failed(call, error, at, out);
+                    let script = self
+                        .scripts
+                        .last()
+                        .filter(|_| call.starts_with(SCRIPTED))
+                        .cloned();
+                    match script {
+                        Some(script) => scripted(item, call, &script, at, out),
+                        None => {
+                            if let Some(error) = mcp_item_failed(item) {
+                                self.mcp_failed(call, error, at, out);
+                            }
+                        }
+                    }
                 }
             }
             _ => {}
@@ -513,12 +529,19 @@ impl State {
                     self.agents
                         .insert(call_id.to_owned(), (call.tool.clone(), target));
                 }
+                if kind == Some("custom_tool_call") && call.tool == SCRIPT {
+                    if self.scripts.len() >= SESSIONS {
+                        self.scripts.remove(0);
+                    }
+                    self.scripts.push(call_id.to_owned());
+                }
                 out.push(Event::CallBegan { at, call });
             }
             Some("function_call_output" | "custom_tool_call_output") => {
                 let Some(call_id) = text(payload, "call_id") else {
                     return;
                 };
+                self.scripts.retain(|script| script != call_id);
                 let output = output_text(payload.get("output"));
                 if let Some((tool, target)) = self.agents.remove(call_id) {
                     self.agents_said(&tool, target, call_id, &output, at, out);
@@ -969,6 +992,58 @@ fn mcp_failed(result: &Value) -> Option<Option<String>> {
     }
     let result = result.get("Ok")?;
     flagged(result).then(|| mcp_error(None, result.get("content")))
+}
+
+/// The tool of Codex's code mode that runs a script, which calls tools from it.
+const SCRIPT: &str = "exec";
+
+/// What opens the id Codex gives a tool called from a code-mode script (`exec-<uuid>`).
+const SCRIPTED: &str = "exec-";
+
+/// An MCP tool a code-mode script called, as its completed item says: a call of its own
+/// inside the script's (`parent`), begun and ended when the item says, failed with the
+/// tool's words where the tool refused or failed. The script's own outcome is Codex's.
+fn scripted(item: &Value, id: &str, script: &str, at: u64, out: &mut Vec<Event>) {
+    let server = text(item, "server").unwrap_or_default();
+    let tool = text(item, "tool").unwrap_or_default();
+    let input = item.get("arguments").cloned().unwrap_or(Value::Null);
+    let mut call = calls::call(id, &format!("mcp__{server}__{tool}"), input);
+    call.parent = Some(script.to_owned());
+    let began = item
+        .get("started_at_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(at);
+    let ended = item
+        .get("completed_at_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(at);
+    out.push(Event::CallBegan { at: began, call });
+    let failed = mcp_item_failed(item);
+    let result = item.get("result").filter(|result| !result.is_null());
+    let said = match &failed {
+        Some(Some(error)) => error.clone(),
+        _ => output_text(result.and_then(|result| result.get("content"))),
+    };
+    out.push(Event::CallEnded {
+        at: ended,
+        id: id.to_owned(),
+        ok: failed.is_none(),
+        chars: said.chars().count() as u64,
+        tail: tail(&said),
+        waited: Vec::new(),
+        error: failed.flatten(),
+    });
+    if !said.trim().is_empty() {
+        out.push(Event::Words {
+            at: ended,
+            id: format!("{id}:out"),
+            voice: Voice::Tool,
+            text: said,
+            message: None,
+            call: Some(id.to_owned()),
+            clips: Vec::new(),
+        });
+    }
 }
 
 /// How an MCP call ended as its completed item says (`status`, `result`, `error`): none where
@@ -1642,6 +1717,79 @@ mod tests {
             output("done"),
         ]);
         assert_eq!(ends(&read(&fine)), [("m1".to_owned(), true, None)]);
+    }
+
+    /// Codex 0.171's code mode calls MCP tools from an `exec` script: the rollout files each
+    /// as an item of its own (`exec-<uuid>`) between the script and its output, as a real
+    /// run of 2026-11-24 wrote them.
+    #[test]
+    fn a_tool_a_script_called_is_a_call_inside_it_with_its_own_failure() {
+        let script = json!({"timestamp":"2026-11-24T02:18:59Z","type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"call_s","input":"const r = await tools.mcp__steery__sessions_query({});"}});
+        let item = |id: &str, status: &str, error: Value, result: Value| {
+            ended(
+                json!({"type":"item_completed","thread_id":"x","turn_id":"t","started_at_ms":1,"completed_at_ms":2,
+                "item":{"type":"McpToolCall","id":id,"server":"steery","tool":"sessions_query","arguments":{"steps":[]},
+                "status":status,"result":result,"error":error,"started_at_ms":1_779_000_000_000_u64,"completed_at_ms":1_779_000_000_250_u64}}),
+            )
+        };
+        let answered = json!({"timestamp":"2026-11-24T02:19:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_s",
+            "output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"}]}});
+        let events = read(&[
+            script.clone(),
+            item(
+                "exec-1",
+                "failed",
+                json!({"message":"MCP tool call requires approval, but approval policy is never"}),
+                Value::Null,
+            ),
+            item(
+                "exec-2",
+                "completed",
+                Value::Null,
+                json!({"content":[{"type":"text","text":"[]"}],"isError":false}),
+            ),
+            answered.clone(),
+        ]);
+        assert_eq!(
+            ends(&events),
+            [
+                (
+                    "exec-1".to_owned(),
+                    false,
+                    Some(
+                        "MCP tool call requires approval, but approval policy is never".to_owned()
+                    )
+                ),
+                ("exec-2".to_owned(), true, None),
+                ("call_s".to_owned(), true, None),
+            ],
+            "each tool the script called ends on its own; the script ends as Codex said"
+        );
+        let nested: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::CallBegan { at, call } if call.id.starts_with("exec-") => {
+                    Some((*at, call.tool.clone(), call.parent.clone(), call.group))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nested.len(), 2);
+        assert_eq!(nested[0].0, 1_779_000_000_000);
+        assert_eq!(nested[0].1, "mcp__steery__sessions_query");
+        assert_eq!(nested[0].2.as_deref(), Some("call_s"));
+        assert_eq!(nested[0].3, steery_sdk::wire::harness::Group::Steery);
+        // After its script answered, an item is a call of its own as before.
+        let events = read(&[
+            script,
+            answered,
+            item("exec-3", "failed", json!({"message":"no"}), Value::Null),
+        ]);
+        assert!(
+            events.iter().all(
+                |event| !matches!(event, Event::CallBegan { call, .. } if call.id == "exec-3")
+            )
+        );
     }
 
     /// A paginated rollout keeps the call as an `item_completed` of an MCP tool call.
