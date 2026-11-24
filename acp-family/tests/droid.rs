@@ -481,8 +481,10 @@ async fn reads_sessions_droid_wrote_and_the_hooks_droid_runs() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// No Droid: the plan installs it. An old Droid: the plan names its release and sets it up,
+/// and the runtime compares that release with the driver's `minimum`.
 #[tokio::test]
-async fn plans_an_install_or_an_update() {
+async fn plans_an_install_or_names_an_old_release() {
     let missing = home("missing", None);
     let client = start(&missing).await;
     let plan = call(&client, method::SETUP_PLAN, setup()).await;
@@ -498,11 +500,8 @@ async fn plans_an_install_or_an_update() {
     let client = start(&old).await;
     let plan = call(&client, method::SETUP_PLAN, setup()).await;
     assert_eq!(plan["found"]["release"], "1.8.3");
-    assert!(
-        plan["refused"].as_str().unwrap().contains("droid update"),
-        "{plan}"
-    );
-    assert_eq!(plan["entries"], json!([]));
+    assert!(plan.get("refused").is_none_or(Value::is_null), "{plan}");
+    assert!(!plan["entries"].as_array().unwrap().is_empty(), "{plan}");
     let _ = std::fs::remove_dir_all(&old);
 }
 

@@ -420,8 +420,10 @@ async fn reads_sessions_kiro_wrote_and_the_hooks_kiro_runs() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+/// No Kiro: the plan installs it. An old Kiro: the plan names its release and sets it up,
+/// and the runtime compares that release with the driver's `minimum`.
 #[tokio::test]
-async fn plans_an_install_or_an_update() {
+async fn plans_an_install_or_names_an_old_release() {
     let missing = home("missing", None);
     let client = start(&missing).await;
     let plan = call(&client, method::SETUP_PLAN, setup()).await;
@@ -441,14 +443,8 @@ async fn plans_an_install_or_an_update() {
     let client = start(&old).await;
     let plan = call(&client, method::SETUP_PLAN, setup()).await;
     assert_eq!(plan["found"]["release"], "3.2.9");
-    assert!(
-        plan["refused"]
-            .as_str()
-            .unwrap()
-            .contains("kiro-cli update"),
-        "{plan}"
-    );
-    assert_eq!(plan["entries"], json!([]));
+    assert!(plan.get("refused").is_none_or(Value::is_null), "{plan}");
+    assert!(!plan["entries"].as_array().unwrap().is_empty(), "{plan}");
     let _ = std::fs::remove_dir_all(&old);
 }
 
@@ -483,10 +479,24 @@ async fn starts_and_reads_kiro_turns() {
     let hook = home.join(".kiro/steery/hook");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
     std::fs::write(&hook, "/opt/steery/hook").unwrap();
-    let resumed = ask(json!({"act": "continue", "external_id": DRIVEN, "cwd": cwd,
-        "folder": cwd, "worktree": false}))
-    .await
-    .unwrap();
+    // Kiro resumes a conversation only in the folder it ran in. [`DRIVEN`] ran in
+    // `/private/tmp/kiro-smoke`; here it ran in a folder of this home's own, so the test
+    // reads no folder of the machine's.
+    let ran = home.join("kiro-smoke");
+    let head = home.join(format!(
+        ".kiro/sessions/1b51937985dbf6f7/{DRIVEN}/session.json"
+    ));
+    let mut session: Value =
+        serde_json::from_str(&std::fs::read_to_string(&head).unwrap()).unwrap();
+    session["workspacePaths"] = json!([ran]);
+    session["rootPaths"] = json!([ran]);
+    std::fs::write(&head, session.to_string()).unwrap();
+    let continued = json!({"act": "continue", "external_id": DRIVEN, "cwd": cwd,
+        "folder": cwd, "worktree": false});
+    let gone = ask(continued.clone()).await.unwrap_err().to_string();
+    assert!(gone.contains("no-place"), "{gone}");
+    std::fs::create_dir_all(&ran).unwrap();
+    let resumed = ask(continued).await.unwrap();
     let argv = resumed["argv"].as_array().unwrap();
     assert_eq!(argv[4..6], [json!("continue"), json!(DRIVEN)], "{resumed}");
     assert_eq!(resumed["cwd"], json!(cwd));

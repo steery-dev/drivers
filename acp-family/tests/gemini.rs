@@ -1,13 +1,15 @@
 //! The Gemini CLI driver's held turn, run as the runtime runs it: `setup/plan` and `start`
 //! over the program protocol, then the launch plan's command, which runs the real
 //! `gemini --acp` against a model API on the loopback and dials this test as Steery's
-//! plugin door. Gemini CLI must be on `PATH`; without it the test says so and passes.
+//! plugin door. Gemini CLI at the driver's `minimum` or newer must be on `PATH`; without
+//! it the test says so and passes, as the runtime runs no older Gemini either.
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use steery_driver_common::program::release_within;
 use steery_sdk::client::Client;
 use steery_sdk::wire::door::{Ask, DoorMode, DoorSayMode, PluginFrame, RuntimeFrame};
 use steery_sdk::{method, wire};
@@ -307,7 +309,7 @@ async fn a_held_turn_takes_every_word_through_the_door() {
         config: home.join(".config/steery"),
         settings: Default::default(),
     };
-    driver.initialize(&offered).await.unwrap();
+    let initialized = driver.initialize(&offered).await.unwrap();
 
     // The runtime writes the plan's files; the door's address is one of them.
     let planned = driver
@@ -320,6 +322,18 @@ async fn a_held_turn_takes_every_word_through_the_door() {
         )
         .await
         .unwrap();
+    let minimum = initialized
+        .harness
+        .and_then(|harness| harness.minimum)
+        .expect("the driver names its oldest Gemini")
+        .release;
+    let release = planned["found"]["release"].as_str().unwrap_or_default();
+    if release_within(release) < release_within(&minimum) {
+        eprintln!("skipped: gemini on PATH is `{release}`, older than {minimum}");
+        driver.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        return;
+    }
     for entry in planned["entries"].as_array().unwrap() {
         if entry["format"] == "text" {
             let file = Path::new(entry["path"].as_str().unwrap());
