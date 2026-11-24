@@ -105,10 +105,7 @@ pub fn signed_in_at(picked: u32) -> bool {
 /// for a driver that also says a failed call's own words (`steery_sdk::CALL_ERROR`,
 /// protocol 19: `call_ended`'s `error`): 19 where the runtime offered it, else what
 /// `otherwise` gives.
-pub fn protocol_call_error(
-    offered: &[u32],
-    otherwise: fn(&[u32]) -> Option<u32>,
-) -> Option<u32> {
+pub fn protocol_call_error(offered: &[u32], otherwise: fn(&[u32]) -> Option<u32>) -> Option<u32> {
     offered
         .contains(&steery_sdk::CALL_ERROR)
         .then_some(steery_sdk::CALL_ERROR)
@@ -314,9 +311,18 @@ mod tests {
         assert_eq!(protocol_words(&[4, 14, 15, 16]), Some(16));
         assert_eq!(protocol_words(&[3]), None);
         assert!(words(17) && !words(16));
-        assert_eq!(protocol_call_error(&[4, 14, 18, 19], protocol_signed_in_at), Some(19));
-        assert_eq!(protocol_call_error(&[4, 14, 18], protocol_signed_in_at), Some(18));
-        assert_eq!(protocol_call_error(&[4, 17, 18, 19], protocol_words), Some(19));
+        assert_eq!(
+            protocol_call_error(&[4, 14, 18, 19], protocol_signed_in_at),
+            Some(19)
+        );
+        assert_eq!(
+            protocol_call_error(&[4, 14, 18], protocol_signed_in_at),
+            Some(18)
+        );
+        assert_eq!(
+            protocol_call_error(&[4, 17, 18, 19], protocol_words),
+            Some(19)
+        );
         assert_eq!(protocol_call_error(&[4, 17, 18], protocol_words), Some(17));
         assert!(call_error(19) && !call_error(18));
     }

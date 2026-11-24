@@ -58,8 +58,7 @@ async fn found(binary: PathBuf, home: &Path, root: &Path, setup: Setup) -> Plann
     }
     let entries = self::entries(&super::config(home), root, &setup);
     notes.push(
-        "Antigravity's app and IDE read the same MCP servers, hooks and skills as its CLI."
-            .into(),
+        "Antigravity's app and IDE read the same MCP servers, hooks and skills as its CLI.".into(),
     );
     notes.push(
         "Live reaches an Antigravity window only where it started with \

@@ -134,7 +134,7 @@ impl Program for Codex {
             &params.protocol,
             steery_driver_common::program::protocol_signed_in_at,
         )
-            .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
+        .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let protocol = *self.protocol.get_or_init(|| protocol);
         self.changes.picked(protocol);
         let _ = self.home.set(params.home.clone());
@@ -172,12 +172,22 @@ impl Program for Codex {
             method::SETUP_PLAN => {
                 let setup: wire::harness::Setup = steery_sdk::params(params)?;
                 *self.hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(setup.hook.clone());
-                result(setup::plan(self.home()?, setup, self.protocol.get().copied().unwrap_or_default()).await?)
+                result(
+                    setup::plan(
+                        self.home()?,
+                        setup,
+                        self.protocol.get().copied().unwrap_or_default(),
+                    )
+                    .await?,
+                )
             }
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = steery_sdk::params(params)?;
                 let after = asked.after.clone();
-                result(self.changes.answer(after.as_deref(), self.drive()?.store.list(asked)))
+                result(
+                    self.changes
+                        .answer(after.as_deref(), self.drive()?.store.list(asked)),
+                )
             }
             method::SESSIONS_LOCATE => {
                 result(self.drive()?.store.locate(steery_sdk::params(params)?)?)

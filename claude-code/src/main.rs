@@ -156,7 +156,7 @@ impl Program for ClaudeCode {
             &params.protocol,
             steery_driver_common::program::protocol_signed_in_at,
         )
-            .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
+        .ok_or_else(|| Error::invalid(steery_driver_common::program::unspoken()))?;
         let store = root(&params.home).map(|root| Arc::new(transcripts::Store::new(root)));
         let place = Place {
             protocol,
@@ -205,13 +205,18 @@ impl Program for ClaudeCode {
                     .root();
                 result(setup::plan(&place.home, root, given(params)?, place.protocol).await?)
             }
-            method::NEEDS_GIVE if self.needs()? => {
-                result(self.sign_ins.give(given(params)?, self.place()?.protocol >= steery_sdk::ASK).await?)
-            }
+            method::NEEDS_GIVE if self.needs()? => result(
+                self.sign_ins
+                    .give(given(params)?, self.place()?.protocol >= steery_sdk::ASK)
+                    .await?,
+            ),
             method::SESSIONS_LIST => {
                 let asked: wire::harness::List = given(params)?;
                 let after = asked.after.clone();
-                result(self.changes.answer(after.as_deref(), self.store()?.list(asked)))
+                result(
+                    self.changes
+                        .answer(after.as_deref(), self.store()?.list(asked)),
+                )
             }
             method::SESSIONS_LOCATE => result(self.store()?.locate(given(params)?)?),
             method::SESSIONS_READ => {
@@ -219,8 +224,7 @@ impl Program for ClaudeCode {
                 // A runtime on an older protocol rejects a field it does not know.
                 let protocol = self.place()?.protocol;
                 for event in &mut read.events {
-                    if let steery_sdk::wire::harness::Event::CallEnded { waited, error, .. } =
-                        event
+                    if let steery_sdk::wire::harness::Event::CallEnded { waited, error, .. } = event
                     {
                         if protocol < steery_driver_common::program::WAITED {
                             waited.clear();
@@ -239,11 +243,9 @@ impl Program for ClaudeCode {
                     "Claude Code has no plugin door that sends its records",
                 ))
             }
-            method::MCP_LIST => result(mcp::list(
-                &self.place()?.home,
-                self.root()?,
-                given(params)?,
-            )),
+            method::MCP_LIST => {
+                result(mcp::list(&self.place()?.home, self.root()?, given(params)?))
+            }
             method::HOOK_READ => {
                 let store = Arc::clone(self.shared()?);
                 let read = given(params)?;

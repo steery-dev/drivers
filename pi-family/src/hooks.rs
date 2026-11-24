@@ -197,7 +197,8 @@ mod tests {
             assert_eq!(named(&refused), None, "{refused} was taken");
         }
         let parent = "01a0a013-c9d7-7000-8000-000000000002";
-        let file = format!("/home/a/.omp/agent/sessions/--w--/2026-10-09T10-00-00-000Z_{parent}.jsonl");
+        let file =
+            format!("/home/a/.omp/agent/sessions/--w--/2026-10-09T10-00-00-000Z_{parent}.jsonl");
         let forked = |reason: &str| {
             read_one(
                 Harness::Omp,

@@ -202,7 +202,9 @@ impl Waiting {
             .held()
             .take_if(|login| login.way == way)
             .ok_or_else(|| {
-                gone(format!("No {label} sign-in waits on this host now. Start the sign-in again."))
+                gone(format!(
+                    "No {label} sign-in waits on this host now. Start the sign-in again."
+                ))
             })?;
         let given = given.trim();
         let before = login.said.borrow().len();
@@ -216,13 +218,20 @@ impl Waiting {
                 }
                 None if login.reads_code => {
                     if let Err(e) = login.type_line(given) {
-                        return Err(refused(format!("{label}'s sign-in did not take the input: {e}")));
+                        return Err(refused(format!(
+                            "{label}'s sign-in did not take the input: {e}"
+                        )));
                     }
                 }
                 None => {
                     let line = login.back.as_ref().map_or_else(
                         || format!("{label}'s sign-in does not read this field. Leave it empty."),
-                        |back| format!("Paste the full address where your browser ended: {}", back.starts()),
+                        |back| {
+                            format!(
+                                "Paste the full address where your browser ended: {}",
+                                back.starts()
+                            )
+                        },
                     );
                     self.put_back(login);
                     return Err(refused(line));
@@ -235,11 +244,12 @@ impl Waiting {
             Ok(Ok(status)) => {
                 // Its last words reach the terminal before it closes.
                 let mut said = login.said.clone();
-                let _ = tokio::time::timeout(Duration::from_secs(1), said.wait_for(|_| false)).await;
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(1), said.wait_for(|_| false)).await;
                 let own = own_line(&said.borrow(), before, echo);
-                Err(refused(
-                    own.unwrap_or_else(|| format!("{label}'s sign-in ended with {status}")),
-                ))
+                Err(refused(own.unwrap_or_else(|| {
+                    format!("{label}'s sign-in ended with {status}")
+                })))
             }
             Ok(Err(e)) => Err(refused(format!("{label}'s sign-in: {e}"))),
             Err(_) => {
@@ -252,12 +262,14 @@ impl Waiting {
                     (None, true) => format!(
                         "{label} did not complete the sign-in. Complete it on the page, then continue."
                     ),
-                    (_, false) => own_line(&login.said.borrow(), before, echo).unwrap_or_else(|| {
-                        format!(
-                            "{label} did not complete the sign-in within {} s",
-                            ENDS_WITHIN.as_secs()
-                        )
-                    }),
+                    (_, false) => {
+                        own_line(&login.said.borrow(), before, echo).unwrap_or_else(|| {
+                            format!(
+                                "{label} did not complete the sign-in within {} s",
+                                ENDS_WITHIN.as_secs()
+                            )
+                        })
+                    }
                 };
                 self.put_back(login);
                 Err(refused(line))
@@ -344,7 +356,10 @@ impl Visit {
             if head.starts_with(b"HTTP/") {
                 Ok(())
             } else {
-                Err(format!("{}:{} did not answer with HTTP", self.host, self.port))
+                Err(format!(
+                    "{}:{} did not answer with HTTP",
+                    self.host, self.port
+                ))
             }
         })
         .await
@@ -409,9 +424,8 @@ fn decoded(value: &str) -> Option<String> {
 /// URL holds (RFC 3986), and something follows it.
 pub fn link(shown: &str) -> Option<String> {
     let rest = &shown[shown.find("https://")?..];
-    let end = rest.find(|c: char| {
-        !(c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c))
-    })?;
+    let end =
+        rest.find(|c: char| !(c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)))?;
     Some(rest[..end].to_owned())
 }
 

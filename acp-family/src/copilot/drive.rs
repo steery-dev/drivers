@@ -44,7 +44,11 @@ pub fn held(store: &Store, held: Held) -> HeldBy {
     }
     HeldBy::Look(Looked {
         look: Look {
-            transcripts: store.transcript(&held.external_id).ok().into_iter().collect(),
+            transcripts: store
+                .transcript(&held.external_id)
+                .ok()
+                .into_iter()
+                .collect(),
             strays: true,
             beyond: Vec::new(),
         },

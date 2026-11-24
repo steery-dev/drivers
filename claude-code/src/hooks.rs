@@ -239,8 +239,9 @@ fn moment(store: &Store, name: &str, document: &Value, picked: u32) -> Option<Mo
     let external_id = text(document, "session_id")?.to_owned();
     let tool_input = || document.get("tool_input").cloned().unwrap_or(Value::Null);
     let call = match (event.kind, text(document, "tool_name")) {
-        (HookKind::BeforeCall | HookKind::AfterCall, Some(tool)) => text(document, "tool_use_id")
-            .map(|id| crate::calls::call(id, tool, tool_input())),
+        (HookKind::BeforeCall | HookKind::AfterCall, Some(tool)) => {
+            text(document, "tool_use_id").map(|id| crate::calls::call(id, tool, tool_input()))
+        }
         // Claude Code hands `PermissionRequest` the tool and its input but no `tool_use_id`
         // (https://code.claude.com/docs/en/hooks, "PermissionRequest input"): the call is
         // still the one a person decides on, under no id.
@@ -810,8 +811,14 @@ mod tests {
         )
         .expect("a moment");
         let failure = limited.failure.expect("why it failed");
-        assert_eq!((failure.kind, failure.line.as_str()), (FailureKind::RateLimit, "529 Overloaded"));
-        assert!(ended.failure.is_none(), "a turn that finished has no failure");
+        assert_eq!(
+            (failure.kind, failure.line.as_str()),
+            (FailureKind::RateLimit, "529 Overloaded")
+        );
+        assert!(
+            ended.failure.is_none(),
+            "a turn that finished has no failure"
+        );
         let opened = read_one(
             "SessionStart",
             json!({"session_id": "s1", "source": "startup", "model": "claude-sonnet-5-5"}),
@@ -834,10 +841,13 @@ mod tests {
     /// nobody's instruction: it carries no words.
     #[test]
     fn a_document_that_is_no_moment_steery_carries_reads_as_none() {
-        let compacting = json!({"session_id": "s1", "trigger": "auto", "custom_instructions": null});
+        let compacting =
+            json!({"session_id": "s1", "trigger": "auto", "custom_instructions": null});
         assert!(read_at("PreCompact", compacting.clone(), &[], steery_sdk::BARE).is_none());
         assert_eq!(
-            read_one("PreCompact", compacting, &[]).expect("a moment").event,
+            read_one("PreCompact", compacting, &[])
+                .expect("a moment")
+                .event,
             "PreCompact"
         );
         let ended = |agent_type: &str| {
@@ -849,7 +859,10 @@ mod tests {
             )
         };
         let sub = ended("Explore").expect("a sub-agent's end");
-        assert_eq!((sub.sub_agent.as_deref(), sub.continued), (Some("a7"), true));
+        assert_eq!(
+            (sub.sub_agent.as_deref(), sub.continued),
+            (Some("a7"), true)
+        );
         assert!(ended("").is_none(), "an agent Claude Code runs for itself");
         let prompt = |words: &str, source: Option<&str>, picked: u32| {
             let mut document = json!({"session_id": "s1", "prompt": words});
@@ -862,10 +875,22 @@ mod tests {
         };
         let report = "<task-notification>\n<task-id>a77006</task-id>\n<status>completed</status>\n</task-notification>";
         assert_eq!(prompt(report, None, steery_sdk::WORDS), None);
-        assert_eq!(prompt("/loop tick", Some("loop_wakeup"), steery_sdk::WORDS), None);
-        assert_eq!(prompt("Fix it", Some("user"), steery_sdk::WORDS).as_deref(), Some("Fix it"));
-        assert_eq!(prompt("Fix it", None, steery_sdk::WORDS).as_deref(), Some("Fix it"));
-        assert_eq!(prompt(report, None, steery_sdk::BARE).as_deref(), Some(report));
+        assert_eq!(
+            prompt("/loop tick", Some("loop_wakeup"), steery_sdk::WORDS),
+            None
+        );
+        assert_eq!(
+            prompt("Fix it", Some("user"), steery_sdk::WORDS).as_deref(),
+            Some("Fix it")
+        );
+        assert_eq!(
+            prompt("Fix it", None, steery_sdk::WORDS).as_deref(),
+            Some("Fix it")
+        );
+        assert_eq!(
+            prompt(report, None, steery_sdk::BARE).as_deref(),
+            Some(report)
+        );
         assert!(read_one("Stop", json!({"cwd": "/tmp"}), &[]).is_none());
         assert!(
             read(
@@ -1110,7 +1135,11 @@ mod tests {
         assert_eq!(out["hookEventName"], "PreToolUse");
         assert_eq!(out["permissionDecision"], "allow");
         assert_eq!(out["additionalContext"], "They said: ship it");
-        assert_eq!(out["updatedInput"], json!({"plan": "1. Ship"}), "the plan, so Claude Code asks nobody");
+        assert_eq!(
+            out["updatedInput"],
+            json!({"plan": "1. Ship"}),
+            "the plan, so Claude Code asks nobody"
+        );
     }
 
     /// Claude Code's shell sources what a start hook appends to `CLAUDE_ENV_FILE` before
@@ -1162,14 +1191,31 @@ mod tests {
             let hook = table.iter().find(|hook| hook.event == asks).unwrap();
             assert_eq!(hook.waits, Some(ASKS_WAITS));
         }
-        let kind = |event: &str| table.iter().find(|hook| hook.event == event).map(|hook| hook.kind);
+        let kind = |event: &str| {
+            table
+                .iter()
+                .find(|hook| hook.event == event)
+                .map(|hook| hook.kind)
+        };
         assert_eq!(kind("SubagentStop"), Some(HookKind::SubAgentEnd));
         assert_eq!(kind("PreCompact"), Some(HookKind::Compacting));
         let old = super::table(steery_sdk::BARE);
         assert_eq!(old.len(), EVENTS.len() - 2);
         assert!(old.iter().all(|hook| hook.room.is_none()));
-        assert!(old.iter().all(|hook| !matches!(hook.kind, HookKind::SubAgentEnd | HookKind::Compacting)));
-        let said = |event: &str| old.iter().find(|hook| hook.event == event).unwrap().says.clone();
-        assert_eq!(said("PostToolUse"), [Says::Notice, Says::Calls, Says::Working]);
+        assert!(
+            old.iter()
+                .all(|hook| !matches!(hook.kind, HookKind::SubAgentEnd | HookKind::Compacting))
+        );
+        let said = |event: &str| {
+            old.iter()
+                .find(|hook| hook.event == event)
+                .unwrap()
+                .says
+                .clone()
+        };
+        assert_eq!(
+            said("PostToolUse"),
+            [Says::Notice, Says::Calls, Says::Working]
+        );
     }
 }

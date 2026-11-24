@@ -359,7 +359,13 @@ pub(crate) mod tests {
         }
         for harness in [Harness::Omp, Harness::Pi] {
             let planned = runtime
-                .block_on(plan(harness, &dir, &dir.join("config"), given(), steery_sdk::WORDS))
+                .block_on(plan(
+                    harness,
+                    &dir,
+                    &dir.join("config"),
+                    given(),
+                    steery_sdk::WORDS,
+                ))
                 .unwrap();
             let why = planned.refused.expect("refused with a reason");
             assert!(why.contains(&shared.display().to_string()), "{why}");
@@ -369,7 +375,13 @@ pub(crate) mod tests {
         // skills folder, beside the plugin's copy that puts it into the prompt.
         std::fs::remove_file(bin.join("pi")).unwrap();
         let planned = runtime
-            .block_on(plan(Harness::Omp, &dir, &dir.join("config"), given(), steery_sdk::WORDS))
+            .block_on(plan(
+                Harness::Omp,
+                &dir,
+                &dir.join("config"),
+                given(),
+                steery_sdk::WORDS,
+            ))
             .unwrap();
         assert_eq!(planned.refused, None);
         let skill = planned
@@ -381,10 +393,16 @@ pub(crate) mod tests {
         let copy = planned
             .entries
             .iter()
-            .find(|entry| entry.path.extension().is_some_and(|ext| ext == "ts") && entry.path.starts_with(dir.join("config")))
+            .find(|entry| {
+                entry.path.extension().is_some_and(|ext| ext == "ts")
+                    && entry.path.starts_with(dir.join("config"))
+            })
             .expect("the plugin's copy");
         let source = copy.value.as_str().unwrap();
-        assert!(source.contains(&format!("const SKILL: string = \"{}\";", skill.path.display())));
+        assert!(source.contains(&format!(
+            "const SKILL: string = \"{}\";",
+            skill.path.display()
+        )));
         assert!(source.contains("const PICKED: string = \"yes\";"));
         unsafe {
             std::env::set_var("PATH", path);
@@ -423,7 +441,13 @@ pub(crate) mod tests {
             std::env::remove_var("PI_INSTALL_DIR");
         }
         let missing = runtime
-            .block_on(plan(Harness::Omp, &home, &home.join("config"), given(), steery_sdk::WORDS))
+            .block_on(plan(
+                Harness::Omp,
+                &home,
+                &home.join("config"),
+                given(),
+                steery_sdk::WORDS,
+            ))
             .unwrap();
         assert!(missing.found.is_none());
         let install = missing.install.expect("omp's installer is offered");
@@ -438,7 +462,13 @@ pub(crate) mod tests {
         std::fs::write(&omp, "#!/bin/sh\necho 99.0.0\n").unwrap();
         std::fs::set_permissions(&omp, std::fs::Permissions::from_mode(0o755)).unwrap();
         let found = runtime
-            .block_on(plan(Harness::Omp, &home, &home.join("config"), given(), steery_sdk::WORDS))
+            .block_on(plan(
+                Harness::Omp,
+                &home,
+                &home.join("config"),
+                given(),
+                steery_sdk::WORDS,
+            ))
             .unwrap();
         assert_eq!(found.found.map(|found| found.binary), Some(omp));
         assert_eq!(found.install, None);
@@ -491,7 +521,13 @@ pub(crate) mod tests {
         }
         let offered = || {
             runtime
-                .block_on(plan(Harness::Pi, &home, &home.join("config"), given(), steery_sdk::WORDS))
+                .block_on(plan(
+                    Harness::Pi,
+                    &home,
+                    &home.join("config"),
+                    given(),
+                    steery_sdk::WORDS,
+                ))
                 .unwrap()
                 .install
                 .is_some()
@@ -512,7 +548,14 @@ pub(crate) mod tests {
                 std::time::Instant::now()
             };
             let planned = async {
-                let planned = plan(Harness::Pi, &home, &home.join("config"), given(), steery_sdk::WORDS).await;
+                let planned = plan(
+                    Harness::Pi,
+                    &home,
+                    &home.join("config"),
+                    given(),
+                    steery_sdk::WORDS,
+                )
+                .await;
                 (planned, std::time::Instant::now())
             };
             let ((planned, at), ticked) = tokio::join!(planned, ticked);

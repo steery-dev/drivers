@@ -319,7 +319,9 @@ fn shell_words(said: &str) -> String {
     while let Some(&last) = lines.last() {
         if last.starts_with("Command exited with code ") {
             status = status.or(Some(last));
-        } else if !(last.trim().is_empty() || last.starts_with("Wall time: ") || last.starts_with(CUT))
+        } else if !(last.trim().is_empty()
+            || last.starts_with("Wall time: ")
+            || last.starts_with(CUT))
         {
             break;
         }
@@ -1783,8 +1785,14 @@ mod tests {
             "isError": true, "mcpToolName": "sessions_describe",
             "rawContent": [{"type": "text", "text": raw}]}}});
         // The device's text is cut, the raw content is not.
-        let said = format!("Error: {}…\n\n[Some lines truncated to 768 bytes. Use artifact://3:raw:1-1]", &raw[..20]);
-        assert_eq!(error(&refused("write", &said, details)), Some(raw.to_owned()));
+        let said = format!(
+            "Error: {}…\n\n[Some lines truncated to 768 bytes. Use artifact://3:raw:1-1]",
+            &raw[..20]
+        );
+        assert_eq!(
+            error(&refused("write", &said, details)),
+            Some(raw.to_owned())
+        );
         let said = format!("Error: {raw}");
         let bare = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
         assert_eq!(error(&refused("write", &said, bare)), Some(raw.to_owned()));
@@ -1801,10 +1809,18 @@ mod tests {
         let said = "Invalid args for xd://mcp__steery_sessions_describe: Validation failed for tool \"mcp__steery_sessions_describe\":\n  - work: must be one of the allowed enum values\n\nReceived arguments:\n{\n  \"original\": {}\n}\n\n# mcp__steery_sessions_describe — docs";
         let kept = "Invalid args for xd://mcp__steery_sessions_describe: Validation failed for tool \"mcp__steery_sessions_describe\":\n  - work: must be one of the allowed enum values";
         let device = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
-        assert_eq!(error(&refused("write", said, device)), Some(kept.to_owned()));
-        let direct = "Validation failed for tool \"t\":\n  - work: is required\n\nReceived arguments:\n{}";
         assert_eq!(
-            error(&refused("mcp__t", direct, json!({"isError": true, "error": "x"}))),
+            error(&refused("write", said, device)),
+            Some(kept.to_owned())
+        );
+        let direct =
+            "Validation failed for tool \"t\":\n  - work: is required\n\nReceived arguments:\n{}";
+        assert_eq!(
+            error(&refused(
+                "mcp__t",
+                direct,
+                json!({"isError": true, "error": "x"})
+            )),
             Some("Validation failed for tool \"t\":\n  - work: is required".to_owned())
         );
         // A long argument omp cut in its echo leaves what is kept whole, and the echo out.
@@ -1814,13 +1830,19 @@ mod tests {
             "x".repeat(760)
         );
         let device = json!({"xdev": {"tool": "mcp__steery_sessions_describe"}});
-        assert_eq!(error(&refused("write", &cut, device)), Some(kept.to_owned()));
+        assert_eq!(
+            error(&refused("write", &cut, device)),
+            Some(kept.to_owned())
+        );
     }
 
     #[test]
     fn other_failures_say_their_text_and_pi_says_it_as_it_is() {
         let said = "Path '/x' not found";
-        assert_eq!(error(&refused("read", said, json!({}))), Some(said.to_owned()));
+        assert_eq!(
+            error(&refused("read", said, json!({}))),
+            Some(said.to_owned())
+        );
         let message = refused("bash", "Error: cannot index\n", json!({}));
         assert_eq!(
             said_error(Harness::Pi, &message, "Error: cannot index\n"),
@@ -1850,7 +1872,10 @@ mod tests {
         };
         assert_eq!(
             errors(&said),
-            vec![(false, Some("Path '/x' not found".to_owned())), (true, None)]
+            vec![
+                (false, Some("Path '/x' not found".to_owned())),
+                (true, None)
+            ]
         );
         unerrored(&mut said);
         assert_eq!(errors(&said), vec![(false, None), (true, None)]);
