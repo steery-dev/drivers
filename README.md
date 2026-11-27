@@ -103,7 +103,7 @@ agrees (PROTOCOL.md §4.1).
 | `openhands` | `/usr/local/bin` where writable, else `~/.local/bin` | `bash -c "curl -fsSL https://install.openhands.dev/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 | `aider` | uv's tool folder, else pipx's (both `~/.local/bin`) | `uv tool install --python python3.12 aider-chat@latest` where `uv` is on `PATH`, else `pipx install aider-chat` where pipx is. Else refused. |
-| `canvas` | `~/.canvas/bin` | `sh -c "gh release download --repo steery-dev/canvas --pattern install.sh --output - \| sh"`, offered where `gh` is on `PATH`: the repository is private, so the person's `gh` sign-in needs access to it. Else refused, with a note to install `gh` and sign in. |
+| `canvas` | none: the harness is this driver's own turn mode | none. `setup/plan` finds the driver itself. |
 | `warp` | `Contents/Resources/bin` of `Warp.app` (`oz`) or `WarpPreview.app` (`oz-preview`), in `/Applications` or `~/Applications` | `brew install --cask warp` on a Mac where `brew` is on `PATH`. Else refused: Warp installs from warp.dev/download. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -150,7 +150,7 @@ signed in, as the harness itself says.
 | `crush` | ``run `crush` in a terminal and pick a provider`` | `crush models` on a terminal lists a provider it cannot run as `(not configured)`. No other provider: not signed in. |
 | `warp` | ``open Warp and sign in to a Warp account`` | not told: observe has no `models` |
 | `aider` | none: Aider takes a model's key from its environment or a `.env` | not told: an Ollama model needs no key |
-| `canvas` | ``run `claude auth login` in a terminal`` | `canvas models`' `signed_in`, bound 12 s: its own `GET <base>/v1/models` takes up to 8 s. `false` plans the `sign-in` need with its `line`: Claude Code's `claude auth login` (where `claude` is here), an API key, or a gateway. |
+| `canvas` | ``run `claude auth login` in a terminal`` | in-process: `GET <base>/v1/models` with the key within 8 s, or `claude auth status` says `loggedIn` on a plan. Not signed in plans the `sign-in` need with the check's line: Claude Code's `claude auth login` (where `claude` is here), an API key, or a gateway. |
 
 Each probe has a bound of 5 s. The driver kills a probe that runs past it. A probe gives no
 answer in these cases:
@@ -1990,11 +1990,24 @@ cargo test
 
 ## Canvas: `canvas/`
 
-One binary, `steery-driver-canvas`, with no settings, at live through Steery's plugin door.
-The canvas harness keeps each session as `<CANVAS_HOME>/sessions/<id>.jsonl` (default
+One binary, `steery-driver-canvas`, with no settings, at live through Steery's plugin door. It
+is also the canvas's headless harness: its turn mode draws a person's words on Claude, a sketch
+(`CANVAS_SKETCH_MODEL`, default `claude-haiku-5-5`, prompt `prompts/SKETCHER.md`) then a refine
+(`CANVAS_PLOTTER_MODEL`, default `claude-sonnet-5-5`, `prompts/PLOTTER.md`). It keeps each
+session as `<CANVAS_HOME>/sessions/<id>.jsonl` (default
 `~/Library/Application Support/steery-canvas` on macOS,
 `${XDG_DATA_HOME:-~/.local/share}/steery-canvas` elsewhere). The id is the file's UUIDv7 stem.
 
+- **Turn** (`steery-driver-canvas turn [--session <id>] [--cwd <dir>]`, the message on stdin).
+  - Claude: `ANTHROPIC_BASE_URL` with `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` (a gateway),
+    `ANTHROPIC_API_KEY` alone (the Claude API): one streamed `POST <base>/v1/messages` per
+    voice. Else `claude` on `PATH` (a plan): one `claude -p` in stream-json per voice.
+  - Each non-empty line of a voice's text that is not a `#` comment is one `line`, verbatim.
+    Steery's server parses the strokes. The plotter gets the sketch's lines.
+  - Stdout: `named`, each `line`, each call's `tokens`, `ended` last (`failure` kinds
+    `sign_in`, `rate_limit`, `context_full`, `other`). Exit 1 when failed.
+  - A call with no answer in 20 s fails. SIGINT, SIGTERM or the door's `stop` end it
+    `interrupted`.
 - **Sessions** (`sessions/list`, `sessions/read`, `sessions/locate`, `sessions/fold`).
   - The `session` record gives the folder and title.
   - `turn_began` and `turn_ended` carry the record's `turn`. A failure keeps its `kind`.
@@ -2006,18 +2019,16 @@ The canvas harness keeps each session as `<CANVAS_HOME>/sessions/<id>.jsonl` (de
     id. Each method takes the other's cursor.
   - `sessions/fold` folds the door's records as `sessions/read` folds the same lines.
 - **Setup** (`setup/plan`).
-  - Found: `canvas` on `PATH`, else `~/.canvas/bin/canvas`. `--version` prints `canvas <semver>`.
-  - Install: the release's `install.sh` through `gh` (see
-    [Finding and installing the harness](#finding-and-installing-the-harness)).
-  - One entry: the door at `/door` of `<CANVAS_HOME>/steery.json`, which `canvas turn` dials.
+  - Found: the driver itself. Nothing to install.
+  - One entry: the door at `/door` of `<CANVAS_HOME>/steery.json`, which each turn dials.
   - `mcp/list` is refused.
 - **Drive** (`start`, `turn/read`).
-  - `start` runs `steery-driver-canvas turn <canvas> turn [--session <id>] --cwd <cwd>`, the
-    words on standard input. A model or thinking pick refuses `selection-unsupported`.
+  - `start` runs `steery-driver-canvas turn [--session <id>] --cwd <cwd>`, the words on
+    standard input. A model or thinking pick refuses `selection-unsupported`.
   - `turn/read` maps `named`, `ended`, and each `line` and `tokens` as the events the transcript
     gives under the same ids.
   - `held`, `idle` and `stop` read `<id>.pid`. `stop` sends `SIGINT` and waits 2.5 s.
-  - `terminal` runs one more `<canvas> turn` on words typed there.
+  - `terminal` runs one more turn on words typed there.
 - **Live**: the turn speaks the door itself. The driver answers no live method.
 
 Build and check it:

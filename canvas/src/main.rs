@@ -1,13 +1,18 @@
-//! Steery's `canvas` driver, at drive. The canvas harness keeps each session as a JSONL
-//! transcript it appends to, `<CANVAS_HOME>/sessions/<id>.jsonl` ([`home`]). The driver lists
-//! and reads those ([`sessions`], [`transcript`]), asks `canvas models` for its models and its
-//! sign-in to Claude ([`models`], [`setup`], [`sign_in`]), and starts, reads and stops its
-//! turns through `canvas turn` ([`drive`], [`turn`]). A turn dials Steery's plugin door
-//! itself, from the door that setup writes to `steery.json` ([`setup`]); the driver folds
-//! the records it sends there as it reads the transcript, and answers no live method.
+//! Steery's `canvas` driver, at live, and the canvas's headless harness. Its turn mode
+//! ([`turn`]) is the harness: it draws a person's words on Claude ([`claude`]) as a sketch
+//! and then a refine, keeps each session as a JSONL transcript in
+//! `<CANVAS_HOME>/sessions/<id>.jsonl` ([`home`]), and dials Steery's plugin door itself
+//! ([`door`]), from the door that setup writes to `steery.json` ([`setup`]). The driver
+//! lists and reads those transcripts ([`sessions`], [`transcript`]), says the models and the
+//! sign-in to Claude ([`models`], [`sign_in`]), starts, reads and stops turns ([`drive`]),
+//! folds the records the door carries, and answers no live method.
 
+mod claude;
+mod code;
+mod door;
 mod drive;
 mod home;
+mod messages;
 mod models;
 mod sessions;
 mod setup;
@@ -29,14 +34,14 @@ const MARK: &str = "M3 21l1.5-5.5 11-11 4 4-11 11L3 21Zm11-14 .7-.7 3 3-.7.7-3-3
 
 /// How an agent in the canvas learns its session's id, as Steery's skill says it.
 const KNOWING: &str = "The canvas names your session by a UUIDv7: its transcript is \
-`<CANVAS_HOME>/sessions/<id>.jsonl`, and `canvas turn` prints `{\"named\":\"<id>\"}` as its \
-first line. Send that id as `external_id`, with the harness `canvas`.";
+`<CANVAS_HOME>/sessions/<id>.jsonl`, and a turn (`steery-driver-canvas turn`) prints \
+`{\"named\":\"<id>\"}` as its first line. Send that id as `external_id`, with the harness `canvas`.";
 
 /// How the canvas keeps a session, as Steery's skill says it.
 const TRANSCRIPT: &str = "JSONL, append-only, one record per line with `id` (UUIDv7), `at` \
 (RFC 3339) and `kind`: `session` (`cwd`, `title`) first, then per turn `turn_began` (`turn`), \
-`words` (the person's message), `line` (`message`, `voice` sketcher or plotter, one stroke \
-line), `tokens` (`voice`, `model`, `in`, `cached`, `out`) and `turn_ended` (`state`, \
+`words` (the person's message), `line` (`message`, `voice` sketcher or plotter, one line the \
+drawer wrote), `tokens` (`voice`, `model`, `in`, `cached`, `out`) and `turn_ended` (`state`, \
 `failure`).";
 
 fn main() -> ExitCode {
@@ -160,12 +165,8 @@ impl Program for Canvas {
                 refusal::SELECTION_UNSUPPORTED,
                 "the canvas has no MCP client",
             )),
-            method::MODELS => result(models::models(self.home()?).await?),
-            method::START => result(drive::start(
-                self.home()?,
-                &self.root()?,
-                steery_sdk::params(params)?,
-            )?),
+            method::MODELS => result(models::models().await),
+            method::START => result(drive::start(&self.root()?, steery_sdk::params(params)?)?),
             method::TURN_READ => result(drive::read(&steery_sdk::params(params)?)),
             method::HELD => result(drive::held(&self.root()?, steery_sdk::params(params)?)?),
             method::IDLE => result(drive::idle(&self.root()?, steery_sdk::params(params)?)?),
@@ -177,7 +178,6 @@ impl Program for Canvas {
                 result(sessions::find(&self.root()?, steery_sdk::params(params)?)?)
             }
             method::TERMINAL => result(drive::terminal(
-                self.home()?,
                 &self.root()?,
                 steery_sdk::params(params)?,
             )?),
@@ -197,10 +197,9 @@ fn info() -> wire::HarnessInfo {
         lines: wire::Lines::Agent,
         hosted: Default::default(),
         transcript: Some(TRANSCRIPT.into()),
-        // `canvas` is a shell launcher that `exec`s `bun <dir>/bin/canvas.ts`, which the
-        // runtime matches by the script's name (PROTOCOL.md §3.3).
+        // A turn runs as this driver's own binary (PROTOCOL.md §3.3).
         identity: wire::Identity {
-            executables: vec!["canvas".into(), "canvas.ts".into()],
+            executables: vec![home::EXECUTABLE.into()],
             package: None,
             session_variable: None,
             call_meta: None,
@@ -221,7 +220,7 @@ fn info() -> wire::HarnessInfo {
                 model: true,
                 thinking: true,
             },
-            // `canvas turn` dials Steery's plugin door, from `steery.json`.
+            // A turn dials Steery's plugin door, from `steery.json`.
             door: Some(harness::LiveDoor::Plugin),
             checks_idle: false,
             worktrees: false,
