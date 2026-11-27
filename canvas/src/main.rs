@@ -160,8 +160,12 @@ impl Program for Canvas {
                 refusal::SELECTION_UNSUPPORTED,
                 "the canvas has no MCP client",
             )),
-            method::MODELS => result(models::models().await?),
-            method::START => result(drive::start(&self.root()?, steery_sdk::params(params)?)?),
+            method::MODELS => result(models::models(self.home()?).await?),
+            method::START => result(drive::start(
+                self.home()?,
+                &self.root()?,
+                steery_sdk::params(params)?,
+            )?),
             method::TURN_READ => result(drive::read(&steery_sdk::params(params)?)),
             method::HELD => result(drive::held(&self.root()?, steery_sdk::params(params)?)?),
             method::IDLE => result(drive::idle(&self.root()?, steery_sdk::params(params)?)?),
@@ -172,9 +176,11 @@ impl Program for Canvas {
             method::RECEIPT_FIND => {
                 result(sessions::find(&self.root()?, steery_sdk::params(params)?)?)
             }
-            method::TERMINAL => {
-                result(drive::terminal(&self.root()?, steery_sdk::params(params)?)?)
-            }
+            method::TERMINAL => result(drive::terminal(
+                self.home()?,
+                &self.root()?,
+                steery_sdk::params(params)?,
+            )?),
             _ => Err(Error::Unknown),
         }
     }

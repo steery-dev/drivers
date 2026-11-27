@@ -103,7 +103,7 @@ agrees (PROTOCOL.md §4.1).
 | `openhands` | `/usr/local/bin` where writable, else `~/.local/bin` | `bash -c "curl -fsSL https://install.openhands.dev/install.sh \| bash"`, offered where bash and curl are on `PATH` |
 | `crush` | Homebrew's `bin` (`/opt/homebrew/bin`, `/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`) | `brew install charmbracelet/tap/crush` where `brew` is on `PATH`, else `npm install --global @charmland/crush` where npm is. Else refused. |
 | `aider` | uv's tool folder, else pipx's (both `~/.local/bin`) | `uv tool install --python python3.12 aider-chat@latest` where `uv` is on `PATH`, else `pipx install aider-chat` where pipx is. Else refused. |
-| `canvas` | `PATH` only: the `canvas` launcher | none: refused, the launcher goes on `PATH` by hand |
+| `canvas` | `~/.canvas/bin` | `sh -c "gh release download --repo steery-dev/canvas --pattern install.sh --output - \| sh"`, offered where `gh` is on `PATH`: the repository is private, so the person's `gh` sign-in needs access to it. Else refused, with a note to install `gh` and sign in. |
 | `warp` | `Contents/Resources/bin` of `Warp.app` (`oz`) or `WarpPreview.app` (`oz-preview`), in `/Applications` or `~/Applications` | `brew install --cask warp` on a Mac where `brew` is on `PATH`. Else refused: Warp installs from warp.dev/download. |
 
 When the driver does not offer `install`, `setup/plan` answers `refused` with the reason in one
@@ -2005,15 +2005,19 @@ The canvas harness keeps each session as `<CANVAS_HOME>/sessions/<id>.jsonl` (de
   - A read's cursor is a byte offset and the 32 bytes before it. A fold's is the last record's
     id. Each method takes the other's cursor.
   - `sessions/fold` folds the door's records as `sessions/read` folds the same lines.
-- **Setup** (`setup/plan`). One entry: the door at `/door` of `<CANVAS_HOME>/steery.json`,
-  which `canvas turn` dials. `mcp/list` is refused.
+- **Setup** (`setup/plan`).
+  - Found: `canvas` on `PATH`, else `~/.canvas/bin/canvas`. `--version` prints `canvas <semver>`.
+  - Install: the release's `install.sh` through `gh` (see
+    [Finding and installing the harness](#finding-and-installing-the-harness)).
+  - One entry: the door at `/door` of `<CANVAS_HOME>/steery.json`, which `canvas turn` dials.
+  - `mcp/list` is refused.
 - **Drive** (`start`, `turn/read`).
   - `start` runs `steery-driver-canvas turn <canvas> turn [--session <id>] --cwd <cwd>`, the
     words on standard input. A model or thinking pick refuses `selection-unsupported`.
   - `turn/read` maps `named`, `ended`, and each `line` and `tokens` as the events the transcript
     gives under the same ids.
   - `held`, `idle` and `stop` read `<id>.pid`. `stop` sends `SIGINT` and waits 2.5 s.
-  - `terminal` runs one more `canvas turn` on words typed there.
+  - `terminal` runs one more `<canvas> turn` on words typed there.
 - **Live**: the turn speaks the door itself. The driver answers no live method.
 
 Build and check it:
