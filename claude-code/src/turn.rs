@@ -392,14 +392,14 @@ async fn follow(
     command.args(turn.launching(bypass, kept.is_some())?);
     // The key is read through the helper where `ANTHROPIC_API_KEY` is set and one of these
     // holds ([`through_helper`]): a company's gateway (`ANTHROPIC_BASE_URL`,
-    // [`crate::gateway`]), else a `--bg` session there sends its plan's sign-in to it; the
+    // [`steery_driver_common::claude`]), else a `--bg` session there sends its plan's sign-in to it; the
     // person gave this key through Steery ([`crate::sign_in::KEY_MARKER`]), so turns use it
     // also where Claude Code is signed in to a plan; or Claude Code has no sign-in of its
     // own. Else a helper, which outranks a plan's sign-in, would take the plan from a person
     // who exported a key they never approved, and Claude Code itself would keep their plan.
     // The sign-in probe runs only where it can change the answer.
     let key = std::env::var_os(anthropic::VARIABLE).is_some_and(|key| !key.is_empty());
-    let gateway = crate::gateway::used();
+    let gateway = steery_driver_common::claude::gateway_used();
     let marker = std::env::var_os(crate::sign_in::KEY_MARKER).is_some_and(|mark| !mark.is_empty());
     let signed = match key && !gateway && !marker {
         true => crate::drive::signed_in(false).await,
