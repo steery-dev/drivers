@@ -29,9 +29,8 @@ const TURN: &str = "turn";
 
 /// `start`: the plan of this driver's turn mode, which runs `canvas turn` in `cwd`. The
 /// canvas picks each model by its role and takes no model or thinking level.
-pub fn start(root: &Path, start: Start) -> Result<Launch, Error> {
-    let binary = home::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "canvas is not installed here"))?;
+pub fn start(home: &Path, root: &Path, start: Start) -> Result<Launch, Error> {
+    let binary = home::installed(home)?;
     if !start.cwd.is_absolute() {
         return Err(Error::invalid("the folder is not an absolute path"));
     }
@@ -369,13 +368,15 @@ pub async fn stop(stop: &Stop) -> Result<Stopped, Error> {
 
 /// `terminal`: one more turn on the session, its words typed at the terminal. The canvas
 /// has no window of its own that opens a session.
-pub fn terminal(root: &Path, terminal: Terminal) -> Result<TerminalCommand, Error> {
+pub fn terminal(home: &Path, root: &Path, terminal: Terminal) -> Result<TerminalCommand, Error> {
+    let binary = home::installed(home)?;
     let path = home::transcript(root, &terminal.external_id)?;
     let summary = transcript::summary(&path).map_err(|e| unreadable(&path, &e))?;
     let cwd = summary.cwd.unwrap_or(terminal.cwd);
     let cwd = quoted(&cwd.to_string_lossy());
     let command = format!(
-        "cd {cwd} && canvas turn --session {} --cwd {cwd}",
+        "cd {cwd} && {} turn --session {} --cwd {cwd}",
+        quoted(&binary.to_string_lossy()),
         quoted(&terminal.external_id)
     );
     let mut line = "Type your words, then Ctrl-D: the canvas runs one turn on them.".to_owned();

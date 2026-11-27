@@ -17,6 +17,8 @@ const FOLDER: &str = "steery-canvas";
 /// What ends a transcript's name, and a holder's.
 pub const TRANSCRIPT: &str = "jsonl";
 const PID: &str = "pid";
+/// The canvas's launcher's name.
+pub const EXECUTABLE: &str = "canvas";
 
 /// The canvas's folder, for the person whose home is `home`.
 pub fn root(home: &Path) -> PathBuf {
@@ -84,9 +86,20 @@ pub fn holder(root: &Path, id: &str) -> PathBuf {
     sessions(root).join(format!("{id}.{PID}"))
 }
 
-/// The canvas's launcher: the first `canvas` on `PATH`.
-pub fn binary() -> Option<PathBuf> {
-    on_path("canvas")
+/// The folder the canvas's installer (`install.sh` of its release) puts `canvas` in.
+pub fn installer_folder(home: &Path) -> PathBuf {
+    home.join(".canvas/bin")
+}
+
+/// The canvas's launcher: the first `canvas` on `PATH`, else the one its installer put in
+/// `~/.canvas/bin`.
+pub fn binary(home: &Path) -> Option<PathBuf> {
+    on_path(EXECUTABLE).or_else(|| executable(installer_folder(home).join(EXECUTABLE)))
+}
+
+/// [`binary`], else the refusal that the canvas is not installed here.
+pub fn installed(home: &Path) -> Result<PathBuf, Error> {
+    binary(home).ok_or_else(|| Error::refused(refusal::NO_BINARY, "canvas is not installed here"))
 }
 
 /// Claude Code, through which the canvas runs on a Claude plan: the first `claude` on

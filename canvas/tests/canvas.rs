@@ -389,6 +389,62 @@ async fn canvas_drives_a_turn_and_continues_it() {
     assert!(held["nobody"].is_object(), "the turn removed its .pid: {held}");
 }
 
+/// `setup/plan` where no `canvas` is on `PATH`: with `gh` there it offers the canvas's own
+/// installer, the release's `install.sh` through `gh`; without `gh` it offers none and says
+/// what to install. The installer's `~/.canvas/bin/canvas` counts as found.
+#[tokio::test]
+async fn canvas_installs_through_gh_and_finds_its_installers_folder() {
+    let home = home("install");
+    let bin = home.join("bin");
+    std::fs::rename(bin.join("canvas"), home.join("stand-in")).unwrap();
+    std::fs::copy(home.join("stand-in"), bin.join("gh")).unwrap();
+    let driver = start(&home).await;
+    let plan = || {
+        call(
+            &driver,
+            method::SETUP_PLAN,
+            json!({"mcp_url": "http://127.0.0.1:7777/mcp", "skill": "", "hook": "steery hook canvas",
+                   "door": "ws://127.0.0.1:7777/door", "release": "7.0.0", "timeout": 120}),
+        )
+    };
+
+    let with_gh = plan().await.unwrap();
+    assert!(with_gh["found"].is_null(), "{with_gh}");
+    assert!(with_gh["refused"].is_null(), "{with_gh}");
+    assert_eq!(
+        with_gh["install"],
+        json!({
+            "argv": ["sh", "-c",
+                "gh release download --repo steery-dev/canvas --pattern install.sh --output - | sh"],
+            "about": "Installs the canvas harness to ~/.canvas/bin/canvas from \
+                github.com/steery-dev/canvas with your GitHub sign-in: gh release download \
+                --repo steery-dev/canvas --pattern install.sh --output - | sh",
+        })
+    );
+
+    std::fs::remove_file(bin.join("gh")).unwrap();
+    let without = plan().await.unwrap();
+    assert!(without["found"].is_null(), "{without}");
+    assert!(without["install"].is_null(), "{without}");
+    assert_eq!(
+        without["notes"],
+        json!(["Install gh and sign in with access to github.com/steery-dev/canvas; Steery \
+                then installs the canvas harness."])
+    );
+    assert_eq!(
+        without["refused"],
+        "The canvas's installer needs `gh` on PATH: `gh` is not there"
+    );
+
+    let installed = home.join(".canvas/bin");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::rename(home.join("stand-in"), installed.join("canvas")).unwrap();
+    let found = plan().await.unwrap();
+    assert_eq!(found["found"]["binary"], json!(installed.join("canvas")));
+    assert_eq!(found["found"]["release"], "0.3.1");
+    assert!(found["install"].is_null(), "{found}");
+}
+
 /// Run a launch as the runtime does, its words on standard input, and read its lines.
 async fn turn(driver: &Client, home: &Path, launch: &Value, words: &str) -> Vec<Value> {
     let argv: Vec<String> = serde_json::from_value(launch["argv"].clone()).unwrap();

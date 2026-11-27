@@ -55,9 +55,8 @@ pub async fn ask(binary: &Path) -> Result<Said, String> {
 
 /// `models`: the canvas's models, the plotter's first, as `canvas models` lists them. The
 /// canvas picks each model by its role, so no other model runs.
-pub async fn models() -> Result<Models, Error> {
-    let binary = home::binary()
-        .ok_or_else(|| Error::refused(refusal::NO_BINARY, "canvas is not installed here"))?;
+pub async fn models(home: &Path) -> Result<Models, Error> {
+    let binary = home::installed(home)?;
     let said = ask(&binary)
         .await
         .map_err(|why| Error::refused(refusal::REFUSED, why))?;
