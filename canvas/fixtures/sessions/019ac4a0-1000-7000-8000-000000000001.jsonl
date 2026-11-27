@@ -1,0 +1,12 @@
+{"id":"019ac4a0-1000-7000-8000-000000000a01","at":"2026-11-27T10:00:00.000Z","kind":"session","cwd":"/tmp/canvas-project","title":"Sketch the login flow"}
+{"id":"019ac4a0-1000-7000-8000-000000000a02","at":"2026-11-27T10:00:00.100Z","kind":"turn_began","turn":"019ac4a0-1000-7000-8000-0000000000t1"}
+{"id":"019ac4a0-1000-7000-8000-000000000a03","at":"2026-11-27T10:00:00.100Z","kind":"words","text":"Sketch the login flow"}
+{"id":"019ac4a0-1000-7000-8000-000000000a04","at":"2026-11-27T10:00:01.200Z","kind":"line","message":"019ac4a0-1000-7000-8000-0000000000t1/sketcher","voice":"sketcher","text":"box login \"Login\""}
+{"id":"019ac4a0-1000-7000-8000-000000000a05","at":"2026-11-27T10:00:01.300Z","kind":"tokens","voice":"sketcher","model":"claude-haiku-5-5","in":900,"cached":0,"out":40}
+{"id":"019ac4a0-1000-7000-8000-000000000a06","at":"2026-11-27T10:00:02.400Z","kind":"line","message":"019ac4a0-1000-7000-8000-0000000000t1/plotter","voice":"plotter","text":"arrow login home"}
+{"id":"019ac4a0-1000-7000-8000-000000000a07","at":"2026-11-27T10:00:02.500Z","kind":"line","message":"019ac4a0-1000-7000-8000-0000000000t1/plotter","voice":"plotter","text":"reply \"Drew the login flow.\""}
+{"id":"019ac4a0-1000-7000-8000-000000000a08","at":"2026-11-27T10:00:02.600Z","kind":"tokens","voice":"plotter","model":"claude-sonnet-5-5","in":1800,"cached":1200,"out":120}
+{"id":"019ac4a0-1000-7000-8000-000000000a09","at":"2026-11-27T10:00:02.700Z","kind":"turn_ended","state":"finished"}
+{"id":"019ac4a0-1000-7000-8000-000000000a0a","at":"2026-11-27T10:05:00.000Z","kind":"turn_began","turn":"019ac4a0-1000-7000-8000-0000000000t2"}
+{"id":"019ac4a0-1000-7000-8000-000000000a0b","at":"2026-11-27T10:05:00.000Z","kind":"words","text":"Add a sign-up box"}
+{"id":"019ac4a0-1000-7000-8000-000000000a0c","at":"2026-11-27T10:05:08.000Z","kind":"turn_ended","state":"failed","failure":{"kind":"rate_limit","line":"Claude's usage limit is reached until 15:00","service":"claude"}}

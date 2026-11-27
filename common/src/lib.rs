@@ -9,11 +9,14 @@
 //! Anthropic API key as a way to give a harness a sign-in ([`anthropic`]), the check of a
 //! company gateway's address and the one request that tries its key ([`gateway`]), a harness's
 //! own sign-in run on a terminal of the driver's, given back what its browser returned to
-//! ([`login`]), the last answer of a sign-in probe, kept for a plan while the probe
+//! ([`login`]), Claude Code's own sign-in and a gateway in its variables, for every harness
+//! that signs in to Claude as Claude Code does ([`claude`]), the last answer of a sign-in
+//! probe, kept for a plan while the probe
 //! gives none ([`signed`]), and when a harness last wrote its login's credentials
 //! ([`credentials`]).
 
 pub mod anthropic;
+pub mod claude;
 pub mod credentials;
 pub mod follow;
 pub mod gateway;
