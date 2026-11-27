@@ -3,7 +3,7 @@ name = "steery-driver-canvas"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Steery's driver for the canvas harness: it reads the canvas's JSONL transcripts and drives its turns through `canvas turn`."
+description = "Steery's driver for the canvas, and the canvas's headless harness: its turn mode draws a person's words as a sketch and then a refine on Claude, and the driver reads the JSONL transcripts it writes."
 
 [dependencies]
 steery-sdk = { git = "https://github.com/steery-dev/sdk", tag = "v19.0.0" }
@@ -13,6 +13,11 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+# Steery's plugin door: a WebSocket to the runtime on loopback.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+# The streamed Messages call to a Claude gateway or the Claude API.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+uuid = { version = "1", features = ["v7"] }
 
 [lints.rust]
 unsafe_code = "forbid"

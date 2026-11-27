@@ -1,6 +1,7 @@
-//! The one need the canvas has (PROTOCOL.md §4.1, Needs): a sign-in to Claude, where
-//! `canvas models` says `signed_in: false`. The canvas reads Claude Code's own variables, so
-//! its person gives it in one of Claude Code's three ways ([`steery_driver_common::claude`]):
+//! The one need the canvas has (PROTOCOL.md §4.1, Needs): a sign-in to Claude, where the
+//! check of [`crate::claude`] says Claude does not answer. The canvas reads Claude Code's own
+//! variables, so its person gives it in one of Claude Code's three ways
+//! ([`steery_driver_common::claude`]):
 //!
 //! - A Claude plan: Claude Code's own `claude auth login`. The canvas calls Claude through
 //!   Claude Code, which keeps what its sign-in gives. Offered only where Claude Code is here.

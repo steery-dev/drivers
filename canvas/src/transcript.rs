@@ -7,7 +7,7 @@
 //! - `session` (`cwd`, `title`) once, first: the listing's folder and title.
 //! - `turn_began` (`turn`): a `turn_began` event under the turn's id.
 //! - `words`: the person's words, verbatim.
-//! - `line` (`message`, `voice` sketcher or plotter, `text`): one finished stroke line, the
+//! - `line` (`message`, `voice` sketcher or plotter, `text`): one line a drawer wrote, the
 //!   agent's words. `message` (`<turn id>/<voice>`) is the key the door's `live` frames
 //!   give the model call that wrote it.
 //! - `tokens` (`voice`, `model`, `in`, `cached`, `out`): one model call's count, under the
@@ -449,7 +449,7 @@ pub fn failure(fault: Fault, model: Option<String>) -> Failure {
 }
 
 /// An RFC 3339 time in milliseconds since 1970.
-fn stamp(at: &str) -> Option<u64> {
+pub fn stamp(at: &str) -> Option<u64> {
     let time = chrono::DateTime::parse_from_rfc3339(at).ok()?;
     u64::try_from(time.timestamp_millis()).ok()
 }

@@ -1,6 +1,6 @@
-//! Drive: Steery starts the canvas's turns as `canvas turn [--session <id>] --cwd <cwd>`, the
-//! words on standard input, through this driver's own binary in its turn mode
-//! ([`crate::turn`]), which passes the canvas's JSON lines on. `turn/read` reads them.
+//! Drive: Steery starts the canvas's turns as this driver's own turn mode
+//! ([`crate::turn`]), `steery-driver-canvas turn [--session <id>] --cwd <cwd>`, the words on
+//! standard input. `turn/read` reads its JSON lines.
 //!
 //! A turn holds its session: `<id>.pid` beside the transcript holds the turn's pid while it
 //! runs, and is removed at its end. That file is the canvas's own registry, so `held`, `idle`
@@ -24,13 +24,20 @@ use crate::{home, transcript, turn};
 
 /// How long `stop` waits for the turn to end on SIGINT, inside its 2.8 s.
 const STOP_WITHIN: Duration = Duration::from_millis(2500);
-/// The canvas's own command that runs one turn.
-const TURN: &str = "turn";
 
-/// `start`: the plan of this driver's turn mode, which runs `canvas turn` in `cwd`. The
-/// canvas picks each model by its role and takes no model or thinking level.
-pub fn start(home: &Path, root: &Path, start: Start) -> Result<Launch, Error> {
-    let binary = home::installed(home)?;
+/// This driver's executable, which runs the turns.
+fn me() -> Result<PathBuf, Error> {
+    std::env::current_exe().map_err(|e| {
+        Error::refused(
+            refusal::START_FAILED,
+            format!("cannot find this driver: {e}"),
+        )
+    })
+}
+
+/// `start`: the plan of this driver's turn mode in `cwd`. The canvas picks each model by its
+/// role and takes no model or thinking level.
+pub fn start(root: &Path, start: Start) -> Result<Launch, Error> {
     if !start.cwd.is_absolute() {
         return Err(Error::invalid("the folder is not an absolute path"));
     }
@@ -43,7 +50,7 @@ pub fn start(home: &Path, root: &Path, start: Start) -> Result<Launch, Error> {
     if let Some(picked) = start.model.as_deref().or(start.thinking.as_deref()) {
         return Err(Error::refused(
             refusal::SELECTION_UNSUPPORTED,
-            format!("`canvas turn` picks its own models by role and takes no {picked}"),
+            format!("the canvas picks its own models by role and takes no {picked}"),
         ));
     }
     if !start.cwd.is_dir() {
@@ -52,7 +59,7 @@ pub fn start(home: &Path, root: &Path, start: Start) -> Result<Launch, Error> {
             format!("{} is not a folder here", start.cwd.display()),
         ));
     }
-    let mut run = vec![TURN.to_owned()];
+    let mut run = vec![turn::MODE.to_owned()];
     match start.act {
         Act::New => {}
         Act::Continue => {
@@ -70,13 +77,7 @@ pub fn start(home: &Path, root: &Path, start: Start) -> Result<Launch, Error> {
         }
     }
     run.extend(["--cwd".into(), text_of(start.cwd.clone())?]);
-    let me = std::env::current_exe().map_err(|e| {
-        Error::refused(
-            refusal::START_FAILED,
-            format!("cannot find this driver: {e}"),
-        )
-    })?;
-    let mut argv = vec![text_of(me)?, turn::MODE.into(), text_of(binary)?];
+    let mut argv = vec![text_of(me()?)?];
     argv.extend(run);
     Ok(Launch {
         argv,
@@ -93,47 +94,49 @@ fn text_of(path: PathBuf) -> Result<String, Error> {
         .map_err(|path| Error::invalid(format!("{} is not text", path.display())))
 }
 
-/// One JSON line of `canvas turn`: the session it names, a finished stroke line, a model
-/// call's count, or how the turn ended. Each `line` and `tokens` names its transcript
-/// record, so its event is the one `sessions/read` gives under the same id.
+/// One JSON line of the turn mode: the session it names, a drawer's line, a model call's
+/// count, or how the turn ended. Each `line` and `tokens` names its transcript record and
+/// its time, so its event is the one `sessions/read` gives under the same id.
 #[derive(Debug, Default, Deserialize)]
-pub struct Said {
+struct Said {
     #[serde(default)]
-    pub named: Option<String>,
+    named: Option<String>,
     #[serde(default)]
-    pub line: Option<Stroke>,
+    line: Option<Stroke>,
     #[serde(default)]
-    pub tokens: Option<Spent>,
+    tokens: Option<Spent>,
     #[serde(default)]
-    pub ended: Option<Ending>,
+    ended: Option<Ending>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Stroke {
-    pub id: String,
-    pub message: String,
-    pub text: String,
+struct Stroke {
+    id: String,
+    at: String,
+    message: String,
+    text: String,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Spent {
-    pub id: String,
-    pub model: String,
+struct Spent {
+    id: String,
+    at: String,
+    model: String,
     #[serde(rename = "in")]
-    pub input: u64,
-    pub cached: u64,
-    pub out: u64,
+    input: u64,
+    cached: u64,
+    out: u64,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct Ending {
-    pub state: TurnState,
+struct Ending {
+    state: TurnState,
     #[serde(default)]
-    pub failure: Option<transcript::Fault>,
+    failure: Option<transcript::Fault>,
 }
 
 impl Ending {
-    pub fn ended(self) -> Ended {
+    fn ended(self) -> Ended {
         Ended {
             state: self.state,
             error: self.failure.map(|failure| failure.line),
@@ -141,20 +144,20 @@ impl Ending {
     }
 }
 
-/// `turn/read`: one line of the turn mode, which are the canvas's own. Its lines carry no
-/// time, so their events are stamped as they are read.
+/// `turn/read`: one line of the turn mode, each event at its record's time.
 pub fn read(read: &TurnRead) -> TurnLine {
     let said = match read.stream {
         Stream::Stdout => serde_json::from_str::<Said>(&read.line).unwrap_or_default(),
         Stream::Stderr => Said::default(),
     };
+    let at = |at: &str| transcript::stamp(at).unwrap_or_else(transcript::now);
     let mut events = Vec::new();
     if let Some(stroke) = said.line {
-        events.push(transcript::line(transcript::now(), stroke.id, stroke.message, stroke.text));
+        events.push(transcript::line(at(&stroke.at), stroke.id, stroke.message, stroke.text));
     }
     if let Some(spent) = said.tokens {
         events.push(transcript::tokens(
-            transcript::now(),
+            at(&spent.at),
             spent.id,
             spent.model,
             spent.input,
@@ -368,15 +371,16 @@ pub async fn stop(stop: &Stop) -> Result<Stopped, Error> {
 
 /// `terminal`: one more turn on the session, its words typed at the terminal. The canvas
 /// has no window of its own that opens a session.
-pub fn terminal(home: &Path, root: &Path, terminal: Terminal) -> Result<TerminalCommand, Error> {
-    let binary = home::installed(home)?;
+pub fn terminal(root: &Path, terminal: Terminal) -> Result<TerminalCommand, Error> {
+    let binary = me()?;
     let path = home::transcript(root, &terminal.external_id)?;
     let summary = transcript::summary(&path).map_err(|e| unreadable(&path, &e))?;
     let cwd = summary.cwd.unwrap_or(terminal.cwd);
     let cwd = quoted(&cwd.to_string_lossy());
     let command = format!(
-        "cd {cwd} && {} turn --session {} --cwd {cwd}",
+        "cd {cwd} && {} {} --session {} --cwd {cwd}",
         quoted(&binary.to_string_lossy()),
+        turn::MODE,
         quoted(&terminal.external_id)
     );
     let mut line = "Type your words, then Ctrl-D: the canvas runs one turn on them.".to_owned();
